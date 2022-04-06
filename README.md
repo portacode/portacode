@@ -1,8 +1,8 @@
-- 👋 Hi, I’m @portacode
-- 👀 I’m interested in making life easier by building awsome projects
-- 🌱 I’m currently learning more about leadership and entrepreneurship...
-- 💞️ I’m looking to meet nice and smart people that I can learn a lot from, and maybe make friends...
-- 📫 Feel free to reach me out at me@portacode.com...
+👋 Hi, 
+
+This is the official account for the @portacode project
+
+📫 Feel free to reach us out at support@portacode.com...
 
 <!---
 portacode/portacode is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
