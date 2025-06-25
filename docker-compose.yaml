@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  portacode-gateway:
+    build:
+      context: .
+      dockerfile: demo_server/Dockerfile
+    container_name: portacode-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./demo_server/users.json:/app/users.json:ro 

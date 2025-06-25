@@ -14,6 +14,7 @@ from .keypair import get_or_create_keypair, fingerprint_public_key
 from .connection.client import ConnectionManager, run_until_interrupt
 
 GATEWAY_URL = "wss://portacode.com/gateway"
+GATEWAY_ENV = "PORTACODE_GATEWAY"
 
 
 @click.group()
@@ -22,8 +23,9 @@ def cli() -> None:
 
 
 @cli.command()
+@click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--detach", "detach", "-d", is_flag=True, help="Run connection in background")
-def connect(detach: bool) -> None:  # noqa: D401 – Click callback
+def connect(gateway: str | None, detach: bool) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
     # 1. Ensure only a single connection per user
@@ -50,6 +52,9 @@ def connect(detach: bool) -> None:  # noqa: D401 – Click callback
             # Stale pidfile
             pid_file.unlink(missing_ok=True)
 
+    # Determine gateway URL
+    target_gateway = gateway or os.getenv(GATEWAY_ENV) or GATEWAY_URL
+
     # 2. Load or create keypair
     keypair = get_or_create_keypair()
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
@@ -69,7 +74,7 @@ def connect(detach: bool) -> None:  # noqa: D401 – Click callback
     # 3. Start connection manager
     if detach:
         click.echo("Establishing connection in the background…")
-        p = Process(target=_run_connection_forever, args=(GATEWAY_URL, keypair, pid_file))
+        p = Process(target=_run_connection_forever, args=(target_gateway, keypair, pid_file))
         p.daemon = False  # We want it to live beyond parent process on POSIX; on Windows it's anyway independent
         p.start()
         click.echo(click.style(f"Background process PID: {p.pid}", fg="green"))
@@ -79,7 +84,7 @@ def connect(detach: bool) -> None:  # noqa: D401 – Click callback
     pid_file.write_text(str(os.getpid()))
 
     async def _main() -> None:
-        mgr = ConnectionManager(GATEWAY_URL, keypair)
+        mgr = ConnectionManager(target_gateway, keypair)
         await run_until_interrupt(mgr)
 
     try:
