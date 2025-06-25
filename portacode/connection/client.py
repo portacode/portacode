@@ -88,9 +88,29 @@ class ConnectionManager:
 
 
 async def run_until_interrupt(manager: ConnectionManager) -> None:
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        asyncio.get_event_loop().add_signal_handler(sig, lambda: asyncio.create_task(manager.stop()))
+    stop_event = asyncio.Event()
+
+    def _stop(*_):
+        # TODO: Add cleanup logic here (e.g., close sockets, remove PID files, flush logs)
+        stop_event.set()
+
+    # Register SIGTERM handler (works on Unix, ignored on Windows)
+    try:
+        signal.signal(signal.SIGTERM, _stop)
+    except (AttributeError, ValueError):
+        pass  # Not available on some platforms
+
+    # Register SIGINT handler (Ctrl+C)
+    try:
+        signal.signal(signal.SIGINT, _stop)
+    except (AttributeError, ValueError):
+        pass
 
     await manager.start()
-    # Wait until the manager stops
-    await manager._task 
+    try:
+        await stop_event.wait()
+    except KeyboardInterrupt:
+        # TODO: Add cleanup logic here (e.g., close sockets, remove PID files, flush logs)
+        pass
+    await manager.stop()
+    # TODO: Add any final cleanup logic here (e.g., remove PID files, flush logs) 
