@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 import json
 import base64
+import sys
 
 import websockets
 from websockets import WebSocketClientProtocol
@@ -66,7 +67,6 @@ class ConnectionManager:
                         logger.error(str(exc))
                         print(f"\nERROR: {exc}\n", flush=True)
                         # Exit on authentication error
-                        import sys
                         sys.exit(1)
                     await self._listen()
             except (OSError, websockets.WebSocketException) as exc:
@@ -97,13 +97,32 @@ class ConnectionManager:
         status = await self.websocket.recv()
         if status != "ok":
             raise RuntimeError(f"Gateway rejected authentication: {status}")
-        logger.info("Successfully authenticated with the gateway.")
+        # Print success message in green and show close instructions
+        try:
+            import click
+            click.echo(click.style("Successfully authenticated with the gateway.", fg="green"))
+            if sys.platform == "darwin":
+                click.echo(click.style("Press Cmd+C to close the connection.", fg="cyan"))
+            else:
+                click.echo(click.style("Press Ctrl+C to close the connection.", fg="cyan"))
+        except ImportError:
+            print("Successfully authenticated with the gateway.")
+            if sys.platform == "darwin":
+                print("Press Cmd+C to close the connection.")
+            else:
+                print("Press Ctrl+C to close the connection.")
 
     async def _listen(self) -> None:
         assert self.websocket is not None, "WebSocket not ready"
-        async for message in self.websocket:
-            if self.mux:
-                await self.mux.on_raw_message(message)
+        while not self._stop_event.is_set():
+            try:
+                message = await asyncio.wait_for(self.websocket.recv(), timeout=1.0)
+                if self.mux:
+                    await self.mux.on_raw_message(message)
+            except asyncio.TimeoutError:
+                continue
+            except websockets.ConnectionClosed:
+                break
 
 
 async def run_until_interrupt(manager: ConnectionManager) -> None:
