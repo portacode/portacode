@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 
 import click
+import pyperclip
 
 from .data import get_pid_file, is_process_running
 from .keypair import get_or_create_keypair, fingerprint_public_key
@@ -59,14 +60,20 @@ def connect(gateway: str | None, detach: bool) -> None:  # noqa: D401 – Click 
     keypair = get_or_create_keypair()
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
 
+    pubkey_b64 = keypair.public_key_der_b64()
     click.echo()
     click.echo(click.style("✔ Generated / loaded RSA keypair", fg="green"))
 
     click.echo()
     click.echo(click.style("Public key (copy & paste to your Portacode account):", bold=True))
     click.echo("-" * 60)
-    click.echo(keypair.public_key_pem.decode())
+    click.echo(pubkey_b64)
     click.echo("-" * 60)
+    try:
+        pyperclip.copy(pubkey_b64)
+        click.echo(click.style("(Copied to clipboard!)", fg="cyan"))
+    except Exception:
+        click.echo(click.style("(Could not copy to clipboard. Please copy manually.)", fg="yellow"))
     click.echo(f"Fingerprint: {fingerprint}")
     click.echo()
     click.prompt("Press <enter> once the key is added", default="", show_default=False)

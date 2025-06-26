@@ -5,6 +5,8 @@ import logging
 import signal
 from pathlib import Path
 from typing import Optional
+import json
+import base64
 
 import websockets
 from websockets import WebSocketClientProtocol
@@ -58,7 +60,14 @@ class ConnectionManager:
                 async with websockets.connect(self.gateway_url) as ws:
                     self.websocket = ws
                     self.mux = Multiplexer(self.websocket.send)
-                    await self._authenticate()
+                    try:
+                        await self._authenticate()
+                    except Exception as exc:
+                        logger.error(str(exc))
+                        print(f"\nERROR: {exc}\n", flush=True)
+                        # Exit on authentication error
+                        import sys
+                        sys.exit(1)
                     await self._listen()
             except (OSError, websockets.WebSocketException) as exc:
                 logger.warning("Connection error: %s", exc)
@@ -68,16 +77,26 @@ class ConnectionManager:
                     await asyncio.sleep(self.reconnect_delay)
 
     async def _authenticate(self) -> None:
-        """Send authentication frame containing the user's public key."""
+        """Challenge-response authentication with the gateway using base64 DER public key."""
         assert self.websocket is not None, "WebSocket not ready"
-        await self.websocket.send(self.keypair.public_key_pem.decode())
-        logger.info("Authentication frame sent; awaiting confirmation…")
-        # For the moment we just wait for a confirmation message. This depends on
-        # the actual server implementation. We'll assume the server replies with
-        # a simple text message "ok".
+        # Step 1: Send public key as base64 DER
+        await self.websocket.send(self.keypair.public_key_der_b64())
+        # Step 2: Receive challenge or error
         response = await self.websocket.recv()
-        if response != "ok":  # naive check
+        try:
+            data = json.loads(response)
+            challenge = data["challenge"]
+        except Exception:
+            # Not a challenge, must be an error
             raise RuntimeError(f"Gateway rejected authentication: {response}")
+        # Step 3: Sign challenge and send signature
+        signature = self.keypair.sign_challenge(challenge)
+        signature_b64 = base64.b64encode(signature).decode()
+        await self.websocket.send(json.dumps({"signature": signature_b64}))
+        # Step 4: Receive final status
+        status = await self.websocket.recv()
+        if status != "ok":
+            raise RuntimeError(f"Gateway rejected authentication: {status}")
         logger.info("Successfully authenticated with the gateway.")
 
     async def _listen(self) -> None:
