@@ -192,7 +192,8 @@ class TerminalManager:
             try:
                 if cmd == "terminal_start":
                     shell = message.get("shell")
-                    await self._cmd_terminal_start(shell=shell)
+                    cwd = message.get("cwd")
+                    await self._cmd_terminal_start(shell=shell, cwd=cwd)
                 elif cmd == "terminal_send":
                     await self._cmd_terminal_send(message)
                 elif cmd == "terminal_stop":
@@ -211,7 +212,7 @@ class TerminalManager:
     # Individual command handlers
     # ------------------------------------------------------------------
 
-    async def _cmd_terminal_start(self, *, shell: Optional[str]) -> None:
+    async def _cmd_terminal_start(self, *, shell: Optional[str], cwd: Optional[str] = None) -> None:
         term_id = uuid.uuid4().hex
         channel_id = self._allocate_channel_id()
         channel = self.mux.get_channel(channel_id)
@@ -228,7 +229,7 @@ class TerminalManager:
                 await self._send_error("pywinpty not installed on client")
                 return
 
-            pty_proc = PtyProcess.spawn(shell)
+            pty_proc = PtyProcess.spawn(shell, cwd=cwd or None)
 
             class _WinPTYProxy:
                 """Expose .pid and .returncode for compatibility with Linux branch."""
@@ -324,6 +325,7 @@ class TerminalManager:
                     stdout=slave_fd,
                     stderr=slave_fd,
                     preexec_fn=os.setsid,
+                    cwd=cwd,
                 )
                 # Wrap master_fd into a StreamReader
                 loop = asyncio.get_running_loop()
@@ -341,6 +343,7 @@ class TerminalManager:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    cwd=cwd,
                 )
             session = TerminalSession(term_id, proc, channel)
             self._sessions[term_id] = session
