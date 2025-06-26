@@ -22,6 +22,7 @@ setup(
         "cryptography>=41.0",
         "websockets>=12.0",
         "pyperclip>=1.8",
+        "psutil>=5.9",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],

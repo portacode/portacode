@@ -61,6 +61,14 @@ class ConnectionManager:
                 async with websockets.connect(self.gateway_url) as ws:
                     self.websocket = ws
                     self.mux = Multiplexer(self.websocket.send)
+                    # ------------------------------------------------------------------
+                    # Initialise terminal/control management (channel 0)
+                    # ------------------------------------------------------------------
+                    try:
+                        from .terminal import TerminalManager  # local import to avoid heavy deps on startup
+                        self._terminal_manager = TerminalManager(self.mux)  # noqa: pylint=attribute-defined-outside-init
+                    except Exception as exc:
+                        logger.warning("TerminalManager unavailable: %s", exc)
                     try:
                         await self._authenticate()
                     except Exception as exc:

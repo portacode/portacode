@@ -6,6 +6,7 @@ import sys
 from multiprocessing import Process
 from pathlib import Path
 import signal
+import json
 
 import click
 import pyperclip
@@ -126,4 +127,66 @@ def _terminate_process(pid: int):
         try:
             os.kill(pid, signal.SIGTERM)  # type: ignore[name-defined]
         except OSError:
-            pass 
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Debug helpers – NOT intended for production use
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("message", nargs=1)
+@click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
+def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – Click callback
+    """Send a raw JSON *control* message on channel 0 and print replies.
+
+    Example::
+
+        portacode send-control '{"cmd": "system_info"}'
+
+    The command opens a short-lived connection, authenticates, sends the
+    control message and waits up to 5 seconds for responses which are then
+    pretty-printed to stdout.
+    """
+
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError as exc:
+        raise click.BadParameter(f"Invalid JSON: {exc}") from exc
+
+    target_gateway = gateway or os.getenv(GATEWAY_ENV) or GATEWAY_URL
+
+    async def _run() -> None:
+        keypair = get_or_create_keypair()
+        mgr = ConnectionManager(target_gateway, keypair)
+        await mgr.start()
+
+        # Wait until mux is available & authenticated (rudimentary – 2s timeout)
+        for _ in range(20):
+            if mgr.mux is not None:
+                break
+            await asyncio.sleep(0.1)
+        if mgr.mux is None:
+            click.echo("Failed to initialise connection – aborting.")
+            await mgr.stop()
+            return
+
+        # Send control frame on channel 0
+        ctl = mgr.mux.get_channel(0)
+        await ctl.send(payload)
+
+        # Print replies for a short time
+        try:
+            with click.progressbar(length=50, label="Waiting for replies") as bar:
+                for _ in range(50):
+                    try:
+                        reply = await asyncio.wait_for(ctl.recv(), timeout=0.1)
+                        click.echo(click.style("< " + json.dumps(reply, indent=2), fg="cyan"))
+                    except asyncio.TimeoutError:
+                        pass
+                    bar.update(1)
+        finally:
+            await mgr.stop()
+
+    asyncio.run(_run()) 
