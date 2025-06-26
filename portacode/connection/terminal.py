@@ -112,8 +112,7 @@ class TerminalSession:
                         break
                     # Send *raw* text – no JSON envelope, keep escapes intact.
                     text = data.decode(errors="ignore")
-                    import logging
-                    logging.getLogger("portacode.terminal").info(f"[MUX] Terminal {self.id} output: {text!r}")
+                    logging.getLogger("portacode.terminal").debug(f"[MUX] Terminal {self.id} output: {text!r}")
                     self._buffer.append(text)
                     try:
                         await self.channel.send(text)
@@ -273,7 +272,7 @@ class TerminalManager:
                                     text = data.decode(errors="ignore")
                                 else:
                                     text = data
-                                logging.getLogger("portacode.terminal").info(
+                                logging.getLogger("portacode.terminal").debug(
                                     f"[MUX] Terminal {self.id} output: {text!r}"
                                 )
                                 self._buffer.append(text)

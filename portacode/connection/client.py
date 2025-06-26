@@ -29,12 +29,15 @@ class ConnectionManager:
         User's public/private keypair used for authentication.
     reconnect_delay: float
         Seconds to wait before attempting to reconnect after an unexpected drop.
+    max_retries: int
+        Maximum number of reconnect attempts before giving up.
     """
 
-    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 5.0):
+    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = 10):
         self.gateway_url = gateway_url
         self.keypair = keypair
         self.reconnect_delay = reconnect_delay
+        self.max_retries = max_retries
 
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
@@ -55,12 +58,21 @@ class ConnectionManager:
             await self._task
 
     async def _runner(self) -> None:
+        attempt = 0
         while not self._stop_event.is_set():
             try:
+                if attempt:
+                    delay = min(self.reconnect_delay * 2 ** (attempt - 1), 30)
+                    logger.warning("Reconnecting in %.1f s (attempt %d/%d)…", delay, attempt, self.max_retries)
+                    await asyncio.sleep(delay)
                 logger.info("Connecting to gateway at %s", self.gateway_url)
                 async with websockets.connect(self.gateway_url) as ws:
+                    # Reset attempt counter after successful connection
+                    attempt = 0
+
                     self.websocket = ws
                     self.mux = Multiplexer(self.websocket.send)
+
                     # ------------------------------------------------------------------
                     # Initialise terminal/control management (channel 0)
                     # ------------------------------------------------------------------
@@ -69,23 +81,21 @@ class ConnectionManager:
                         self._terminal_manager = TerminalManager(self.mux)  # noqa: pylint=attribute-defined-outside-init
                     except Exception as exc:
                         logger.warning("TerminalManager unavailable: %s", exc)
-                    try:
-                        await self._authenticate()
-                    except Exception as exc:
-                        try:
-                            import click
-                            click.echo(click.style(f"ERROR: {exc}", fg="red"))
-                        except ImportError:
-                            print(f"ERROR: {exc}")
-                        # Exit on authentication error, do not reconnect
-                        sys.exit(1)
+
+                    # Authenticate – abort loop on auth failures
+                    await self._authenticate()
+
+                    # Start main receive loop until closed or stop requested
                     await self._listen()
             except (OSError, websockets.WebSocketException) as exc:
+                attempt += 1
                 logger.warning("Connection error: %s", exc)
-            finally:
-                if not self._stop_event.is_set():
-                    # Only reconnect on network errors, not auth errors
+                if attempt > self.max_retries:
+                    logger.error("Maximum reconnect attempts reached, giving up.")
                     break
+            except Exception as exc:
+                logger.exception("Fatal error in connection manager: %s", exc)
+                break
 
     async def _authenticate(self) -> None:
         """Challenge-response authentication with the gateway using base64 DER public key."""
@@ -134,6 +144,11 @@ class ConnectionManager:
                 continue
             except websockets.ConnectionClosed:
                 break
+        # Exit listen loop, trigger closure
+        try:
+            await self.websocket.close()
+        except Exception:
+            pass
 
 
 async def run_until_interrupt(manager: ConnectionManager) -> None:
