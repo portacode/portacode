@@ -74,6 +74,7 @@ import uuid
 from asyncio.subprocess import Process
 from pathlib import Path
 from typing import Any, Dict, Optional
+from collections import deque
 
 import psutil  # type: ignore
 
@@ -97,6 +98,7 @@ class TerminalSession:
         self.proc = proc
         self.channel = channel
         self._reader_task: Optional[asyncio.Task[None]] = None
+        self._buffer: deque[str] = deque(maxlen=400)  # keep last ~400 lines of raw output
 
     async def start_io_forwarding(self) -> None:
         """Spawn background task that copies stdout/stderr to the channel."""
@@ -109,8 +111,12 @@ class TerminalSession:
                     if not data:
                         break
                     # Send *raw* text – no JSON envelope, keep escapes intact.
+                    text = data.decode(errors="ignore")
+                    import logging
+                    logging.getLogger("portacode.terminal").info(f"[MUX] Terminal {self.id} output: {text!r}")
+                    self._buffer.append(text)
                     try:
-                        await self.channel.send(data.decode(errors="ignore"))
+                        await self.channel.send(text)
                     except Exception as exc:
                         logger.warning("Failed to forward terminal output: %s", exc)
                         break
@@ -137,6 +143,14 @@ class TerminalSession:
         if self._reader_task:
             await self._reader_task
         await self.proc.wait()
+
+    # ------------------------------------------------------------------
+    # Introspection helpers
+    # ------------------------------------------------------------------
+
+    def snapshot_buffer(self) -> str:
+        """Return concatenated last buffer contents suitable for UI."""
+        return "".join(self._buffer)
 
 
 class TerminalManager:
@@ -171,6 +185,9 @@ class TerminalManager:
                 continue
             cmd = message.get("cmd")
             if not cmd:
+                # Ignore frames that are *events* coming from the remote side
+                if message.get("event"):
+                    continue
                 logger.warning("Missing 'cmd' in control frame: %s", message)
                 continue
             try:
@@ -204,14 +221,99 @@ class TerminalManager:
             shell = os.getenv("SHELL") if not _IS_WINDOWS else os.getenv("COMSPEC", "cmd.exe")
         logger.info("Launching terminal %s using shell=%s on channel=%d", term_id, shell, channel_id)
         if _IS_WINDOWS:
-            # Windows: simple subprocess with pipes
-            proc = await asyncio.create_subprocess_exec(
-                shell,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                creationflags=0x08000000 if hasattr(asyncio.subprocess, "CREATE_NO_WINDOW") else 0,
+            # Windows: use ConPTY via pywinpty for full TTY semantics
+            try:
+                from winpty import PtyProcess  # type: ignore
+            except ImportError as exc:
+                logger.error("winpty (pywinpty) not found – please install pywinpty: %s", exc)
+                await self._send_error("pywinpty not installed on client")
+                return
+
+            pty_proc = PtyProcess.spawn(shell)
+
+            class _WinPTYProxy:
+                """Expose .pid and .returncode for compatibility with Linux branch."""
+
+                def __init__(self, pty):
+                    self._pty = pty
+
+                @property
+                def pid(self):
+                    return self._pty.pid
+
+                @property
+                def returncode(self):
+                    # None while running, else exitstatus
+                    return None if self._pty.isalive() else self._pty.exitstatus
+
+                async def wait(self):
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self._pty.wait)
+
+            class WindowsTerminalSession(TerminalSession):
+                """Terminal session backed by a Windows ConPTY."""
+
+                def __init__(self, session_id: str, pty, channel: Channel):
+                    super().__init__(session_id, _WinPTYProxy(pty), channel)
+                    self._pty = pty
+
+                async def start_io_forwarding(self) -> None:
+                    loop = asyncio.get_running_loop()
+
+                    async def _pump() -> None:
+                        try:
+                            while True:
+                                data = await loop.run_in_executor(None, self._pty.read, 1024)
+                                if not data:
+                                    if not self._pty.isalive():
+                                        break
+                                    await asyncio.sleep(0.05)
+                                    continue
+                                if isinstance(data, bytes):
+                                    text = data.decode(errors="ignore")
+                                else:
+                                    text = data
+                                logging.getLogger("portacode.terminal").info(
+                                    f"[MUX] Terminal {self.id} output: {text!r}"
+                                )
+                                self._buffer.append(text)
+                                try:
+                                    await self.channel.send(text)
+                                except Exception as exc:
+                                    logger.warning("Failed to forward terminal output: %s", exc)
+                                    break
+                        finally:
+                            if self._pty and self._pty.isalive():
+                                self._pty.kill()
+
+                    self._reader_task = asyncio.create_task(_pump())
+
+                async def write(self, data: str) -> None:
+                    loop = asyncio.get_running_loop()
+                    try:
+                        await loop.run_in_executor(None, self._pty.write, data)
+                    except Exception as exc:
+                        logger.warning("Failed to write to terminal %s: %s", self.id, exc)
+
+                async def stop(self) -> None:
+                    if self._pty.isalive():
+                        self._pty.kill()
+                    if self._reader_task:
+                        await self._reader_task
+
+            session = WindowsTerminalSession(term_id, pty_proc, channel)
+            self._sessions[term_id] = session
+            await session.start_io_forwarding()
+            await self._control_channel.send(
+                {
+                    "event": "terminal_started",
+                    "terminal_id": term_id,
+                    "channel": channel_id,
+                }
             )
+
+            asyncio.create_task(self._watch_process_exit(session))
+            return  # windows branch done
         else:
             # Unix: try real PTY for proper TTY semantics
             try:
@@ -241,19 +343,19 @@ class TerminalManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-        session = TerminalSession(term_id, proc, channel)
-        self._sessions[term_id] = session
-        await session.start_io_forwarding()
-        await self._control_channel.send(
-            {
-                "event": "terminal_started",
-                "terminal_id": term_id,
-                "channel": channel_id,
-            }
-        )
+            session = TerminalSession(term_id, proc, channel)
+            self._sessions[term_id] = session
+            await session.start_io_forwarding()
+            await self._control_channel.send(
+                {
+                    "event": "terminal_started",
+                    "terminal_id": term_id,
+                    "channel": channel_id,
+                }
+            )
 
-        # Also create background watcher for process exit
-        asyncio.create_task(self._watch_process_exit(session))
+            # Also create background watcher for process exit
+            asyncio.create_task(self._watch_process_exit(session))
 
     async def _cmd_terminal_send(self, msg: Dict[str, Any]) -> None:
         term_id = msg.get("terminal_id")
@@ -280,6 +382,7 @@ class TerminalManager:
                 "channel": s.channel.id,
                 "pid": s.proc.pid,
                 "returncode": s.proc.returncode,
+                "buffer": s.snapshot_buffer(),
             }
             for s in self._sessions.values()
         ]

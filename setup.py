@@ -23,6 +23,8 @@ setup(
         "websockets>=12.0",
         "pyperclip>=1.8",
         "psutil>=5.9",
+        "pyte>=0.8",
+        "pywinpty>=2.0; platform_system=='Windows'",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],
