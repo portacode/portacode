@@ -1,12 +1,45 @@
 version: "3.9"
 services:
+  db:
+    image: postgres:15
+    container_name: portacode-db
+    restart: unless-stopped
+    env_file:
+      - main.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  django:
+    build:
+      context: ./demo_server/portacode_django
+      dockerfile: Dockerfile
+    container_name: portacode-django
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8001"]
+    env_file:
+      - main.env
+    depends_on:
+      - db
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./demo_server/portacode_django:/app
+
   portacode-gateway:
     build:
-      context: .
-      dockerfile: demo_server/Dockerfile
+      context: ./demo_server
+      dockerfile: Dockerfile
     container_name: portacode-gateway
     restart: unless-stopped
+    env_file:
+      - main.env
+    depends_on:
+      - db
     ports:
       - "8000:8000"
     volumes:
-      - ./demo_server/users.json:/app/users.json:ro 
+      - ./demo_server:/app
+
+volumes:
+  pgdata: 
