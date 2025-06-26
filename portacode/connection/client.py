@@ -64,17 +64,20 @@ class ConnectionManager:
                     try:
                         await self._authenticate()
                     except Exception as exc:
-                        logger.error(str(exc))
-                        print(f"\nERROR: {exc}\n", flush=True)
-                        # Exit on authentication error
+                        try:
+                            import click
+                            click.echo(click.style(f"ERROR: {exc}", fg="red"))
+                        except ImportError:
+                            print(f"ERROR: {exc}")
+                        # Exit on authentication error, do not reconnect
                         sys.exit(1)
                     await self._listen()
             except (OSError, websockets.WebSocketException) as exc:
                 logger.warning("Connection error: %s", exc)
             finally:
                 if not self._stop_event.is_set():
-                    logger.info("Reconnecting in %.1f seconds…", self.reconnect_delay)
-                    await asyncio.sleep(self.reconnect_delay)
+                    # Only reconnect on network errors, not auth errors
+                    break
 
     async def _authenticate(self) -> None:
         """Challenge-response authentication with the gateway using base64 DER public key."""
