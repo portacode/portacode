@@ -16,7 +16,7 @@ services:
       context: ./demo_server/portacode_django
       dockerfile: Dockerfile
     container_name: portacode-django
-    command: ["python", "manage.py", "runserver", "0.0.0.0:8001"]
+    command: ["daphne", "portacode_django.asgi:application", "-b", "0.0.0.0", "-p", "8001"]
     env_file:
       - main.env
     depends_on:
@@ -40,6 +40,13 @@ services:
       - "8000:8000"
     volumes:
       - ./demo_server:/app
+
+  redis:
+    image: redis:7-alpine
+    container_name: portacode-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
 
 volumes:
   pgdata: 
