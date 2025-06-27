@@ -8,7 +8,8 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name=PACKAGE_NAME,
-    version="0.1.0",
+    use_scm_version=True,
+    setup_requires=['setuptools_scm'],
     description="Portacode CLI client and SDK",
     long_description=README,
     long_description_content_type="text/markdown",
