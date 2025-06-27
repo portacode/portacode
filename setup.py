@@ -12,9 +12,9 @@ setup(
     description="Portacode CLI client and SDK",
     long_description=README,
     long_description_content_type="text/markdown",
-    author="Portacode Team",
-    url="https://github.com/portacode/portacode-client",
-    packages=find_packages(exclude=("tests",)),
+    author="Meena Erian",
+    url="https://github.com/portacode/portacode",
+    packages=find_packages(exclude=("tests", "server")),
     python_requires=">=3.8",
     install_requires=[
         "click>=8.0",
