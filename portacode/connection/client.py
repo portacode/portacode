@@ -24,7 +24,7 @@ class ConnectionManager:
     Parameters
     ----------
     gateway_url: str
-        WebSocket URL, e.g. ``wss://portacode.com/gateway``
+        WebSocket URL, e.g. ``wss://device.portacode.com/gateway``
     keypair: KeyPair
         User's public/private keypair used for authentication.
     reconnect_delay: float

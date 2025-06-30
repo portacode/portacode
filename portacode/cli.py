@@ -15,7 +15,7 @@ from .data import get_pid_file, is_process_running
 from .keypair import get_or_create_keypair, fingerprint_public_key
 from .connection.client import ConnectionManager, run_until_interrupt
 
-GATEWAY_URL = "wss://portacode.com/gateway"
+GATEWAY_URL = "wss://device.portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
 
 
