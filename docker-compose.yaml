@@ -17,7 +17,7 @@ services:
       dockerfile: Dockerfile
     container_name: portacode-django
     restart: unless-stopped
-    command: ["daphne", "portacode_django.asgi:application", "-b", "0.0.0.0", "-p", "8001"]
+    command: ["bash", "-c", "python manage.py collectstatic --noinput && daphne portacode_django.asgi:application -b 0.0.0.0 -p 8001"]
     env_file:
       - main.env
     depends_on:
