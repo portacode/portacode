@@ -73,17 +73,20 @@ class ConnectionManager:
                     self.websocket = ws
                     self.mux = Multiplexer(self.websocket.send)
 
+                    # Authenticate – abort loop on auth failures
+                    await self._authenticate()
+
                     # ------------------------------------------------------------------
-                    # Initialise terminal/control management (channel 0)
+                    # Initialise or re-attach terminal/control management (channel 0)
                     # ------------------------------------------------------------------
                     try:
                         from .terminal import TerminalManager  # local import to avoid heavy deps on startup
-                        self._terminal_manager = TerminalManager(self.mux)  # noqa: pylint=attribute-defined-outside-init
+                        if getattr(self, "_terminal_manager", None):
+                            self._terminal_manager.attach_mux(self.mux)
+                        else:
+                            self._terminal_manager = TerminalManager(self.mux)  # noqa: pylint=attribute-defined-outside-init
                     except Exception as exc:
                         logger.warning("TerminalManager unavailable: %s", exc)
-
-                    # Authenticate – abort loop on auth failures
-                    await self._authenticate()
 
                     # Start main receive loop until closed or stop requested
                     await self._listen()

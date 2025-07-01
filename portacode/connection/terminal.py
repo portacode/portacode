@@ -117,12 +117,15 @@ class TerminalSession:
                     try:
                         await self.channel.send(text)
                     except Exception as exc:
+                        # Likely connection dropped – keep process running and retry later
                         logger.warning("Failed to forward terminal output: %s", exc)
-                        break
+                        await asyncio.sleep(0.5)
+                        continue
             finally:
                 # Ensure process gets reaped if reader exits unexpectedly.
                 if self.proc and self.proc.returncode is None:
-                    self.proc.kill()
+                    # Only kill if explicitly stopped elsewhere; keep alive across reconnects
+                    pass
 
         self._reader_task = asyncio.create_task(_pump())
 
@@ -161,8 +164,49 @@ class TerminalManager:
         self.mux = mux
         self._sessions: Dict[str, TerminalSession] = {}
         self._next_channel = 100  # channel ids >=100 reserved for terminals
-        # Start control-loop task
+        # Control channel & loop
+        self._set_mux(mux)
+
+    # ------------------------------------------------------------------
+    # Mux attach/detach helpers (for reconnection resilience)
+    # ------------------------------------------------------------------
+
+    def attach_mux(self, mux: Multiplexer) -> None:
+        """Attach a *new* Multiplexer after a reconnect, re-binding channels."""
+        self._set_mux(mux)
+
+        # Re-map existing terminal sessions to fresh channels
+        session_payloads = []
+        highest_cid = self._next_channel
+        for sess in self._sessions.values():
+            cid = sess.channel.id
+            # Re-bind to same channel id on the new mux
+            sess.channel = self.mux.get_channel(cid)
+            session_payloads.append({
+                "terminal_id": sess.id,
+                "channel": cid,
+            })
+            highest_cid = max(highest_cid, cid + 1)
+
+        # Ensure future allocations don't clash with existing ones
+        self._next_channel = max(self._next_channel, highest_cid)
+
+        if session_payloads:
+            # Send consolidated list so dashboard can reconcile state
+            asyncio.create_task(self._control_channel.send({
+                "event": "terminal_list",
+                "sessions": session_payloads,
+            }))
+
+    def _set_mux(self, mux: Multiplexer) -> None:
+        self.mux = mux
         self._control_channel = self.mux.get_channel(self.CONTROL_CHANNEL_ID)
+        # Start (or restart) control loop task
+        if getattr(self, "_ctl_task", None):
+            try:
+                self._ctl_task.cancel()
+            except Exception:
+                pass
         self._ctl_task = asyncio.create_task(self._control_loop())
 
     # ---------------------------------------------------------------------
@@ -281,7 +325,8 @@ class TerminalManager:
                                     await self.channel.send(text)
                                 except Exception as exc:
                                     logger.warning("Failed to forward terminal output: %s", exc)
-                                    break
+                                    await asyncio.sleep(0.5)
+                                    continue
                         finally:
                             if self._pty and self._pty.isalive():
                                 self._pty.kill()
