@@ -27,7 +27,9 @@ def cli() -> None:
 @cli.command()
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--detach", "detach", "-d", is_flag=True, help="Run connection in background")
-def connect(gateway: str | None, detach: bool) -> None:  # noqa: D401 – Click callback
+@click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
+              help="Skip interactive prompts (used by background service)")
+def connect(gateway: str | None, detach: bool, non_interactive: bool) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
     # 1. Ensure only a single connection per user
@@ -62,25 +64,26 @@ def connect(gateway: str | None, detach: bool) -> None:  # noqa: D401 – Click 
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
 
     pubkey_b64 = keypair.public_key_der_b64()
-    click.echo()
-    click.echo(click.style("✔ Generated / loaded RSA keypair", fg="green"))
+    if not non_interactive:
+        click.echo()
+        click.echo(click.style("✔ Generated / loaded RSA keypair", fg="green"))
 
-    click.echo()
-    click.echo(click.style("Public key (copy & paste to your Portacode account):", bold=True))
-    click.echo("-" * 60)
-    click.echo(pubkey_b64)
-    click.echo("-" * 60)
-    try:
-        pyperclip.copy(pubkey_b64)
-        click.echo(click.style("(Copied to clipboard!)", fg="cyan"))
-    except Exception:
-        click.echo(click.style("(Could not copy to clipboard. Please copy manually.)", fg="yellow"))
-    click.echo(f"Fingerprint: {fingerprint}")
-    click.echo()
-    click.prompt("Press <enter> once the key is added", default="", show_default=False)
+        click.echo()
+        click.echo(click.style("Public key (copy & paste to your Portacode account):", bold=True))
+        click.echo("-" * 60)
+        click.echo(pubkey_b64)
+        click.echo("-" * 60)
+        try:
+            pyperclip.copy(pubkey_b64)
+            click.echo(click.style("(Copied to clipboard!)", fg="cyan"))
+        except Exception:
+            click.echo(click.style("(Could not copy to clipboard. Please copy manually.)", fg="yellow"))
+        click.echo(f"Fingerprint: {fingerprint}")
+        click.echo()
+        click.prompt("Press <enter> once the key is added", default="", show_default=False)
 
     # 3. Start connection manager
-    if detach:
+    if detach and not non_interactive:
         click.echo("Establishing connection in the background…")
         p = Process(target=_run_connection_forever, args=(target_gateway, keypair, pid_file))
         p.daemon = False  # We want it to live beyond parent process on POSIX; on Windows it's anyway independent
@@ -89,7 +92,8 @@ def connect(gateway: str | None, detach: bool) -> None:  # noqa: D401 – Click 
         return
 
     # Foreground mode → run in current event-loop
-    pid_file.write_text(str(os.getpid()))
+    if not detach:
+        pid_file.write_text(str(os.getpid()))
 
     async def _main() -> None:
         mgr = ConnectionManager(target_gateway, keypair)
@@ -189,4 +193,86 @@ def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – C
         finally:
             await mgr.stop()
 
-    asyncio.run(_run()) 
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Service sub-commands (install/uninstall/start/stop/status)
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def service() -> None:  # noqa: D401 – Click callback
+    """Manage background *service* that auto-runs ``portacode connect`` on login."""
+
+
+@service.command("install")
+def service_install() -> None:  # noqa: D401
+    """Install + enable the background service and start it now."""
+    from .service import get_manager
+
+    mgr = get_manager()
+    click.echo("Installing Portacode background service…")
+    try:
+        mgr.install()
+        click.echo(click.style("✔ Service installed and started", fg="green"))
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red"))
+
+
+@service.command("uninstall")
+def service_uninstall() -> None:  # noqa: D401
+    """Stop + remove the background service."""
+    from .service import get_manager
+
+    mgr = get_manager()
+    click.echo("Uninstalling Portacode background service…")
+    try:
+        mgr.uninstall()
+        click.echo(click.style("✔ Service removed", fg="green"))
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red"))
+
+
+@service.command("start")
+def service_start() -> None:  # noqa: D401
+    """Start the service if installed."""
+    from .service import get_manager
+
+    mgr = get_manager()
+    try:
+        mgr.start()
+        click.echo(click.style("Service started", fg="green"))
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red"))
+
+
+@service.command("stop")
+def service_stop() -> None:  # noqa: D401
+    """Stop the service if running."""
+    from .service import get_manager
+
+    mgr = get_manager()
+    try:
+        mgr.stop()
+        click.echo(click.style("Service stopped", fg="green"))
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red"))
+
+
+@service.command("status")
+@click.option("--verbose", "verbose", "-v", is_flag=True, help="Show detailed service status info")
+def service_status(verbose: bool) -> None:  # noqa: D401
+    """Show current status (running/loaded). Pass -v for system output."""
+    from .service import get_manager
+
+    mgr = get_manager()
+    try:
+        st = mgr.status()
+        color = "green" if st in {"active", "running"} else "red" if st in {"failed", "inactive"} else "yellow"
+        click.echo(click.style(f"Service status: {st}", fg=color))
+        if verbose and hasattr(mgr, "status_verbose"):
+            click.echo("\n--- system output ---")
+            click.echo(mgr.status_verbose())
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red")) 
