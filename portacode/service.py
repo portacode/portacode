@@ -194,32 +194,73 @@ if sys.platform.startswith("win"):
 class _WindowsTask:
     NAME = "PortacodeConnect"
 
-    def _run(self, cmd: str) -> subprocess.CompletedProcess[str]:
+    def __init__(self) -> None:
+        from pathlib import Path as _P
+        self._home = _P.home()
+        self._script_path = self._home / ".local" / "share" / "portacode" / "connect_service.cmd"
+
+    # ------------------------------------------------------------------
+
+    def _run(self, cmd: str | list[str]) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list):
+            return subprocess.run(cmd, text=True, capture_output=True)
         return subprocess.run(cmd, shell=True, text=True, capture_output=True)
 
     def install(self) -> None:
         python = sys.executable
-        full_cmd = f'"{python}" -m portacode connect --non-interactive'
-        self._run(
-            f'schtasks /Create /SC ONLOGON /RL HIGHEST /TN {self.NAME} '
-            f'/TR {full_cmd} /F'
-        )
+        from pathlib import Path as _P
+        pyw = _P(python).with_name("pythonw.exe")
+        use_pyw = pyw.exists()
+
+        if use_pyw:
+            # No console window needed; run pythonw directly in task action.
+            action = f'"{pyw}" -m portacode connect --non-interactive'
+            cmd = [
+                "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
+                "/TN", self.NAME, "/TR", action, "/F",
+            ]
+            self._run(cmd)
+        else:
+            # Fallback to wrapper cmd with start /B (console hidden).
+            self._script_path.parent.mkdir(parents=True, exist_ok=True)
+            script = f"""@echo off
+cd /d %USERPROFILE%
+set PYCMD=\"{python}\" -m portacode connect --non-interactive
+start "Portacode" /B %PYCMD% >> "%USERPROFILE%\.local\share\portacode\connect.log" 2>>&1
+"""
+            self._script_path.write_text(script)
+            cmd = [
+                "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
+                "/TN", self.NAME, "/TR", str(self._script_path), "/F",
+            ]
+            self._run(cmd)
+
+        # Start the task immediately so user doesn't need to log off/on
+        self.start()
 
     def uninstall(self) -> None:
-        self._run(f'schtasks /Delete /TN {self.NAME} /F')
+        self._run(["schtasks", "/Delete", "/TN", self.NAME, "/F"])
+        try:
+            if self._script_path.exists():
+                self._script_path.unlink()
+        except Exception:
+            pass
 
     def start(self) -> None:
-        self._run(f'schtasks /Run /TN {self.NAME}')
+        self._run(["schtasks", "/Run", "/TN", self.NAME])
 
     def stop(self) -> None:
-        self._run(f'schtasks /End /TN {self.NAME}')
+        self._run(["schtasks", "/End", "/TN", self.NAME])
 
     def status(self) -> str:
-        res = self._run(f'schtasks /Query /TN {self.NAME}')
-        return "running" if res.returncode == 0 else "stopped"
+        res = self._run(["schtasks", "/Query", "/TN", self.NAME])
+        if res.returncode != 0:
+            return "stopped"
+        # When running, output contains "Running"; else "Ready"
+        return "running" if "Running" in res.stdout else "stopped"
 
     def status_verbose(self) -> str:
-        res = self._run(f'schtasks /Query /TN {self.NAME} /V /FO LIST')
+        res = self._run(["schtasks", "/Query", "/TN", self.NAME, "/V", "/FO", "LIST"])
         return res.stdout or res.stderr
 
 
