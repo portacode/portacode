@@ -229,8 +229,9 @@ class _WindowsTask:
         ]
         self._run(cmd)
 
-        # Start the task immediately so user doesn't need to log off/on
+        # Start immediately and verify
         self.start()
+        self._wait_until_running()
 
     def uninstall(self) -> None:
         self._run(["schtasks", "/Delete", "/TN", self.NAME, "/F"])
@@ -241,7 +242,11 @@ class _WindowsTask:
             pass
 
     def start(self) -> None:
-        self._run(["schtasks", "/Run", "/TN", self.NAME])
+        res = self._run(["schtasks", "/Run", "/TN", self.NAME])
+        if res.returncode != 0:
+            raise RuntimeError(res.stderr.strip() or res.stdout)
+        # wait till running or raise with details
+        self._wait_until_running()
 
     def stop(self) -> None:
         self._run(["schtasks", "/End", "/TN", self.NAME])
@@ -256,6 +261,52 @@ class _WindowsTask:
     def status_verbose(self) -> str:
         res = self._run(["schtasks", "/Query", "/TN", self.NAME, "/V", "/FO", "LIST"])
         return res.stdout or res.stderr
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _query_task(self) -> dict[str, str]:
+        """Return key→value mapping of *schtasks /Query /V /FO LIST* output."""
+        res = self._run(["schtasks", "/Query", "/TN", self.NAME, "/V", "/FO", "LIST"])
+        if res.returncode != 0:
+            return {}
+        out: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def _tail_log(self, lines: int = 20) -> str:
+        try:
+            if self.log_path.exists():
+                with self.log_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    content = fh.readlines()
+                    tail = "".join(content[-lines:])
+                    return tail
+        except Exception:
+            pass
+        return "<no log available>"
+
+    def _wait_until_running(self, timeout: int = 15) -> None:
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            info = self._query_task()
+            status = info.get("Status")
+            if status == "Running":
+                return  # success
+            if status and status != "Ready":
+                # Task executed but stopped – raise with last result
+                code = info.get("Last Result", "?")
+                log_tail = self._tail_log()
+                raise RuntimeError(f"Task stopped (LastResult={code}).\n--- log ---\n{log_tail}")
+            time.sleep(1)
+        # Timeout
+        log_tail = self._tail_log()
+        raise RuntimeError(f"Task did not reach Running state within {timeout}s.\n--- log ---\n{log_tail}")
 
 
 # ---------------------------------------------------------------------------
