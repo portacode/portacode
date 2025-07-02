@@ -79,7 +79,9 @@ class _SystemdUserService:
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         if self.system_mode:
-            cmd = ["sudo", "systemctl", *args]
+            sudo_needed = os.geteuid() != 0
+            base = ["systemctl"] if not sudo_needed else ["sudo", "systemctl"]
+            cmd = [*base, *args]
         else:
             cmd = ["systemctl", "--user", *args]
         return subprocess.run(cmd, text=True, capture_output=True)
@@ -87,6 +89,8 @@ class _SystemdUserService:
     def install(self) -> None:
         self.service_path.parent.mkdir(parents=True, exist_ok=True)
         if self.system_mode:
+            sudo_needed = os.geteuid() != 0
+            prefix = ["sudo"] if sudo_needed else []
             unit = textwrap.dedent(f"""
                 [Unit]
                 Description=Portacode persistent connection (system-wide)
@@ -120,18 +124,22 @@ class _SystemdUserService:
             """).lstrip()
         self.service_path.write_text(unit)
         if self.system_mode:
-            subprocess.run(["sudo", "systemctl", "daemon-reload"])
-            subprocess.run(["sudo", "systemctl", "enable", "--now", self.NAME])
+            sudo_needed = os.geteuid() != 0
+            prefix = ["sudo"] if sudo_needed else []
+            subprocess.run([*prefix, "systemctl", "daemon-reload"])
+            subprocess.run([*prefix, "systemctl", "enable", "--now", self.NAME])
         else:
             self._run("daemon-reload")
             self._run("enable", "--now", self.NAME)
 
     def uninstall(self) -> None:
         if self.system_mode:
-            subprocess.run(["sudo", "systemctl", "disable", "--now", self.NAME])
+            sudo_needed = os.geteuid() != 0
+            prefix = ["sudo"] if sudo_needed else []
+            subprocess.run([*prefix, "systemctl", "disable", "--now", self.NAME])
             if self.service_path.exists():
-                subprocess.run(["sudo", "rm", str(self.service_path)])
-            subprocess.run(["sudo", "systemctl", "daemon-reload"])
+                subprocess.run([*prefix, "rm", str(self.service_path)])
+            subprocess.run([*prefix, "systemctl", "daemon-reload"])
         else:
             self._run("disable", "--now", self.NAME)
             if self.service_path.exists():
@@ -140,19 +148,22 @@ class _SystemdUserService:
 
     def start(self) -> None:
         if self.system_mode:
-            subprocess.run(["sudo", "systemctl", "start", self.NAME])
+            prefix = ["sudo"] if os.geteuid() != 0 else []
+            subprocess.run([*prefix, "systemctl", "start", self.NAME])
         else:
             self._run("start", self.NAME)
 
     def stop(self) -> None:
         if self.system_mode:
-            subprocess.run(["sudo", "systemctl", "stop", self.NAME])
+            prefix = ["sudo"] if os.geteuid() != 0 else []
+            subprocess.run([*prefix, "systemctl", "stop", self.NAME])
         else:
             self._run("stop", self.NAME)
 
     def status(self) -> str:
         if self.system_mode:
-            res = subprocess.run(["sudo", "systemctl", "is-active", self.NAME], text=True, capture_output=True)
+            prefix = ["sudo"] if os.geteuid() != 0 else []
+            res = subprocess.run([*prefix, "systemctl", "is-active", self.NAME], text=True, capture_output=True)
             state = res.stdout.strip() or res.stderr.strip()
             return state
         else:
@@ -162,10 +173,11 @@ class _SystemdUserService:
 
     def status_verbose(self) -> str:
         if self.system_mode:
-            res = subprocess.run(["sudo", "systemctl", "status", "--no-pager", self.NAME], text=True, capture_output=True)
+            prefix = ["sudo"] if os.geteuid() != 0 else []
+            res = subprocess.run([*prefix, "systemctl", "status", "--no-pager", self.NAME], text=True, capture_output=True)
             status = res.stdout or res.stderr
             journal = subprocess.run([
-                "sudo", "journalctl", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
+                *(prefix or ["sudo"] if os.geteuid()!=0 else []), "journalctl", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
             ], text=True, capture_output=True).stdout
             return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
         else:
