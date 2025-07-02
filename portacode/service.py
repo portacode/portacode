@@ -223,9 +223,10 @@ class _WindowsTask:
         )
         self._script_path.write_text(script)
 
+        quoted_path = f'"{self._script_path}"'
         cmd = [
             "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
-            "/TN", self.NAME, "/TR", str(self._script_path), "/F",
+            "/TN", self.NAME, "/TR", quoted_path, "/F",
         ]
         self._run(cmd)
 
