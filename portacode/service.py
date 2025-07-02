@@ -198,6 +198,7 @@ class _WindowsTask:
         from pathlib import Path as _P
         self._home = _P.home()
         self._script_path = self._home / ".local" / "share" / "portacode" / "connect_service.cmd"
+        self.log_path = self._home / ".local" / "share" / "portacode" / "connect.log"
 
     # ------------------------------------------------------------------
 
@@ -212,28 +213,21 @@ class _WindowsTask:
         pyw = _P(python).with_name("pythonw.exe")
         use_pyw = pyw.exists()
 
-        if use_pyw:
-            # No console window needed; run pythonw directly in task action.
-            action = f'"{pyw}" -m portacode connect --non-interactive'
-            cmd = [
-                "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
-                "/TN", self.NAME, "/TR", action, "/F",
-            ]
-            self._run(cmd)
-        else:
-            # Fallback to wrapper cmd with start /B (console hidden).
-            self._script_path.parent.mkdir(parents=True, exist_ok=True)
-            script = f"""@echo off
-cd /d %USERPROFILE%
-set PYCMD=\"{python}\" -m portacode connect --non-interactive
-start "Portacode" /B %PYCMD% >> "%USERPROFILE%\.local\share\portacode\connect.log" 2>>&1
-"""
-            self._script_path.write_text(script)
-            cmd = [
-                "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
-                "/TN", self.NAME, "/TR", str(self._script_path), "/F",
-            ]
-            self._run(cmd)
+        # Always use wrapper so we can capture logs reliably
+        self._script_path.parent.mkdir(parents=True, exist_ok=True)
+        py_cmd = f'"{pyw}"' if use_pyw else f'"{python}"'
+        script = (
+            "@echo off\r\n"
+            "cd /d %USERPROFILE%\r\n"
+            f"{py_cmd} -m portacode connect --non-interactive >> \"%USERPROFILE%\\.local\\share\\portacode\\connect.log\" 2>>&1\r\n"
+        )
+        self._script_path.write_text(script)
+
+        cmd = [
+            "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
+            "/TN", self.NAME, "/TR", str(self._script_path), "/F",
+        ]
+        self._run(cmd)
 
         # Start the task immediately so user doesn't need to log off/on
         self.start()

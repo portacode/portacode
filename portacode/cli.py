@@ -215,7 +215,13 @@ def service_install() -> None:  # noqa: D401
     click.echo("Installing Portacode background service…")
     try:
         mgr.install()
-        click.echo(click.style("✔ Service installed and started", fg="green"))
+        st = mgr.status()
+        if st in {"active", "running"}:
+            click.echo(click.style("✔ Service installed and running", fg="green"))
+        else:
+            click.echo(click.style(f"⚠ Service installed but status: {st}", fg="yellow"))
+            if hasattr(mgr, "log_path"):
+                click.echo(f"Inspect log: {mgr.log_path}")
     except Exception as exc:
         click.echo(click.style(f"Failed: {exc}", fg="red"))
 
@@ -242,7 +248,13 @@ def service_start() -> None:  # noqa: D401
     mgr = get_manager()
     try:
         mgr.start()
-        click.echo(click.style("Service started", fg="green"))
+        st = mgr.status()
+        if st in {"active", "running"}:
+            click.echo(click.style("Service started and running", fg="green"))
+        else:
+            click.echo(click.style(f"Service start issued but current status: {st}", fg="yellow"))
+            if hasattr(mgr, "log_path"):
+                click.echo(f"Inspect log: {mgr.log_path}")
     except Exception as exc:
         click.echo(click.style(f"Failed: {exc}", fg="red"))
 
