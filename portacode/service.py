@@ -24,6 +24,7 @@ import sys
 import textwrap
 import os
 from typing import Protocol
+import shutil
 
 __all__ = [
     "ServiceManager",
@@ -61,65 +62,119 @@ class ServiceManager(Protocol):
 class _SystemdUserService:
     NAME = "portacode"
 
-    def __init__(self) -> None:
-        self.service_path = (
-            Path.home()
-            / ".config/systemd/user"
-            / f"{self.NAME}.service"
-        )
+    def __init__(self, system_mode: bool = False) -> None:
+        self.system_mode = system_mode
+        if system_mode:
+            self.service_path = Path("/etc/systemd/system") / f"{self.NAME}.service"
+            self.user = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
+            self.home = Path(f"/home/{self.user}")
+            self.python = shutil.which("python3") or sys.executable
+        else:
+            self.service_path = (
+                Path.home() / ".config/systemd/user" / f"{self.NAME}.service"
+            )
+            self.user = os.environ.get("USER") or os.getlogin()
+            self.home = Path.home()
+            self.python = sys.executable
 
-    # Helper to run *systemctl --user*
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        cmd = ["systemctl", "--user", *args]
+        if self.system_mode:
+            cmd = ["sudo", "systemctl", *args]
+        else:
+            cmd = ["systemctl", "--user", *args]
         return subprocess.run(cmd, text=True, capture_output=True)
 
     def install(self) -> None:
         self.service_path.parent.mkdir(parents=True, exist_ok=True)
-        unit = textwrap.dedent(
-            f"""
-            [Unit]
-            Description=Portacode persistent connection
-            After=network.target
+        if self.system_mode:
+            unit = textwrap.dedent(f"""
+                [Unit]
+                Description=Portacode persistent connection (system-wide)
+                After=network.target
 
-            [Service]
-            Type=simple
-            ExecStart={sys.executable} -m portacode connect --non-interactive
-            Restart=on-failure
-            RestartSec=5
+                [Service]
+                Type=simple
+                User={self.user}
+                WorkingDirectory={self.home}
+                ExecStart={self.python} -m portacode connect --non-interactive
+                Restart=on-failure
+                RestartSec=5
 
-            [Install]
-            WantedBy=default.target
-            """
-        ).lstrip()
+                [Install]
+                WantedBy=multi-user.target
+            """).lstrip()
+        else:
+            unit = textwrap.dedent(f"""
+                [Unit]
+                Description=Portacode persistent connection
+                After=network.target
+
+                [Service]
+                Type=simple
+                ExecStart={self.python} -m portacode.cli connect --non-interactive
+                Restart=on-failure
+                RestartSec=5
+
+                [Install]
+                WantedBy=default.target
+            """).lstrip()
         self.service_path.write_text(unit)
-        self._run("daemon-reload")
-        self._run("enable", "--now", self.NAME)
+        if self.system_mode:
+            subprocess.run(["sudo", "systemctl", "daemon-reload"])
+            subprocess.run(["sudo", "systemctl", "enable", "--now", self.NAME])
+        else:
+            self._run("daemon-reload")
+            self._run("enable", "--now", self.NAME)
 
     def uninstall(self) -> None:
-        self._run("disable", "--now", self.NAME)
-        if self.service_path.exists():
-            self.service_path.unlink()
-        self._run("daemon-reload")
+        if self.system_mode:
+            subprocess.run(["sudo", "systemctl", "disable", "--now", self.NAME])
+            if self.service_path.exists():
+                subprocess.run(["sudo", "rm", str(self.service_path)])
+            subprocess.run(["sudo", "systemctl", "daemon-reload"])
+        else:
+            self._run("disable", "--now", self.NAME)
+            if self.service_path.exists():
+                self.service_path.unlink()
+            self._run("daemon-reload")
 
     def start(self) -> None:
-        self._run("start", self.NAME)
+        if self.system_mode:
+            subprocess.run(["sudo", "systemctl", "start", self.NAME])
+        else:
+            self._run("start", self.NAME)
 
     def stop(self) -> None:
-        self._run("stop", self.NAME)
+        if self.system_mode:
+            subprocess.run(["sudo", "systemctl", "stop", self.NAME])
+        else:
+            self._run("stop", self.NAME)
 
     def status(self) -> str:
-        res = self._run("is-active", self.NAME)
-        state = res.stdout.strip() or res.stderr.strip()
-        return state
+        if self.system_mode:
+            res = subprocess.run(["sudo", "systemctl", "is-active", self.NAME], text=True, capture_output=True)
+            state = res.stdout.strip() or res.stderr.strip()
+            return state
+        else:
+            res = self._run("is-active", self.NAME)
+            state = res.stdout.strip() or res.stderr.strip()
+            return state
 
     def status_verbose(self) -> str:
-        # Combine unit status and last 20 journal lines
-        status = self._run("status", "--no-pager", self.NAME).stdout
-        journal = subprocess.run(
-            ["journalctl", "--user", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"],
-            text=True, capture_output=True
-        ).stdout
-        return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
+        if self.system_mode:
+            res = subprocess.run(["sudo", "systemctl", "status", "--no-pager", self.NAME], text=True, capture_output=True)
+            status = res.stdout or res.stderr
+            journal = subprocess.run([
+                "sudo", "journalctl", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
+            ], text=True, capture_output=True).stdout
+            return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
+        else:
+            res = self._run("status", "--no-pager", self.NAME)
+            status = res.stdout or res.stderr
+            journal = subprocess.run([
+                "journalctl", "--user", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
+            ], text=True, capture_output=True).stdout
+            return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
 
 
 # ---------------------------------------------------------------------------
@@ -342,10 +397,10 @@ class _WindowsTask:
 # Factory
 # ---------------------------------------------------------------------------
 
-def get_manager() -> ServiceManager:
+def get_manager(system_mode: bool = False) -> ServiceManager:
     system = platform.system().lower()
     if system == "linux":
-        return _SystemdUserService()  # type: ignore[return-value]
+        return _SystemdUserService(system_mode=system_mode)  # type: ignore[return-value]
     if system == "darwin":
         return _LaunchdService()      # type: ignore[return-value]
     if system.startswith("windows") or system == "windows":

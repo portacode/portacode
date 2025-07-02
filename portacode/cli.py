@@ -207,12 +207,15 @@ def service() -> None:  # noqa: D401 – Click callback
 
 
 @service.command("install")
-def service_install() -> None:  # noqa: D401
+@click.option("--system", is_flag=True, help="Install as a system-wide service (Linux only, requires sudo)")
+def service_install(system: bool) -> None:  # noqa: D401
     """Install + enable the background service and start it now."""
     from .service import get_manager
 
-    mgr = get_manager()
-    click.echo("Installing Portacode background service…")
+    mgr = get_manager(system_mode=system)
+    click.echo(f"Installing Portacode {'system' if system else 'user'} service…")
+    if system and os.geteuid() != 0:
+        click.echo(click.style("[sudo] You may be prompted for your password to install the system service.", fg="yellow"))
     try:
         mgr.install()
         st = mgr.status()
@@ -227,12 +230,13 @@ def service_install() -> None:  # noqa: D401
 
 
 @service.command("uninstall")
-def service_uninstall() -> None:  # noqa: D401
+@click.option("--system", is_flag=True, help="Uninstall system-wide service (Linux only, requires sudo)")
+def service_uninstall(system: bool) -> None:  # noqa: D401
     """Stop + remove the background service."""
     from .service import get_manager
 
-    mgr = get_manager()
-    click.echo("Uninstalling Portacode background service…")
+    mgr = get_manager(system_mode=system)
+    click.echo(f"Uninstalling Portacode {'system' if system else 'user'} service…")
     try:
         mgr.uninstall()
         click.echo(click.style("✔ Service removed", fg="green"))
@@ -241,11 +245,12 @@ def service_uninstall() -> None:  # noqa: D401
 
 
 @service.command("start")
-def service_start() -> None:  # noqa: D401
+@click.option("--system", is_flag=True, help="Start system-wide service (Linux only, requires sudo)")
+def service_start(system: bool) -> None:  # noqa: D401
     """Start the service if installed."""
     from .service import get_manager
 
-    mgr = get_manager()
+    mgr = get_manager(system_mode=system)
     try:
         mgr.start()
         st = mgr.status()
@@ -260,11 +265,12 @@ def service_start() -> None:  # noqa: D401
 
 
 @service.command("stop")
-def service_stop() -> None:  # noqa: D401
+@click.option("--system", is_flag=True, help="Stop system-wide service (Linux only, requires sudo)")
+def service_stop(system: bool) -> None:  # noqa: D401
     """Stop the service if running."""
     from .service import get_manager
 
-    mgr = get_manager()
+    mgr = get_manager(system_mode=system)
     try:
         mgr.stop()
         click.echo(click.style("Service stopped", fg="green"))
@@ -273,12 +279,13 @@ def service_stop() -> None:  # noqa: D401
 
 
 @service.command("status")
+@click.option("--system", is_flag=True, help="Status for system-wide service (Linux only, requires sudo)")
 @click.option("--verbose", "verbose", "-v", is_flag=True, help="Show detailed service status info")
-def service_status(verbose: bool) -> None:  # noqa: D401
+def service_status(system: bool, verbose: bool) -> None:  # noqa: D401
     """Show current status (running/loaded). Pass -v for system output."""
     from .service import get_manager
 
-    mgr = get_manager()
+    mgr = get_manager(system_mode=system)
     try:
         st = mgr.status()
         color = "green" if st in {"active", "running"} else "red" if st in {"failed", "inactive"} else "yellow"
