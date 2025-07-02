@@ -223,12 +223,15 @@ class _WindowsTask:
         )
         self._script_path.write_text(script)
 
-        quoted_path = f'"{self._script_path}"'
+        # Use cmd.exe /c to ensure the batch file is found and executed correctly
+        action = f'cmd.exe /c "{self._script_path}"'
         cmd = [
             "schtasks", "/Create", "/SC", "ONLOGON", "/RL", "HIGHEST",
-            "/TN", self.NAME, "/TR", quoted_path, "/F",
+            "/TN", self.NAME, "/TR", action, "/F",
         ]
-        self._run(cmd)
+        res = self._run(cmd)
+        if res.returncode != 0:
+            raise RuntimeError(res.stderr.strip() or res.stdout)
 
         # Start immediately and verify
         self.start()
@@ -236,6 +239,8 @@ class _WindowsTask:
 
     def uninstall(self) -> None:
         self._run(["schtasks", "/Delete", "/TN", self.NAME, "/F"])
+        # Kill all running portacode connect processes for this user
+        self._kill_all_connect()
         try:
             if self._script_path.exists():
                 self._script_path.unlink()
@@ -251,6 +256,7 @@ class _WindowsTask:
 
     def stop(self) -> None:
         self._run(["schtasks", "/End", "/TN", self.NAME])
+        self._kill_all_connect()
 
     def status(self) -> str:
         res = self._run(["schtasks", "/Query", "/TN", self.NAME])
@@ -308,6 +314,28 @@ class _WindowsTask:
         # Timeout
         log_tail = self._tail_log()
         raise RuntimeError(f"Task did not reach Running state within {timeout}s.\n--- log ---\n{log_tail}")
+
+    def _kill_all_connect(self):
+        import subprocess, os
+        try:
+            # List all python/pythonw processes for this user
+            whoami = os.getlogin()
+            for exe in ["python.exe", "pythonw.exe"]:
+                out = subprocess.run([
+                    "wmic", "process", "where",
+                    f"name='{exe}' and CommandLine like '%portacode connect%' and (UserModeTime > 0 or KernelModeTime > 0)",
+                    "get", "ProcessId,CommandLine,Name,UserModeTime,KernelModeTime", "/FORMAT:csv"
+                ], capture_output=True, text=True)
+                for line in out.stdout.splitlines():
+                    if "portacode connect" in line and whoami in line:
+                        parts = line.split(",")
+                        try:
+                            pid = int(parts[-1])
+                            os.kill(pid, 9)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
