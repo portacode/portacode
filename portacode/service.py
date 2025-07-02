@@ -25,6 +25,7 @@ import textwrap
 import os
 from typing import Protocol
 import shutil
+import pwd
 
 __all__ = [
     "ServiceManager",
@@ -67,7 +68,10 @@ class _SystemdUserService:
         if system_mode:
             self.service_path = Path("/etc/systemd/system") / f"{self.NAME}.service"
             self.user = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
-            self.home = Path(f"/home/{self.user}")
+            try:
+                self.home = Path(pwd.getpwnam(self.user).pw_dir)
+            except KeyError:
+                self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
             self.python = shutil.which("python3") or sys.executable
         else:
             self.service_path = (
