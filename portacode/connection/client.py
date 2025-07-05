@@ -29,14 +29,17 @@ class ConnectionManager:
         User's public/private keypair used for authentication.
     reconnect_delay: float
         Seconds to wait before attempting to reconnect after an unexpected drop.
-    max_retries: int
-        Maximum number of reconnect attempts before giving up.
+    max_retries: int, optional
+        Deprecated. The connection manager now retries indefinitely for 
+        recoverable errors and exits cleanly for fatal errors to allow 
+        service manager restart.
     """
 
-    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = 10):
+    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None):
         self.gateway_url = gateway_url
         self.keypair = keypair
         self.reconnect_delay = reconnect_delay
+        # max_retries is now deprecated but kept for backwards compatibility
         self.max_retries = max_retries
 
         self._task: Optional[asyncio.Task[None]] = None
@@ -63,7 +66,7 @@ class ConnectionManager:
             try:
                 if attempt:
                     delay = min(self.reconnect_delay * 2 ** (attempt - 1), 30)
-                    logger.warning("Reconnecting in %.1f s (attempt %d/%d)…", delay, attempt, self.max_retries)
+                    logger.warning("Reconnecting in %.1f s (attempt %d)…", delay, attempt)
                     await asyncio.sleep(delay)
                 logger.info("Connecting to gateway at %s", self.gateway_url)
                 async with websockets.connect(self.gateway_url) as ws:
@@ -90,15 +93,17 @@ class ConnectionManager:
 
                     # Start main receive loop until closed or stop requested
                     await self._listen()
-            except (OSError, websockets.WebSocketException) as exc:
+            except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as exc:
                 attempt += 1
                 logger.warning("Connection error: %s", exc)
-                if attempt > self.max_retries:
-                    logger.error("Maximum reconnect attempts reached, giving up.")
-                    break
+                # Remove the max_retries limit - keep trying indefinitely
+                # The service manager (systemd) will handle any necessary restarts
             except Exception as exc:
+                # For truly fatal errors (like authentication failures), 
+                # log and exit cleanly so systemd can restart the service
                 logger.exception("Fatal error in connection manager: %s", exc)
-                break
+                # Exit cleanly to allow systemd restart
+                sys.exit(1)
 
     async def _authenticate(self) -> None:
         """Challenge-response authentication with the gateway using base64 DER public key."""
