@@ -233,19 +233,20 @@ class TerminalManager:
                     continue
                 logger.warning("Missing 'cmd' in control frame: %s", message)
                 continue
+            reply_chan = message.get("reply_channel")
             try:
                 if cmd == "terminal_start":
                     shell = message.get("shell")
                     cwd = message.get("cwd")
-                    await self._cmd_terminal_start(shell=shell, cwd=cwd)
+                    await self._cmd_terminal_start(shell=shell, cwd=cwd, reply=reply_chan)
                 elif cmd == "terminal_send":
                     await self._cmd_terminal_send(message)
                 elif cmd == "terminal_stop":
                     await self._cmd_terminal_stop(message)
                 elif cmd == "terminal_list":
-                    await self._cmd_terminal_list()
+                    await self._cmd_terminal_list(reply=reply_chan)
                 elif cmd == "system_info":
-                    await self._cmd_system_info()
+                    await self._cmd_system_info(reply=reply_chan)
                 else:
                     await self._send_error(f"Unknown cmd: {cmd}")
             except Exception as exc:
@@ -256,7 +257,7 @@ class TerminalManager:
     # Individual command handlers
     # ------------------------------------------------------------------
 
-    async def _cmd_terminal_start(self, *, shell: Optional[str], cwd: Optional[str] = None) -> None:
+    async def _cmd_terminal_start(self, *, shell: Optional[str], cwd: Optional[str] = None, reply: Optional[str] = None) -> None:
         term_id = uuid.uuid4().hex
         channel_id = self._allocate_channel_id()
         channel = self.mux.get_channel(channel_id)
@@ -422,7 +423,7 @@ class TerminalManager:
         await session.stop()
         await self._control_channel.send({"event": "terminal_stopped", "terminal_id": term_id})
 
-    async def _cmd_terminal_list(self) -> None:
+    async def _cmd_terminal_list(self, *, reply: Optional[str] = None) -> None:
         sessions = [
             {
                 "terminal_id": s.id,
@@ -433,15 +434,21 @@ class TerminalManager:
             }
             for s in self._sessions.values()
         ]
-        await self._control_channel.send({"event": "terminal_list", "sessions": sessions})
+        payload = {"event": "terminal_list", "sessions": sessions}
+        if reply:
+            payload["reply_channel"] = reply
+        await self._control_channel.send(payload)
 
-    async def _cmd_system_info(self) -> None:
+    async def _cmd_system_info(self, *, reply: Optional[str] = None) -> None:
         info = {
             "cpu_percent": psutil.cpu_percent(interval=0.1),
             "memory": psutil.virtual_memory()._asdict(),
             "disk": psutil.disk_usage(str(Path.home()))._asdict(),
         }
-        await self._control_channel.send({"event": "system_info", "info": info})
+        payload = {"event": "system_info", "info": info}
+        if reply:
+            payload["reply_channel"] = reply
+        await self._control_channel.send(payload)
 
     # ------------------------------------------------------------------
     # Helpers
