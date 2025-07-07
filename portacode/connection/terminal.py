@@ -89,6 +89,32 @@ __all__ = [
 
 _IS_WINDOWS = sys.platform.startswith("win")
 
+# ------------------------------------------------------------------
+# Environment helpers
+# ------------------------------------------------------------------
+
+# Minimal, safe defaults for interactive shells.  They are **only** used when
+# the variable is *missing* so we do not override user customisation.
+_DEFAULT_ENV = {
+    "TERM": "xterm-256color",
+    "LANG": "C.UTF-8",  # Locale that works even in very small containers
+}
+
+
+def _build_child_env() -> dict[str, str]:
+    """Return a copy of os.environ with sensible fallbacks added.
+
+    The service managers on some platforms (e.g. systemd, Task Scheduler) run
+    Portacode with a *very* stripped-down environment that lacks variables like
+    ``TERM``.  That breaks many interactive commands (``clear``, ncurses apps,
+    coloured output, …).  We therefore make sure such variables are present so
+    that each spawned PTY session has a predictable baseline environment.
+    """
+
+    env = os.environ.copy()
+    for k, v in _DEFAULT_ENV.items():
+        env.setdefault(k, v)
+    return env 
 
 class TerminalSession:
     """Represents a local shell subprocess bound to a mux *channel*."""
@@ -274,7 +300,7 @@ class TerminalManager:
                 await self._send_error("pywinpty not installed on client")
                 return
 
-            pty_proc = PtyProcess.spawn(shell, cwd=cwd or None)
+            pty_proc = PtyProcess.spawn(shell, cwd=cwd or None, env=_build_child_env())
 
             class _WinPTYProxy:
                 """Expose .pid and .returncode for compatibility with Linux branch."""
@@ -372,6 +398,7 @@ class TerminalManager:
                     stderr=slave_fd,
                     preexec_fn=os.setsid,
                     cwd=cwd,
+                    env=_build_child_env(),
                 )
                 # Wrap master_fd into a StreamReader
                 loop = asyncio.get_running_loop()
@@ -390,6 +417,7 @@ class TerminalManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=cwd,
+                    env=_build_child_env(),
                 )
             session = TerminalSession(term_id, proc, channel)
             self._sessions[term_id] = session
