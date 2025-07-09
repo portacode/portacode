@@ -65,6 +65,10 @@ class TerminalSession:
                 if self.proc and self.proc.returncode is None:
                     pass  # Keep alive across reconnects
 
+        # Cancel existing reader task if it exists
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            
         self._reader_task = asyncio.create_task(_pump())
 
     async def write(self, data: str) -> None:
@@ -87,6 +91,13 @@ class TerminalSession:
     def snapshot_buffer(self) -> str:
         """Return concatenated last buffer contents suitable for UI."""
         return "".join(self._buffer)
+
+    async def reattach_channel(self, new_channel: "Channel") -> None:
+        """Reattach this session to a new channel after reconnection."""
+        logger.info("Reattaching terminal %s to channel %s", self.id, new_channel.id)
+        self.channel = new_channel
+        # Restart I/O forwarding with new channel
+        await self.start_io_forwarding()
 
 
 class WindowsTerminalSession(TerminalSession):
@@ -142,6 +153,10 @@ class WindowsTerminalSession(TerminalSession):
                 if self._pty and self._pty.isalive():
                     self._pty.kill()
 
+        # Cancel existing reader task if it exists
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            
         self._reader_task = asyncio.create_task(_pump())
 
     async def write(self, data: str) -> None:
@@ -164,13 +179,10 @@ class SessionManager:
     def __init__(self, mux):
         self.mux = mux
         self._sessions: Dict[str, TerminalSession] = {}
-        self._next_channel = 100
 
-    def _allocate_channel_id(self) -> int:
-        """Allocate a new channel ID for a terminal session."""
-        cid = self._next_channel
-        self._next_channel += 1
-        return cid
+    def _allocate_channel_id(self) -> str:
+        """Allocate a new unique channel ID for a terminal session using UUID."""
+        return uuid.uuid4().hex
 
     async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
         """Create a new terminal session."""
@@ -182,7 +194,7 @@ class SessionManager:
         if shell is None:
             shell = os.getenv("SHELL") if not _IS_WINDOWS else os.getenv("COMSPEC", "cmd.exe")
 
-        logger.info("Launching terminal %s using shell=%s on channel=%d", term_id, shell, channel_id)
+        logger.info("Launching terminal %s using shell=%s on channel=%s", term_id, shell, channel_id)
 
         if _IS_WINDOWS:
             try:
@@ -258,18 +270,36 @@ class SessionManager:
                 "pid": s.proc.pid,
                 "returncode": s.proc.returncode,
                 "buffer": s.snapshot_buffer(),
+                "status": "active" if s.proc.returncode is None else "exited",
+                "created_at": None,  # Could add timestamp if needed
+                "shell": None,  # Could store shell info if needed
+                "cwd": None,    # Could store cwd info if needed
             }
             for s in self._sessions.values()
         ]
 
-    def reattach_sessions(self, mux):
+    async def reattach_sessions(self, mux):
         """Reattach sessions to a new multiplexer after reconnection."""
         self.mux = mux
-        highest_cid = self._next_channel
+        logger.info("Reattaching %d terminal sessions to new multiplexer", len(self._sessions))
         
+        # Clean up any sessions with dead processes first
+        dead_sessions = []
+        for term_id, sess in list(self._sessions.items()):
+            if sess.proc.returncode is not None:
+                logger.info("Cleaning up dead terminal session %s (exit code: %s)", term_id, sess.proc.returncode)
+                dead_sessions.append(term_id)
+        
+        for term_id in dead_sessions:
+            self._sessions.pop(term_id, None)
+        
+        # Reattach remaining live sessions
         for sess in self._sessions.values():
-            cid = sess.channel.id
-            sess.channel = self.mux.get_channel(cid)
-            highest_cid = max(highest_cid, cid + 1)
-        
-        self._next_channel = max(self._next_channel, highest_cid) 
+            try:
+                # Get the existing channel ID (UUID string)
+                channel_id = sess.channel.id
+                new_channel = self.mux.get_channel(channel_id)
+                await sess.reattach_channel(new_channel)
+                logger.info("Successfully reattached terminal %s", sess.id)
+            except Exception as exc:
+                logger.error("Failed to reattach terminal %s: %s", sess.id, exc) 

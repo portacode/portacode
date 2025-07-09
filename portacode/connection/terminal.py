@@ -42,7 +42,8 @@ class TerminalManager:
 
     def __init__(self, mux: Multiplexer):
         self.mux = mux
-        self._set_mux(mux)
+        self._session_manager = None  # Initialize as None first
+        self._set_mux(mux, is_initial=True)
 
     # ------------------------------------------------------------------
     # Mux attach/detach helpers (for reconnection resilience)
@@ -50,22 +51,34 @@ class TerminalManager:
 
     def attach_mux(self, mux: Multiplexer) -> None:
         """Attach a *new* Multiplexer after a reconnect, re-binding channels."""
-        self._set_mux(mux)
-
-        # Re-attach sessions to new mux
-        if hasattr(self, '_session_manager'):
-            self._session_manager.reattach_sessions(mux)
-
-        # Send terminal list to reconcile state
-        if hasattr(self, '_command_registry'):
+        old_session_manager = self._session_manager
+        
+        # Set up new mux but preserve existing session manager
+        self._set_mux(mux, is_initial=False)
+        
+        # Re-attach sessions to new mux if we had existing sessions
+        if old_session_manager and old_session_manager._sessions:
+            logger.info("Preserving %d terminal sessions across reconnection", len(old_session_manager._sessions))
+            # Transfer sessions from old manager to new manager
+            self._session_manager._sessions = old_session_manager._sessions
+            # Start async reattachment and reconciliation
+            asyncio.create_task(self._handle_reconnection())
+        else:
+            # No existing sessions, just send empty terminal list
             asyncio.create_task(self._send_terminal_list())
 
-    def _set_mux(self, mux: Multiplexer) -> None:
+    def _set_mux(self, mux: Multiplexer, is_initial: bool = False) -> None:
         self.mux = mux
         self._control_channel = self.mux.get_channel(self.CONTROL_CHANNEL_ID)
         
-        # Initialize session manager
-        self._session_manager = SessionManager(mux)
+        # Only create new session manager on initial setup, preserve existing one on reconnection
+        if is_initial or self._session_manager is None:
+            self._session_manager = SessionManager(mux)
+            logger.info("Created new SessionManager")
+        else:
+            # Update existing session manager's mux reference
+            self._session_manager.mux = mux
+            logger.info("Preserved existing SessionManager with %d sessions", len(self._session_manager._sessions))
         
         # Create context for handlers
         self._context = {
@@ -168,10 +181,25 @@ class TerminalManager:
         """Send terminal list for reconnection reconciliation."""
         try:
             sessions = self._session_manager.list_sessions()
+            if sessions:
+                logger.info("Sending terminal list with %d sessions to server", len(sessions))
             payload = {
                 "event": "terminal_list",
                 "sessions": sessions,
             }
             await self._control_channel.send(payload)
         except Exception as exc:
-            logger.warning("Failed to send terminal list: %s", exc) 
+            logger.warning("Failed to send terminal list: %s", exc)
+
+    async def _handle_reconnection(self) -> None:
+        """Handle the async reconnection sequence."""
+        try:
+            # First, reattach all sessions to new multiplexer
+            await self._session_manager.reattach_sessions(self.mux)
+            logger.info("Terminal session reattachment completed")
+            
+            # Then send updated terminal list to server
+            await self._send_terminal_list()
+            logger.info("Terminal list sent to server after reconnection")
+        except Exception as exc:
+            logger.error("Failed to handle reconnection: %s", exc) 
