@@ -82,10 +82,16 @@ def get_or_create_keypair() -> KeyPair:
         private_pem, public_pem = _generate_keypair()
         priv_path.write_bytes(private_pem)
         pub_path.write_bytes(public_pem)
+        keypair = KeyPair(priv_path, pub_path)
+        keypair._is_new = True
+        keypair._key_dir = key_dir
     else:
         logging.info(f"Found existing keys at {key_dir}")
+        keypair = KeyPair(priv_path, pub_path)
+        keypair._is_new = False
+        keypair._key_dir = key_dir
 
-    return KeyPair(priv_path, pub_path)
+    return keypair
 
 
 def fingerprint_public_key(pem: bytes) -> str:

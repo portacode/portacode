@@ -65,22 +65,96 @@ def connect(gateway: str | None, detach: bool, non_interactive: bool) -> None:  
 
     pubkey_b64 = keypair.public_key_der_b64()
     if not non_interactive:
-        click.echo()
-        click.echo(click.style("✔ Generated / loaded RSA keypair", fg="green"))
+        # Show key generation status
+        if getattr(keypair, '_is_new', False):
+            click.echo()
+            click.echo(click.style("✔ Generated new RSA keypair", fg="green"))
+        else:
+            click.echo()
+            click.echo(click.style("✔ Loaded existing RSA keypair", fg="green"))
+        
+        # Show key location
+        key_dir = getattr(keypair, '_key_dir', None)
+        if key_dir:
+            click.echo(click.style(f"  📁 Key files: {key_dir}", fg="bright_black"))
 
         click.echo()
-        click.echo(click.style("Public key (copy & paste to your Portacode account):", bold=True))
-        click.echo("-" * 60)
-        click.echo(pubkey_b64)
-        click.echo("-" * 60)
+        click.echo(click.style("🚀 Welcome to Portacode!", fg="bright_blue", bold=True))
+        click.echo()
+        click.echo(click.style("📱 Next steps:", fg="bright_cyan", bold=True))
+        click.echo(click.style("  1. Visit ", fg="white") + click.style("https://remote.portacode.com", fg="bright_blue", underline=True))
+        click.echo(click.style("  2. Create your free account or sign in", fg="white"))
+        click.echo(click.style("  3. Add this device using the key below", fg="white"))
+        click.echo()
+        
+        click.echo(click.style("🔑 Device Key:", fg="bright_yellow", bold=True))
+        
+        # Dynamic border based on key length for visual appeal
+        max_width = 80  # Maximum width for terminal display
+        if len(pubkey_b64) <= max_width - 4:
+            # Single line display
+            border_width = len(pubkey_b64) + 4
+            top = "┌" + "─" * (border_width - 2) + "┐"
+            middle = "│ " + pubkey_b64 + " │"
+            bottom = "└" + "─" * (border_width - 2) + "┘"
+        else:
+            # Multi-line display
+            line_width = max_width - 4  # Account for border
+            lines = []
+            for i in range(0, len(pubkey_b64), line_width):
+                lines.append(pubkey_b64[i:i+line_width])
+            
+            top = "┌" + "─" * (max_width - 2) + "┐"
+            bottom = "└" + "─" * (max_width - 2) + "┘"
+            
+            middle_lines = []
+            for line in lines:
+                padded_line = line.ljust(line_width)
+                middle_lines.append("│ " + padded_line + " │")
+            middle = "\n".join(middle_lines)
+        
+        click.echo(click.style(top, fg="bright_black"))
+        click.echo(click.style(middle, fg="bright_white"))
+        click.echo(click.style(bottom, fg="bright_black"))
+        
+        # Show clean key for manual copying
+        click.echo()
+        click.echo(click.style("📋 Copy this key (select all text between the lines):", fg="bright_cyan", bold=True))
+        click.echo(click.style("─" * min(len(pubkey_b64), 80), fg="bright_black"))
+        click.echo(click.style(pubkey_b64, fg="bright_white", bold=True))
+        click.echo(click.style("─" * min(len(pubkey_b64), 80), fg="bright_black"))
+        
+        # Better clipboard handling with multiple fallback mechanisms
+        clipboard_success = False
+        clipboard_error = None
+        
         try:
             pyperclip.copy(pubkey_b64)
-            click.echo(click.style("(Copied to clipboard!)", fg="cyan"))
-        except Exception:
-            click.echo(click.style("(Could not copy to clipboard. Please copy manually.)", fg="yellow"))
-        click.echo(f"Fingerprint: {fingerprint}")
+            # Verify the copy actually worked
+            if pyperclip.paste() == pubkey_b64:
+                clipboard_success = True
+            else:
+                clipboard_error = "Copy verification failed"
+        except Exception as e:
+            clipboard_error = str(e)
+        
+        if clipboard_success:
+            click.echo(click.style("✅ Copied to clipboard!", fg="bright_green"))
+        else:
+            click.echo(click.style("⚠️  Copy manually from above", fg="bright_yellow"))
+            if clipboard_error and "could not find a copy/paste mechanism" in clipboard_error:
+                click.echo(click.style("   💡 Try: sudo apt-get install xclip", fg="bright_black"))
+        
+        click.echo(click.style(f"   Fingerprint: {fingerprint}", fg="bright_black"))
         click.echo()
-        click.prompt("Press <enter> once the key is added", default="", show_default=False)
+        
+        click.echo(click.style("💡 Connection info:", fg="bright_magenta", bold=True))
+        click.echo(click.style("   • This session: Connection active until terminal closes", fg="white"))
+        click.echo(click.style("   • Permanent: Run ", fg="white") + click.style("portacode service install", fg="bright_cyan") + click.style(" for auto-connect", fg="white"))
+        click.echo(click.style("   • More help: ", fg="white") + click.style("portacode service --help", fg="bright_cyan"))
+        click.echo()
+        
+        click.prompt(click.style("Press Enter once device is added", fg="bright_green", bold=True), default="", show_default=False)
 
     # 3. Start connection manager
     if detach and not non_interactive:
