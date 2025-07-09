@@ -14,6 +14,13 @@ from .terminal_handlers import (
     TerminalListHandler,
 )
 from .system_handlers import SystemInfoHandler
+from .file_handlers import (
+    FileReadHandler,
+    FileWriteHandler,
+    DirectoryListHandler,
+    FileInfoHandler,
+    FileDeleteHandler,
+)
 
 __all__ = [
     "BaseHandler",
@@ -25,4 +32,10 @@ __all__ = [
     "TerminalStopHandler",
     "TerminalListHandler",
     "SystemInfoHandler",
+    # File operation handlers (optional - register as needed)
+    "FileReadHandler",
+    "FileWriteHandler", 
+    "DirectoryListHandler",
+    "FileInfoHandler",
+    "FileDeleteHandler",
 ] 
