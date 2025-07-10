@@ -11,6 +11,7 @@ import json
 import click
 import pyperclip
 
+from . import __version__
 from .data import get_pid_file, is_process_running
 from .keypair import get_or_create_keypair, fingerprint_public_key
 from .connection.client import ConnectionManager, run_until_interrupt
@@ -20,6 +21,7 @@ GATEWAY_ENV = "PORTACODE_GATEWAY"
 
 
 @click.group()
+@click.version_option(__version__, "-v", "--version", message="Portacode %(version)s")
 def cli() -> None:
     """Portacode command-line interface."""
 
@@ -289,6 +291,7 @@ def service_install() -> None:  # noqa: D401
     click.echo(f"Installing Portacode system service…")
     if os.geteuid() != 0:
         click.echo(click.style("[sudo] You may be prompted for your password to install the system service.", fg="yellow"))
+        click.echo(click.style("💡 For persistent connection, install system-wide: sudo pip install portacode --system", fg="bright_black"))
     try:
         mgr.install()
         st = mgr.status()
@@ -300,6 +303,8 @@ def service_install() -> None:  # noqa: D401
                 click.echo(f"Inspect log: {mgr.log_path}")
     except Exception as exc:
         click.echo(click.style(f"Failed: {exc}", fg="red"))
+        if "No module named" in str(exc) or "command not found" in str(exc):
+            click.echo(click.style("💡 Try installing system-wide: sudo pip install portacode --system", fg="bright_cyan"))
 
 
 @service.command("uninstall")

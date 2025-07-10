@@ -55,8 +55,11 @@ portacode connect
 
 ### Server Administration
 ```bash
-# Install as a service for persistent connection
-portacode service install
+# For a persistent connection, install system-wide first
+sudo pip install portacode --system
+
+# Then install as a service
+sudo portacode service install
 
 # Your server is now accessible 24/7 from the web dashboard
 ```
@@ -87,23 +90,29 @@ portacode connect
 # Run connection in background
 portacode connect --detach
 
+# Check version
+portacode --version
+
 # Get help
 portacode --help
 ```
 
 ### Service Management
 ```bash
+# For system services, install package system-wide first
+sudo pip install portacode --system
+
 # Install persistent service (auto-start on boot)
-portacode service install
+sudo portacode service install
 
 # Check service status
-portacode service status
+sudo portacode service status
 
 # Stop the service
-portacode service stop
+sudo portacode service stop
 
 # Remove the service
-portacode service uninstall
+sudo portacode service uninstall
 ```
 
 ## 🌐 Web Dashboard
@@ -139,7 +148,16 @@ Access your connected devices at [https://remote.portacode.com](https://remote.p
 portacode connect
 
 # View service logs
-portacode service status --verbose
+sudo portacode service status --verbose
+```
+
+### Service Installation Issues
+```bash
+# If service commands fail, ensure system-wide installation
+sudo pip install portacode --system
+
+# Then try service installation again
+sudo portacode service install
 ```
 
 ### Clipboard Issues (Linux)
