@@ -21,6 +21,7 @@ _IS_WINDOWS = sys.platform.startswith("win")
 _DEFAULT_ENV = {
     "TERM": "xterm-256color",
     "LANG": "C.UTF-8",
+    "SHELL": "/bin/bash",
 }
 
 
@@ -190,9 +191,19 @@ class SessionManager:
         channel_id = self._allocate_channel_id()
         channel = self.mux.get_channel(channel_id)
 
-        # Choose shell
+        # Choose shell - prefer bash over sh for better terminal compatibility
         if shell is None:
-            shell = os.getenv("SHELL") if not _IS_WINDOWS else os.getenv("COMSPEC", "cmd.exe")
+            if not _IS_WINDOWS:
+                shell = os.getenv("SHELL")
+                # If the default shell is /bin/sh, try to use bash instead for better terminal support
+                if shell == "/bin/sh":
+                    for bash_path in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]:
+                        if os.path.exists(bash_path):
+                            shell = bash_path
+                            logger.info("Switching from /bin/sh to %s for better terminal compatibility", shell)
+                            break
+            else:
+                shell = os.getenv("COMSPEC", "cmd.exe")
 
         logger.info("Launching terminal %s using shell=%s on channel=%s", term_id, shell, channel_id)
 

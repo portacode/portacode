@@ -92,6 +92,10 @@ class _SystemdUserService:
 
     def install(self) -> None:
         self.service_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Capture current SHELL for the service to prevent using /bin/sh in containers/virtualized environments
+        current_shell = os.getenv("SHELL", "/bin/bash")
+        
         if self.system_mode:
             sudo_needed = os.geteuid() != 0
             prefix = ["sudo"] if sudo_needed else []
@@ -104,6 +108,7 @@ class _SystemdUserService:
                 Type=simple
                 User={self.user}
                 WorkingDirectory={self.home}
+                Environment=SHELL={current_shell}
                 ExecStart={self.python} -m portacode connect --non-interactive
                 Restart=on-failure
                 RestartSec=5
@@ -119,6 +124,7 @@ class _SystemdUserService:
 
                 [Service]
                 Type=simple
+                Environment=SHELL={current_shell}
                 ExecStart={self.python} -m portacode.cli connect --non-interactive
                 Restart=on-failure
                 RestartSec=5
