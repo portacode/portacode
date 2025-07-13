@@ -26,6 +26,7 @@ from .handlers import (
     TerminalStopHandler,
     TerminalListHandler,
     SystemInfoHandler,
+    DirectoryListHandler,
 )
 from .handlers.session import SessionManager
 
@@ -107,6 +108,7 @@ class TerminalManager:
         self._command_registry.register(TerminalStopHandler)
         self._command_registry.register(TerminalListHandler)
         self._command_registry.register(SystemInfoHandler)
+        self._command_registry.register(DirectoryListHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway
