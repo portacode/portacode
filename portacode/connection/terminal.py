@@ -113,31 +113,45 @@ class TerminalManager:
     # ---------------------------------------------------------------------
 
     async def _control_loop(self) -> None:
+        logger.info("terminal_manager: Starting control loop")
         while True:
-            message = await self._control_channel.recv()
-            # Older parts of the system may send *raw* str. Ensure dict.
-            if isinstance(message, str):
-                try:
-                    message = json.loads(message)
-                except Exception:
-                    logger.warning("Discarding non-JSON control frame: %s", message)
+            try:
+                message = await self._control_channel.recv()
+                logger.debug("terminal_manager: Received message: %s", message)
+                
+                # Older parts of the system may send *raw* str. Ensure dict.
+                if isinstance(message, str):
+                    try:
+                        message = json.loads(message)
+                        logger.debug("terminal_manager: Parsed string message to dict")
+                    except Exception:
+                        logger.warning("terminal_manager: Discarding non-JSON control frame: %s", message)
+                        continue
+                if not isinstance(message, dict):
+                    logger.warning("terminal_manager: Invalid control frame type: %r", type(message))
                     continue
-            if not isinstance(message, dict):
-                logger.warning("Invalid control frame type: %r", type(message))
-                continue
-            cmd = message.get("cmd")
-            if not cmd:
-                # Ignore frames that are *events* coming from the remote side
-                if message.get("event"):
+                cmd = message.get("cmd")
+                if not cmd:
+                    # Ignore frames that are *events* coming from the remote side
+                    if message.get("event"):
+                        logger.debug("terminal_manager: Ignoring event message: %s", message.get("event"))
+                        continue
+                    logger.warning("terminal_manager: Missing 'cmd' in control frame: %s", message)
                     continue
-                logger.warning("Missing 'cmd' in control frame: %s", message)
+                reply_chan = message.get("reply_channel")
+                
+                logger.info("terminal_manager: Processing command '%s' with reply_channel=%s", cmd, reply_chan)
+                
+                # Dispatch command through registry
+                handled = await self._command_registry.dispatch(cmd, message, reply_chan)
+                if not handled:
+                    logger.warning("terminal_manager: Command '%s' was not handled by any handler", cmd)
+                    await self._send_error(f"Unknown cmd: {cmd}", reply_chan)
+                    
+            except Exception as exc:
+                logger.exception("terminal_manager: Error in control loop: %s", exc)
+                # Continue processing other messages
                 continue
-            reply_chan = message.get("reply_channel")
-            
-            # Dispatch command through registry
-            handled = await self._command_registry.dispatch(cmd, message, reply_chan)
-            if not handled:
-                await self._send_error(f"Unknown cmd: {cmd}", reply_chan)
 
     # ------------------------------------------------------------------
     # Extension API

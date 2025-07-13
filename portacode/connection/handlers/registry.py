@@ -81,16 +81,19 @@ class CommandRegistry:
         Returns:
             True if handler was found and executed, False otherwise
         """
+        logger.info("registry: Dispatching command '%s' with reply_channel=%s", command_name, reply_channel)
+        
         handler = self.get_handler(command_name)
         if handler is None:
-            logger.warning("No handler found for command: %s", command_name)
+            logger.warning("registry: No handler found for command: %s", command_name)
             return False
         
         try:
             await handler.handle(message, reply_channel)
+            logger.info("registry: Successfully dispatched command '%s'", command_name)
             return True
         except Exception as exc:
-            logger.exception("Error dispatching command %s: %s", command_name, exc)
+            logger.exception("registry: Error dispatching command %s: %s", command_name, exc)
             # Send error response
             error_payload = {"event": "error", "message": str(exc)}
             if reply_channel:

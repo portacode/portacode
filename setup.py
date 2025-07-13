@@ -14,6 +14,7 @@ setup(
     long_description=README,
     long_description_content_type="text/markdown",
     author="Meena Erian",
+    author_email="hi@menas.pro",
     url="https://github.com/portacode/portacode",
     packages=find_packages(exclude=("tests", "server")),
     python_requires=">=3.8",

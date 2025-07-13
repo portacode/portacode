@@ -29,10 +29,20 @@ def cli() -> None:
 @cli.command()
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--detach", "detach", "-d", is_flag=True, help="Run connection in background")
+@click.option("--debug", "debug", is_flag=True, help="Enable debug logging")
 @click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
               help="Skip interactive prompts (used by background service)")
-def connect(gateway: str | None, detach: bool, non_interactive: bool) -> None:  # noqa: D401 – Click callback
+def connect(gateway: str | None, detach: bool, debug: bool, non_interactive: bool) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
+
+    # Set up debug logging if requested
+    if debug:
+        import logging
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        click.echo(click.style("🔍 Debug logging enabled", fg="yellow"))
 
     # 1. Ensure only a single connection per user
     pid_file = get_pid_file()

@@ -81,11 +81,15 @@ class AsyncHandler(BaseHandler):
     
     async def handle(self, message: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
         """Handle the command by executing it and sending the response."""
+        logger.info("handler: Processing command %s with reply_channel=%s", 
+                   self.command_name, reply_channel)
+        
         try:
             response = await self.execute(message)
+            logger.info("handler: Command %s executed successfully", self.command_name)
             await self.send_response(response, reply_channel)
         except Exception as exc:
-            logger.exception("Error in async handler %s: %s", self.command_name, exc)
+            logger.exception("handler: Error in async handler %s: %s", self.command_name, exc)
             await self.send_error(str(exc), reply_channel)
 
 

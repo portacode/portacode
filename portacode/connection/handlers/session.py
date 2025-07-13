@@ -83,11 +83,46 @@ class TerminalSession:
             logger.warning("Failed to write to terminal %s: %s", self.id, exc)
 
     async def stop(self) -> None:
-        if self.proc.returncode is None:
-            self.proc.terminate()
-        if self._reader_task:
-            await self._reader_task
-        await self.proc.wait()
+        """Stop the terminal session with comprehensive logging."""
+        logger.info("session.stop: Starting stop process for session %s (PID: %s)", 
+                   self.id, getattr(self.proc, 'pid', 'unknown'))
+        
+        try:
+            # Check if process is still running
+            if self.proc.returncode is None:
+                logger.info("session.stop: Terminating process for session %s", self.id)
+                self.proc.terminate()
+            else:
+                logger.info("session.stop: Process for session %s already exited (returncode: %s)", 
+                           self.id, self.proc.returncode)
+            
+            # Wait for reader task to complete
+            if self._reader_task and not self._reader_task.done():
+                logger.info("session.stop: Waiting for reader task to complete for session %s", self.id)
+                try:
+                    await asyncio.wait_for(self._reader_task, timeout=5.0)
+                    logger.info("session.stop: Reader task completed for session %s", self.id)
+                except asyncio.TimeoutError:
+                    logger.warning("session.stop: Reader task timeout for session %s, cancelling", self.id)
+                    self._reader_task.cancel()
+                    try:
+                        await self._reader_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            # Wait for process to exit
+            if self.proc.returncode is None:
+                logger.info("session.stop: Waiting for process to exit for session %s", self.id)
+                await self.proc.wait()
+                logger.info("session.stop: Process exited for session %s (returncode: %s)", 
+                           self.id, self.proc.returncode)
+            else:
+                logger.info("session.stop: Process already exited for session %s (returncode: %s)", 
+                           self.id, self.proc.returncode)
+                
+        except Exception as exc:
+            logger.exception("session.stop: Error stopping session %s: %s", self.id, exc)
+            raise
 
     def snapshot_buffer(self) -> str:
         """Return concatenated last buffer contents suitable for UI."""
@@ -168,10 +203,37 @@ class WindowsTerminalSession(TerminalSession):
             logger.warning("Failed to write to terminal %s: %s", self.id, exc)
 
     async def stop(self) -> None:
-        if self._pty.isalive():
-            self._pty.kill()
-        if self._reader_task:
-            await self._reader_task
+        """Stop the Windows terminal session with comprehensive logging."""
+        logger.info("session.stop: Starting stop process for Windows session %s (PID: %s)", 
+                   self.id, getattr(self._pty, 'pid', 'unknown'))
+        
+        try:
+            # Check if PTY is still alive
+            if self._pty.isalive():
+                logger.info("session.stop: Killing PTY process for session %s", self.id)
+                self._pty.kill()
+            else:
+                logger.info("session.stop: PTY process for session %s already exited", self.id)
+            
+            # Wait for reader task to complete
+            if self._reader_task and not self._reader_task.done():
+                logger.info("session.stop: Waiting for reader task to complete for Windows session %s", self.id)
+                try:
+                    await asyncio.wait_for(self._reader_task, timeout=5.0)
+                    logger.info("session.stop: Reader task completed for Windows session %s", self.id)
+                except asyncio.TimeoutError:
+                    logger.warning("session.stop: Reader task timeout for Windows session %s, cancelling", self.id)
+                    self._reader_task.cancel()
+                    try:
+                        await self._reader_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            logger.info("session.stop: Successfully stopped Windows session %s", self.id)
+                
+        except Exception as exc:
+            logger.exception("session.stop: Error stopping Windows session %s: %s", self.id, exc)
+            raise
 
 
 class SessionManager:
@@ -187,8 +249,10 @@ class SessionManager:
 
     async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
         """Create a new terminal session."""
-        term_id = uuid.uuid4().hex
-        channel_id = self._allocate_channel_id()
+        # Use the same UUID for both terminal_id and channel_id to ensure consistency
+        session_uuid = uuid.uuid4().hex
+        term_id = session_uuid
+        channel_id = session_uuid
         channel = self.mux.get_channel(channel_id)
 
         # Choose shell - prefer bash over sh for better terminal compatibility
@@ -270,7 +334,13 @@ class SessionManager:
 
     def remove_session(self, terminal_id: str) -> Optional[TerminalSession]:
         """Remove and return a terminal session."""
-        return self._sessions.pop(terminal_id, None)
+        session = self._sessions.pop(terminal_id, None)
+        if session:
+            logger.info("session_manager: Removed session %s (PID: %s) from session manager", 
+                       terminal_id, getattr(session.proc, 'pid', 'unknown'))
+        else:
+            logger.warning("session_manager: Attempted to remove non-existent session %s", terminal_id)
+        return session
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         """List all terminal sessions."""
