@@ -36,10 +36,11 @@ def _build_child_env() -> Dict[str, str]:
 class TerminalSession:
     """Represents a local shell subprocess bound to a mux channel."""
 
-    def __init__(self, session_id: str, proc: Process, channel: "Channel"):
+    def __init__(self, session_id: str, proc: Process, channel: "Channel", project_id: Optional[str] = None):
         self.id = session_id
         self.proc = proc
         self.channel = channel
+        self.project_id = project_id
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._buffer: deque[str] = deque(maxlen=400)
 
@@ -139,7 +140,7 @@ class TerminalSession:
 class WindowsTerminalSession(TerminalSession):
     """Terminal session backed by a Windows ConPTY."""
 
-    def __init__(self, session_id: str, pty, channel: "Channel"):
+    def __init__(self, session_id: str, pty, channel: "Channel", project_id: Optional[str] = None):
         # Create a proxy for the PTY process
         class _WinPTYProxy:
             def __init__(self, pty):
@@ -157,7 +158,7 @@ class WindowsTerminalSession(TerminalSession):
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._pty.wait)
 
-        super().__init__(session_id, _WinPTYProxy(pty), channel)
+        super().__init__(session_id, _WinPTYProxy(pty), channel, project_id)
         self._pty = pty
 
     async def start_io_forwarding(self) -> None:
@@ -247,7 +248,7 @@ class SessionManager:
         """Allocate a new unique channel ID for a terminal session using UUID."""
         return uuid.uuid4().hex
 
-    async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
+    async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new terminal session."""
         # Use the same UUID for both terminal_id and channel_id to ensure consistency
         session_uuid = uuid.uuid4().hex
@@ -279,7 +280,7 @@ class SessionManager:
                 raise RuntimeError("pywinpty not installed on client")
 
             pty_proc = PtyProcess.spawn(shell, cwd=cwd or None, env=_build_child_env())
-            session = WindowsTerminalSession(term_id, pty_proc, channel)
+            session = WindowsTerminalSession(term_id, pty_proc, channel, project_id)
         else:
             # Unix: try real PTY for proper TTY semantics
             try:
@@ -315,7 +316,7 @@ class SessionManager:
                     cwd=cwd,
                     env=_build_child_env(),
                 )
-            session = TerminalSession(term_id, proc, channel)
+            session = TerminalSession(term_id, proc, channel, project_id)
 
         self._sessions[term_id] = session
         await session.start_io_forwarding()
@@ -326,6 +327,7 @@ class SessionManager:
             "pid": session.proc.pid,
             "shell": shell,
             "cwd": cwd,
+            "project_id": project_id,
         }
 
     def get_session(self, terminal_id: str) -> Optional[TerminalSession]:
@@ -342,8 +344,19 @@ class SessionManager:
             logger.warning("session_manager: Attempted to remove non-existent session %s", terminal_id)
         return session
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        """List all terminal sessions."""
+    def list_sessions(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all terminal sessions, optionally filtered by project_id."""
+        filtered_sessions = []
+        for s in self._sessions.values():
+            if project_id == "all":
+                filtered_sessions.append(s)
+            elif project_id is None:
+                if s.project_id is None:
+                    filtered_sessions.append(s)
+            else:
+                if s.project_id == project_id:
+                    filtered_sessions.append(s)
+
         return [
             {
                 "terminal_id": s.id,
@@ -355,8 +368,9 @@ class SessionManager:
                 "created_at": None,  # Could add timestamp if needed
                 "shell": None,  # Could store shell info if needed
                 "cwd": None,    # Could store cwd info if needed
+                "project_id": s.project_id,
             }
-            for s in self._sessions.values()
+            for s in filtered_sessions
         ]
 
     async def reattach_sessions(self, mux):

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .base import AsyncHandler
 from .session import SessionManager
@@ -21,12 +21,13 @@ class TerminalStartHandler(AsyncHandler):
         """Start a new terminal session."""
         shell = message.get("shell")
         cwd = message.get("cwd")
+        project_id = message.get("project_id")
         
         session_manager = self.context.get("session_manager")
         if not session_manager:
             raise RuntimeError("Session manager not available")
         
-        session_info = await session_manager.create_session(shell=shell, cwd=cwd)
+        session_info = await session_manager.create_session(shell=shell, cwd=cwd, project_id=project_id)
         
         # Start background watcher for process exit
         asyncio.create_task(self._watch_process_exit(session_info["terminal_id"]))
@@ -35,6 +36,7 @@ class TerminalStartHandler(AsyncHandler):
             "event": "terminal_started",
             "terminal_id": session_info["terminal_id"],
             "channel": session_info["channel"],
+            "project_id": session_info.get("project_id"),
         }
     
     async def _watch_process_exit(self, terminal_id: str) -> None:
@@ -53,6 +55,7 @@ class TerminalStartHandler(AsyncHandler):
             "event": "terminal_exit",
             "terminal_id": terminal_id,
             "returncode": session.proc.returncode,
+            "project_id": session.project_id,
         })
         
         # Only cleanup session if it still exists (not already removed by stop handler)
@@ -116,28 +119,30 @@ class TerminalStopHandler(AsyncHandler):
         if not session:
             logger.warning("terminal_stop: Terminal %s not found, may have already been stopped", terminal_id)
             # Send completion event immediately for not found terminals
-            asyncio.create_task(self._send_not_found_completion(terminal_id))
+            asyncio.create_task(self._send_not_found_completion(terminal_id, None))
             return {
                 "event": "terminal_stopped",
                 "terminal_id": terminal_id,
                 "status": "not_found",
-                "message": "Terminal was not found or already stopped"
+                "message": "Terminal was not found or already stopped",
+                "project_id": None,
             }
         
         logger.info("terminal_stop: Found session for terminal %s (PID: %s), starting background stop process", 
                    terminal_id, getattr(session.proc, 'pid', 'unknown'))
         
         # Start stop process in background without blocking the control channel
-        asyncio.create_task(self._stop_session_safely(session, terminal_id))
+        asyncio.create_task(self._stop_session_safely(session, terminal_id, session.project_id))
         
         return {
             "event": "terminal_stopped",
             "terminal_id": terminal_id,
             "status": "stopping",
-            "message": "Terminal stop process initiated"
+            "message": "Terminal stop process initiated",
+            "project_id": session.project_id,
         }
     
-    async def _stop_session_safely(self, session, terminal_id: str) -> None:
+    async def _stop_session_safely(self, session, terminal_id: str, project_id: Optional[str] = None) -> None:
         """Safely stop a session in the background with timeout and error handling."""
         logger.info("terminal_stop: Starting background stop process for terminal %s", terminal_id)
         
@@ -151,7 +156,8 @@ class TerminalStopHandler(AsyncHandler):
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "success",
-                "message": "Terminal stopped successfully"
+                "message": "Terminal stopped successfully",
+                "project_id": project_id,
             })
             
         except asyncio.TimeoutError:
@@ -173,7 +179,8 @@ class TerminalStopHandler(AsyncHandler):
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "timeout",
-                "message": "Terminal stop timed out, process was force killed"
+                "message": "Terminal stop timed out, process was force killed",
+                "project_id": project_id,
             })
             
         except Exception as exc:
@@ -184,16 +191,18 @@ class TerminalStopHandler(AsyncHandler):
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "error",
-                "message": f"Error stopping terminal: {str(exc)}"
+                "message": f"Error stopping terminal: {str(exc)}",
+                "project_id": project_id,
             })
 
-    async def _send_not_found_completion(self, terminal_id: str) -> None:
+    async def _send_not_found_completion(self, terminal_id: str, project_id: Optional[str] = None) -> None:
         """Send completion event for not found terminals."""
         await self.control_channel.send({
             "event": "terminal_stop_completed",
             "terminal_id": terminal_id,
             "status": "not_found",
-            "message": "Terminal was not found or already stopped"
+            "message": "Terminal was not found or already stopped",
+            "project_id": project_id,
         })
 
 
@@ -210,9 +219,16 @@ class TerminalListHandler(AsyncHandler):
         if not session_manager:
             raise RuntimeError("Session manager not available")
         
-        sessions = session_manager.list_sessions()
+        # Accept project_id argument: None (default) = only no project, 'all' = all, else = filter by project_id
+        requested_project_id = message.get("project_id")
+
+        if requested_project_id == "all":
+            sessions = session_manager.list_sessions(project_id="all")
+        else:
+            sessions = session_manager.list_sessions(project_id=requested_project_id)
         
         return {
             "event": "terminal_list",
             "sessions": sessions,
+            "project_id": requested_project_id,
         } 
