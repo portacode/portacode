@@ -51,12 +51,12 @@ class TerminalStartHandler(AsyncHandler):
         
         await session.proc.wait()
         
-        await self.control_channel.send({
+        await self.send_response({
             "event": "terminal_exit",
             "terminal_id": terminal_id,
             "returncode": session.proc.returncode,
             "project_id": session.project_id,
-        })
+        }, project_id=session.project_id)
         
         # Only cleanup session if it still exists (not already removed by stop handler)
         if session_manager.get_session(terminal_id):
@@ -152,13 +152,13 @@ class TerminalStopHandler(AsyncHandler):
             logger.info("terminal_stop: Successfully stopped terminal %s", terminal_id)
             
             # Send success notification
-            await self.control_channel.send({
+            await self.send_response({
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "success",
                 "message": "Terminal stopped successfully",
                 "project_id": project_id,
-            })
+            }, project_id=project_id)
             
         except asyncio.TimeoutError:
             logger.warning("terminal_stop: Stop timeout for terminal %s, forcing kill", terminal_id)
@@ -175,35 +175,35 @@ class TerminalStopHandler(AsyncHandler):
                 logger.error("terminal_stop: Failed to force kill terminal %s: %s", terminal_id, kill_exc)
             
             # Send timeout notification
-            await self.control_channel.send({
+            await self.send_response({
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "timeout",
                 "message": "Terminal stop timed out, process was force killed",
                 "project_id": project_id,
-            })
+            }, project_id=project_id)
             
         except Exception as exc:
             logger.exception("terminal_stop: Error stopping terminal %s: %s", terminal_id, exc)
             
             # Send error notification
-            await self.control_channel.send({
+            await self.send_response({
                 "event": "terminal_stop_completed",
                 "terminal_id": terminal_id,
                 "status": "error",
                 "message": f"Error stopping terminal: {str(exc)}",
                 "project_id": project_id,
-            })
+            }, project_id=project_id)
 
     async def _send_not_found_completion(self, terminal_id: str, project_id: Optional[str] = None) -> None:
         """Send completion event for not found terminals."""
-        await self.control_channel.send({
+        await self.send_response({
             "event": "terminal_stop_completed",
             "terminal_id": terminal_id,
             "status": "not_found",
             "message": "Terminal was not found or already stopped",
             "project_id": project_id,
-        })
+        }, project_id=project_id)
 
 
 class TerminalListHandler(AsyncHandler):

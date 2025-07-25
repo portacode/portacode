@@ -94,13 +94,42 @@ class CommandRegistry:
             return True
         except Exception as exc:
             logger.exception("registry: Error dispatching command %s: %s", command_name, exc)
-            # Send error response
-            error_payload = {"event": "error", "message": str(exc)}
-            if reply_channel:
-                error_payload["reply_channel"] = reply_channel
-            await self.control_channel.send(error_payload)
+            # Send session-aware error response
+            await self._send_session_aware_error(str(exc), reply_channel, message.get("project_id"))
             return False
     
+    async def _send_session_aware_error(self, message: str, reply_channel: Optional[str] = None, project_id: str = None) -> None:
+        """Send an error response with client session awareness."""
+        error_payload = {"event": "error", "message": message}
+        
+        # Get client session manager from context
+        client_session_manager = self.context.get("client_session_manager")
+        
+        if client_session_manager and client_session_manager.has_interested_clients():
+            # Get target sessions
+            target_sessions = client_session_manager.get_target_sessions(project_id)
+            if not target_sessions:
+                logger.debug("registry: No target sessions found, skipping error send")
+                return
+            
+            # Add session targeting information
+            error_payload["client_sessions"] = target_sessions
+            
+            # Add backward compatibility reply_channel (first session if not provided)
+            if not reply_channel:
+                reply_channel = client_session_manager.get_reply_channel_for_compatibility()
+            if reply_channel:
+                error_payload["reply_channel"] = reply_channel
+            
+            logger.debug("registry: Sending error to %d client sessions: %s", 
+                        len(target_sessions), target_sessions)
+        else:
+            # Fallback to original behavior
+            if reply_channel:
+                error_payload["reply_channel"] = reply_channel
+        
+        await self.control_channel.send(error_payload)
+
     def update_context(self, context: Dict[str, Any]) -> None:
         """Update the shared context for all handlers.
         

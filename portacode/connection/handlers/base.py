@@ -40,28 +40,54 @@ class BaseHandler(ABC):
         """
         pass
     
-    async def send_response(self, payload: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
-        """Send a response back to the gateway.
+    async def send_response(self, payload: Dict[str, Any], reply_channel: Optional[str] = None, project_id: str = None) -> None:
+        """Send a response back to the gateway with client session awareness.
         
         Args:
             payload: Response payload
-            reply_channel: Optional reply channel
+            reply_channel: Optional reply channel for backward compatibility
+            project_id: Optional project filter for targeting specific sessions
         """
-        if reply_channel:
-            payload["reply_channel"] = reply_channel
-        await self.control_channel.send(payload)
+        # Get client session manager from context
+        client_session_manager = self.context.get("client_session_manager")
+        
+        if client_session_manager and client_session_manager.has_interested_clients():
+            # Get target sessions
+            target_sessions = client_session_manager.get_target_sessions(project_id)
+            if not target_sessions:
+                logger.debug("handler: No target sessions found, skipping response send")
+                return
+            
+            # Add session targeting information
+            enhanced_payload = dict(payload)
+            enhanced_payload["client_sessions"] = target_sessions
+            
+            # Add backward compatibility reply_channel (first session if not provided)
+            if not reply_channel:
+                reply_channel = client_session_manager.get_reply_channel_for_compatibility()
+            if reply_channel:
+                enhanced_payload["reply_channel"] = reply_channel
+            
+            logger.debug("handler: Sending response to %d client sessions: %s", 
+                        len(target_sessions), target_sessions)
+            
+            await self.control_channel.send(enhanced_payload)
+        else:
+            # Fallback to original behavior if no client session manager or no clients
+            if reply_channel:
+                payload["reply_channel"] = reply_channel
+            await self.control_channel.send(payload)
     
-    async def send_error(self, message: str, reply_channel: Optional[str] = None) -> None:
-        """Send an error response.
+    async def send_error(self, message: str, reply_channel: Optional[str] = None, project_id: str = None) -> None:
+        """Send an error response with client session awareness.
         
         Args:
             message: Error message
-            reply_channel: Optional reply channel
+            reply_channel: Optional reply channel for backward compatibility
+            project_id: Optional project filter for targeting specific sessions
         """
         payload = {"event": "error", "message": message}
-        if reply_channel:
-            payload["reply_channel"] = reply_channel
-        await self.control_channel.send(payload)
+        await self.send_response(payload, reply_channel, project_id)
 
 
 class AsyncHandler(BaseHandler):
@@ -87,10 +113,15 @@ class AsyncHandler(BaseHandler):
         try:
             response = await self.execute(message)
             logger.info("handler: Command %s executed successfully", self.command_name)
-            await self.send_response(response, reply_channel)
+            
+            # Extract project_id from response for session targeting
+            project_id = response.get("project_id")
+            await self.send_response(response, reply_channel, project_id)
         except Exception as exc:
             logger.exception("handler: Error in async handler %s: %s", self.command_name, exc)
-            await self.send_error(str(exc), reply_channel)
+            # Extract project_id from original message for error targeting
+            project_id = message.get("project_id")
+            await self.send_error(str(exc), reply_channel, project_id)
 
 
 class SyncHandler(BaseHandler):
@@ -113,7 +144,12 @@ class SyncHandler(BaseHandler):
         try:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(None, self.execute, message)
-            await self.send_response(response, reply_channel)
+            
+            # Extract project_id from response for session targeting
+            project_id = response.get("project_id")
+            await self.send_response(response, reply_channel, project_id)
         except Exception as exc:
             logger.exception("Error in sync handler %s: %s", self.command_name, exc)
-            await self.send_error(str(exc), reply_channel) 
+            # Extract project_id from original message for error targeting
+            project_id = message.get("project_id")
+            await self.send_error(str(exc), reply_channel, project_id) 
