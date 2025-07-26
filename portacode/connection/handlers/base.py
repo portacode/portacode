@@ -116,6 +116,8 @@ class AsyncHandler(BaseHandler):
             
             # Extract project_id from response for session targeting
             project_id = response.get("project_id")
+            logger.info("handler: %s response project_id=%s, response=%s", 
+                       self.command_name, project_id, response)
             await self.send_response(response, reply_channel, project_id)
         except Exception as exc:
             logger.exception("handler: Error in async handler %s: %s", self.command_name, exc)

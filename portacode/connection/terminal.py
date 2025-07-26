@@ -92,7 +92,12 @@ class ClientSessionManager:
         
         target_sessions = []
         for session in self._client_sessions.values():
-            # If project_id specified, filter by project
+            # Dashboard sessions should receive ALL events regardless of project_id
+            if session.get("connection_type") == "dashboard":
+                target_sessions.append(session.get("channel_name"))
+                continue
+            
+            # For project sessions, filter by project_id if specified
             if project_id and session.get("project_id") != project_id:
                 continue
             target_sessions.append(session.get("channel_name"))
@@ -241,9 +246,17 @@ class TerminalManager:
                 # Handle client sessions update directly (special case)
                 if cmd == "client_sessions_update":
                     sessions = message.get("sessions", [])
-                    logger.info("terminal_manager: Handling client_sessions_update with %d sessions", len(sessions))
+                    logger.info("terminal_manager: 🔔 RECEIVED client_sessions_update with %d sessions", len(sessions))
+                    logger.debug("terminal_manager: Session details: %s", sessions)
                     self._client_session_manager.update_sessions(sessions)
-                    logger.info("terminal_manager: Updated client sessions (%d sessions)", len(sessions))
+                    logger.info("terminal_manager: ✅ Updated client sessions (%d sessions)", len(sessions))
+                    
+                    # Auto-send initial data to new clients
+                    if len(sessions) > 0:
+                        logger.info("terminal_manager: 🚀 Triggering auto-send of initial data to clients")
+                        await self._send_initial_data_to_clients()
+                    else:
+                        logger.info("terminal_manager: ℹ️ No sessions to send data to")
                     continue
                 
                 # Dispatch command through registry
@@ -256,6 +269,56 @@ class TerminalManager:
                 logger.exception("terminal_manager: Error in control loop: %s", exc)
                 # Continue processing other messages
                 continue
+
+    async def _send_initial_data_to_clients(self):
+        """Send initial system info and terminal list to connected clients."""
+        logger.info("terminal_manager: 📤 Starting to send initial data to connected clients")
+        
+        try:
+            # Send system_info
+            logger.info("terminal_manager: 📊 Dispatching system_info command")
+            await self._command_registry.dispatch("system_info", {}, None)
+            logger.info("terminal_manager: ✅ system_info dispatch completed")
+            
+            # Send terminal_list for each project that has connected clients
+            logger.info("terminal_manager: 📋 Preparing to send terminal_list to clients")
+            
+            # Get unique project IDs from connected clients
+            project_ids = set()
+            all_sessions = self._client_session_manager.get_sessions()
+            logger.info(f"terminal_manager: Analyzing {len(all_sessions)} client sessions for project IDs")
+            
+            for session in all_sessions.values():
+                project_id = session.get("project_id")
+                connection_type = session.get("connection_type", "unknown")
+                logger.debug(f"terminal_manager: Session {session.get('channel_name')}: project_id={project_id}, type={connection_type}")
+                if project_id:
+                    project_ids.add(project_id)
+            
+            logger.info(f"terminal_manager: Found {len(project_ids)} unique project IDs: {list(project_ids)}")
+            
+            # Send terminal_list for each project, plus one without project_id for general sessions
+            if not project_ids:
+                # No specific projects, send general terminal_list
+                logger.info("terminal_manager: 📋 Dispatching general terminal_list (no specific projects)")
+                await self._command_registry.dispatch("terminal_list", {}, None)
+                logger.info("terminal_manager: ✅ General terminal_list dispatch completed")
+            else:
+                # Send terminal_list for each project
+                for project_id in project_ids:
+                    logger.info(f"terminal_manager: 📋 Dispatching terminal_list for project {project_id}")
+                    await self._command_registry.dispatch("terminal_list", {"project_id": project_id}, None)
+                    logger.info(f"terminal_manager: ✅ Project {project_id} terminal_list dispatch completed")
+                    
+                # Also send general terminal_list for dashboard connections
+                logger.info("terminal_manager: 📋 Dispatching general terminal_list for dashboard connections")
+                await self._command_registry.dispatch("terminal_list", {}, None)
+                logger.info("terminal_manager: ✅ General terminal_list for dashboard dispatch completed")
+            
+            logger.info("terminal_manager: 🎉 All initial data sent successfully")
+                    
+        except Exception as exc:
+            logger.exception("terminal_manager: ❌ Error sending initial data to clients: %s", exc)
 
     # ------------------------------------------------------------------
     # Extension API
