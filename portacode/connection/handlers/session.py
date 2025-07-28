@@ -36,11 +36,12 @@ def _build_child_env() -> Dict[str, str]:
 class TerminalSession:
     """Represents a local shell subprocess bound to a mux channel."""
 
-    def __init__(self, session_id: str, proc: Process, channel: "Channel", project_id: Optional[str] = None):
+    def __init__(self, session_id: str, proc: Process, channel: "Channel", project_id: Optional[str] = None, terminal_manager: Optional["TerminalManager"] = None):
         self.id = session_id
         self.proc = proc
         self.channel = channel
         self.project_id = project_id
+        self.terminal_manager = terminal_manager
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._buffer: deque[str] = deque(maxlen=400)
 
@@ -58,7 +59,17 @@ class TerminalSession:
                     logging.getLogger("portacode.terminal").debug(f"[MUX] Terminal {self.id} output: {text!r}")
                     self._buffer.append(text)
                     try:
-                        await self.channel.send(text)
+                        # Send terminal data via control channel with client session targeting
+                        if self.terminal_manager:
+                            await self.terminal_manager._send_session_aware({
+                                "event": "terminal_data",
+                                "channel": self.id,
+                                "data": text,
+                                "project_id": self.project_id
+                            }, project_id=self.project_id)
+                        else:
+                            # Fallback to raw channel for backward compatibility
+                            await self.channel.send(text)
                     except Exception as exc:
                         logger.warning("Failed to forward terminal output: %s", exc)
                         await asyncio.sleep(0.5)
@@ -147,7 +158,7 @@ class TerminalSession:
 class WindowsTerminalSession(TerminalSession):
     """Terminal session backed by a Windows ConPTY."""
 
-    def __init__(self, session_id: str, pty, channel: "Channel", project_id: Optional[str] = None):
+    def __init__(self, session_id: str, pty, channel: "Channel", project_id: Optional[str] = None, terminal_manager: Optional["TerminalManager"] = None):
         # Create a proxy for the PTY process
         class _WinPTYProxy:
             def __init__(self, pty):
@@ -165,7 +176,7 @@ class WindowsTerminalSession(TerminalSession):
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._pty.wait)
 
-        super().__init__(session_id, _WinPTYProxy(pty), channel, project_id)
+        super().__init__(session_id, _WinPTYProxy(pty), channel, project_id, terminal_manager)
         self._pty = pty
 
     async def start_io_forwarding(self) -> None:
@@ -188,7 +199,17 @@ class WindowsTerminalSession(TerminalSession):
                     logging.getLogger("portacode.terminal").debug(f"[MUX] Terminal {self.id} output: {text!r}")
                     self._buffer.append(text)
                     try:
-                        await self.channel.send(text)
+                        # Send terminal data via control channel with client session targeting
+                        if self.terminal_manager:
+                            await self.terminal_manager._send_session_aware({
+                                "event": "terminal_data",
+                                "channel": self.id,
+                                "data": text,
+                                "project_id": self.project_id
+                            }, project_id=self.project_id)
+                        else:
+                            # Fallback to raw channel for backward compatibility
+                            await self.channel.send(text)
                     except Exception as exc:
                         logger.warning("Failed to forward terminal output: %s", exc)
                         await asyncio.sleep(0.5)
@@ -247,8 +268,9 @@ class WindowsTerminalSession(TerminalSession):
 class SessionManager:
     """Manages terminal sessions."""
 
-    def __init__(self, mux):
+    def __init__(self, mux, terminal_manager=None):
         self.mux = mux
+        self.terminal_manager = terminal_manager
         self._sessions: Dict[str, TerminalSession] = {}
 
     def _allocate_channel_id(self) -> str:
@@ -287,7 +309,7 @@ class SessionManager:
                 raise RuntimeError("pywinpty not installed on client")
 
             pty_proc = PtyProcess.spawn(shell, cwd=cwd or None, env=_build_child_env())
-            session = WindowsTerminalSession(term_id, pty_proc, channel, project_id)
+            session = WindowsTerminalSession(term_id, pty_proc, channel, project_id, self.terminal_manager)
         else:
             # Unix: try real PTY for proper TTY semantics
             try:
@@ -320,7 +342,7 @@ class SessionManager:
                     cwd=cwd,
                     env=_build_child_env(),
                 )
-            session = TerminalSession(term_id, proc, channel, project_id)
+            session = TerminalSession(term_id, proc, channel, project_id, self.terminal_manager)
 
         self._sessions[term_id] = session
         await session.start_io_forwarding()

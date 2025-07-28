@@ -167,11 +167,12 @@ class TerminalManager:
         
         # Only create new session manager on initial setup, preserve existing one on reconnection
         if is_initial or self._session_manager is None:
-            self._session_manager = SessionManager(mux)
+            self._session_manager = SessionManager(mux, terminal_manager=self)
             logger.info("Created new SessionManager")
         else:
-            # Update existing session manager's mux reference
+            # Update existing session manager's mux and terminal_manager references
             self._session_manager.mux = mux
+            self._session_manager.terminal_manager = self
             logger.info("Preserved existing SessionManager with %d sessions", len(self._session_manager._sessions))
         
         # Create context for handlers
