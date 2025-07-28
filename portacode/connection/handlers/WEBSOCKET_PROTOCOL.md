@@ -80,12 +80,14 @@ Actions are messages sent from the server to the device, placed within the `payl
   "payload": {
     "arg1": "value1",
     "...": "..."
-  }
+  },
+  "source_client_session": "channel.abc123"
 }
 ```
 
 *   `command` (string, mandatory): The name of the action to be executed (e.g., `terminal_start`).
 *   `payload` (object, mandatory): An object containing the specific arguments for the action.
+*   `source_client_session` (string, mandatory): The channel name of the client session that originated this command. This field is automatically added by the server and allows devices to identify which specific client sent the command.
 
 **Note**: Actions do not require targeting information - responses are automatically routed using the client session management system.
 

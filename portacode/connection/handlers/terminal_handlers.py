@@ -213,6 +213,34 @@ class TerminalListHandler(AsyncHandler):
     def command_name(self) -> str:
         return "terminal_list"
     
+    async def handle(self, message: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
+        """Handle the command by executing it and sending the response to the requesting client session."""
+        logger.info("handler: Processing command %s with reply_channel=%s", 
+                   self.command_name, reply_channel)
+        
+        try:
+            response = await self.execute(message)
+            logger.info("handler: Command %s executed successfully", self.command_name)
+            
+            # Get the source client session from the message
+            source_client_session = message.get("source_client_session")
+            project_id = response.get("project_id")
+            
+            logger.info("handler: %s response project_id=%s, source_client_session=%s", 
+                       self.command_name, project_id, source_client_session)
+            
+            # Send response only to the requesting client session
+            if source_client_session:
+                # Add client_sessions field to target only the requesting session
+                response["client_sessions"] = [source_client_session]
+                await self.control_channel.send(response)
+            else:
+                # Fallback to original behavior if no source_client_session
+                await self.send_response(response, reply_channel, project_id)
+        except Exception as exc:
+            logger.exception("handler: Error in command %s: %s", self.command_name, exc)
+            await self.send_error(str(exc), reply_channel, message.get("project_id"))
+    
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """List all terminal sessions."""
         session_manager = self.context.get("session_manager")

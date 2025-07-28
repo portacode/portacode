@@ -41,16 +41,28 @@ class ClientSessionManager:
         self._debug_file_path = os.path.join(os.getcwd(), "client_sessions.json")
         logger.info("ClientSessionManager initialized")
     
-    def update_sessions(self, sessions: List[Dict]) -> None:
-        """Update the client sessions with new data from server."""
+    def update_sessions(self, sessions: List[Dict]) -> List[str]:
+        """Update the client sessions with new data from server.
+        
+        Returns:
+            List of channel_names for newly added sessions
+        """
+        old_sessions = set(self._client_sessions.keys())
         self._client_sessions = {}
         for session in sessions:
             channel_name = session.get("channel_name")
             if channel_name:
                 self._client_sessions[channel_name] = session
         
-        logger.info(f"Updated client sessions: {len(self._client_sessions)} sessions")
+        new_sessions = set(self._client_sessions.keys())
+        newly_added_sessions = list(new_sessions - old_sessions)
+        
+        logger.info(f"Updated client sessions: {len(self._client_sessions)} sessions, {len(newly_added_sessions)} newly added")
+        if newly_added_sessions:
+            logger.info(f"Newly added sessions: {newly_added_sessions}")
+        
         self._write_debug_file()
+        return newly_added_sessions
     
     def get_sessions(self) -> Dict[str, Dict]:
         """Get all current client sessions."""
@@ -82,7 +94,8 @@ class ClientSessionManager:
         """Get list of channel_names for target client sessions.
         
         Args:
-            project_id: If specified, only include sessions for this project
+            project_id: If specified, only include sessions for this project.
+                       Dashboard sessions only receive events when project_id is None/empty.
             
         Returns:
             List of channel_names to target
@@ -92,9 +105,10 @@ class ClientSessionManager:
         
         target_sessions = []
         for session in self._client_sessions.values():
-            # Dashboard sessions should receive ALL events regardless of project_id
+            # Dashboard sessions only receive events when project_id is None/empty
             if session.get("connection_type") == "dashboard":
-                target_sessions.append(session.get("channel_name"))
+                if project_id is None:
+                    target_sessions.append(session.get("channel_name"))
                 continue
             
             # For project sessions, filter by project_id if specified
@@ -103,6 +117,39 @@ class ClientSessionManager:
             target_sessions.append(session.get("channel_name"))
         
         return [s for s in target_sessions if s]  # Filter out None values
+    
+    def get_target_sessions_for_new_clients(self, new_session_names: List[str], project_id: str = None) -> List[str]:
+        """Get target sessions for newly added client sessions.
+        
+        Args:
+            new_session_names: List of newly added session channel names
+            project_id: If specified, only include sessions for this project.
+                       Dashboard sessions only receive events when project_id is None/empty.
+            
+        Returns:
+            List of channel_names to target from newly added sessions
+        """
+        if not new_session_names or not self._client_sessions:
+            return []
+        
+        target_sessions = []
+        for channel_name in new_session_names:
+            session = self._client_sessions.get(channel_name)
+            if not session:
+                continue
+                
+            # Dashboard sessions only receive events when project_id is None/empty
+            if session.get("connection_type") == "dashboard":
+                if project_id is None:
+                    target_sessions.append(channel_name)
+                continue
+            
+            # For project sessions, filter by project_id if specified
+            if project_id and session.get("project_id") != project_id:
+                continue
+            target_sessions.append(channel_name)
+        
+        return target_sessions
     
     def get_reply_channel_for_compatibility(self) -> Optional[str]:
         """Get the first session's channel_name for backward compatibility.
@@ -249,15 +296,15 @@ class TerminalManager:
                     sessions = message.get("sessions", [])
                     logger.info("terminal_manager: 🔔 RECEIVED client_sessions_update with %d sessions", len(sessions))
                     logger.debug("terminal_manager: Session details: %s", sessions)
-                    self._client_session_manager.update_sessions(sessions)
+                    newly_added_sessions = self._client_session_manager.update_sessions(sessions)
                     logger.info("terminal_manager: ✅ Updated client sessions (%d sessions)", len(sessions))
                     
-                    # Auto-send initial data to new clients
-                    if len(sessions) > 0:
-                        logger.info("terminal_manager: 🚀 Triggering auto-send of initial data to clients")
-                        await self._send_initial_data_to_clients()
+                    # Auto-send initial data only to newly added clients
+                    if newly_added_sessions:
+                        logger.info("terminal_manager: 🚀 Triggering auto-send of initial data to newly added clients")
+                        await self._send_initial_data_to_clients(newly_added_sessions)
                     else:
-                        logger.info("terminal_manager: ℹ️ No sessions to send data to")
+                        logger.info("terminal_manager: ℹ️ No new sessions to send data to")
                     continue
                 
                 # Dispatch command through registry
@@ -271,55 +318,127 @@ class TerminalManager:
                 # Continue processing other messages
                 continue
 
-    async def _send_initial_data_to_clients(self):
-        """Send initial system info and terminal list to connected clients."""
-        logger.info("terminal_manager: 📤 Starting to send initial data to connected clients")
+    async def _send_initial_data_to_clients(self, newly_added_sessions: List[str] = None):
+        """Send initial system info and terminal list to connected clients.
+        
+        Args:
+            newly_added_sessions: If provided, only send data to these specific sessions
+        """
+        if newly_added_sessions:
+            logger.info("terminal_manager: 📤 Starting to send initial data to newly added clients: %s", newly_added_sessions)
+        else:
+            logger.info("terminal_manager: 📤 Starting to send initial data to all connected clients")
         
         try:
-            # Send system_info
+            # Send system_info (always broadcasts to all clients for now)
             logger.info("terminal_manager: 📊 Dispatching system_info command")
             await self._command_registry.dispatch("system_info", {}, None)
             logger.info("terminal_manager: ✅ system_info dispatch completed")
             
-            # Send terminal_list for each project that has connected clients
+            # Send terminal_list only to newly added clients or to all if not specified
             logger.info("terminal_manager: 📋 Preparing to send terminal_list to clients")
             
-            # Get unique project IDs from connected clients
-            project_ids = set()
-            all_sessions = self._client_session_manager.get_sessions()
-            logger.info(f"terminal_manager: Analyzing {len(all_sessions)} client sessions for project IDs")
-            
-            for session in all_sessions.values():
-                project_id = session.get("project_id")
-                connection_type = session.get("connection_type", "unknown")
-                logger.debug(f"terminal_manager: Session {session.get('channel_name')}: project_id={project_id}, type={connection_type}")
-                if project_id:
-                    project_ids.add(project_id)
-            
-            logger.info(f"terminal_manager: Found {len(project_ids)} unique project IDs: {list(project_ids)}")
-            
-            # Send terminal_list for each project, plus one without project_id for general sessions
-            if not project_ids:
-                # No specific projects, send general terminal_list
-                logger.info("terminal_manager: 📋 Dispatching general terminal_list (no specific projects)")
-                await self._command_registry.dispatch("terminal_list", {}, None)
-                logger.info("terminal_manager: ✅ General terminal_list dispatch completed")
-            else:
-                # Send terminal_list for each project
+            if newly_added_sessions:
+                # Get unique project IDs from the newly added sessions
+                project_ids = set()
+                all_sessions = self._client_session_manager.get_sessions()
+                
+                for session_name in newly_added_sessions:
+                    session = all_sessions.get(session_name)
+                    if session:
+                        project_id = session.get("project_id")
+                        connection_type = session.get("connection_type", "unknown")
+                        logger.debug(f"terminal_manager: New session {session_name}: project_id={project_id}, type={connection_type}")
+                        if project_id:
+                            project_ids.add(project_id)
+                
+                logger.info(f"terminal_manager: Found {len(project_ids)} unique project IDs from new sessions: {list(project_ids)}")
+                
+                # Send terminal_list for each project to interested new sessions
                 for project_id in project_ids:
-                    logger.info(f"terminal_manager: 📋 Dispatching terminal_list for project {project_id}")
-                    await self._command_registry.dispatch("terminal_list", {"project_id": project_id}, None)
-                    logger.info(f"terminal_manager: ✅ Project {project_id} terminal_list dispatch completed")
-                    
-                # Also send general terminal_list for dashboard connections
-                logger.info("terminal_manager: 📋 Dispatching general terminal_list for dashboard connections")
-                await self._command_registry.dispatch("terminal_list", {}, None)
-                logger.info("terminal_manager: ✅ General terminal_list for dashboard dispatch completed")
+                    target_sessions = self._client_session_manager.get_target_sessions_for_new_clients(newly_added_sessions, project_id)
+                    if target_sessions:
+                        logger.info(f"terminal_manager: 📋 Sending terminal_list for project {project_id} to sessions: {target_sessions}")
+                        await self._send_targeted_terminal_list({"project_id": project_id}, target_sessions)
+                        logger.info(f"terminal_manager: ✅ Project {project_id} terminal_list sent to new sessions")
+                
+                # Also send general terminal_list for dashboard connections (project_id=None)
+                dashboard_targets = self._client_session_manager.get_target_sessions_for_new_clients(newly_added_sessions, None)
+                if dashboard_targets:
+                    logger.info("terminal_manager: 📋 Sending general terminal_list to new dashboard sessions: %s", dashboard_targets)
+                    await self._send_targeted_terminal_list({}, dashboard_targets)
+                    logger.info("terminal_manager: ✅ General terminal_list sent to new dashboard sessions")
+            else:
+                # Original behavior for all clients
+                # Get unique project IDs from connected clients
+                project_ids = set()
+                all_sessions = self._client_session_manager.get_sessions()
+                logger.info(f"terminal_manager: Analyzing {len(all_sessions)} client sessions for project IDs")
+                
+                for session in all_sessions.values():
+                    project_id = session.get("project_id")
+                    connection_type = session.get("connection_type", "unknown")
+                    logger.debug(f"terminal_manager: Session {session.get('channel_name')}: project_id={project_id}, type={connection_type}")
+                    if project_id:
+                        project_ids.add(project_id)
+                
+                logger.info(f"terminal_manager: Found {len(project_ids)} unique project IDs: {list(project_ids)}")
+                
+                # Send terminal_list for each project, plus one without project_id for general sessions
+                if not project_ids:
+                    # No specific projects, send general terminal_list
+                    logger.info("terminal_manager: 📋 Dispatching general terminal_list (no specific projects)")
+                    await self._command_registry.dispatch("terminal_list", {}, None)
+                    logger.info("terminal_manager: ✅ General terminal_list dispatch completed")
+                else:
+                    # Send terminal_list for each project
+                    for project_id in project_ids:
+                        logger.info(f"terminal_manager: 📋 Dispatching terminal_list for project {project_id}")
+                        await self._command_registry.dispatch("terminal_list", {"project_id": project_id}, None)
+                        logger.info(f"terminal_manager: ✅ Project {project_id} terminal_list dispatch completed")
+                        
+                    # Also send general terminal_list for dashboard connections
+                    logger.info("terminal_manager: 📋 Dispatching general terminal_list for dashboard connections")
+                    await self._command_registry.dispatch("terminal_list", {}, None)
+                    logger.info("terminal_manager: ✅ General terminal_list for dashboard dispatch completed")
             
             logger.info("terminal_manager: 🎉 All initial data sent successfully")
                     
         except Exception as exc:
             logger.exception("terminal_manager: ❌ Error sending initial data to clients: %s", exc)
+    
+    async def _send_targeted_terminal_list(self, message: Dict[str, Any], target_sessions: List[str]) -> None:
+        """Send terminal_list command to specific client sessions.
+        
+        Args:
+            message: The terminal_list command message
+            target_sessions: List of client session channel names to target
+        """
+        try:
+            # Get the terminal list from session manager
+            session_manager = self._session_manager
+            if not session_manager:
+                logger.error("terminal_manager: Session manager not available for targeted terminal_list")
+                return
+            
+            requested_project_id = message.get("project_id")
+            if requested_project_id == "all":
+                sessions = session_manager.list_sessions(project_id="all")
+            else:
+                sessions = session_manager.list_sessions(project_id=requested_project_id)
+            
+            # Build the response payload
+            response = {
+                "event": "terminal_list",
+                "sessions": sessions,
+                "project_id": requested_project_id,
+                "client_sessions": target_sessions
+            }
+            
+            logger.debug("terminal_manager: Sending targeted terminal_list: %s", response)
+            await self._control_channel.send(response)
+        except Exception as exc:
+            logger.exception("terminal_manager: Error sending targeted terminal_list: %s", exc)
 
     # ------------------------------------------------------------------
     # Extension API
