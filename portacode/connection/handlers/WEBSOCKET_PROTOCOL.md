@@ -2,6 +2,51 @@
 
 This document outlines the WebSocket communication protocol between the Portacode server and the connected client devices.
 
+## Table of Contents
+
+- [Raw Message Format](#raw-message-format)
+- [Actions](#actions)
+  - [Terminal Actions](#terminal-actions)
+    - [`terminal_start`](#terminal_start)
+    - [`terminal_send`](#terminal_send)
+    - [`terminal_stop`](#terminal_stop)
+    - [`terminal_list`](#terminal_list)
+  - [System Actions](#system-actions)
+    - [`system_info`](#system_info)
+  - [File Actions](#file-actions)
+    - [`file_read`](#file_read)
+    - [`file_write`](#file_write)
+    - [`directory_list`](#directory_list)
+    - [`file_info`](#file_info)
+    - [`file_delete`](#file_delete)
+  - [Client Session Management](#client-session-management)
+    - [`client_sessions_update`](#client_sessions_update)
+- [Events](#events)
+  - [Error Events](#error-events)
+    - [`error`](#error)
+  - [Terminal Events](#terminal-events)
+    - [`terminal_started`](#terminal_started)
+    - [`terminal_exit`](#terminal_exit)
+    - [`terminal_send_ack`](#terminal_send_ack)
+    - [`terminal_stopped`](#terminal_stopped)
+    - [`terminal_stop_completed`](#terminal_stop_completed)
+    - [`terminal_list`](#terminal_list-event)
+  - [System Events](#system-events)
+    - [`system_info`](#system_info-event)
+  - [File Events](#file-events)
+    - [`file_read_response`](#file_read_response)
+    - [`file_write_response`](#file_write_response)
+    - [`directory_list_response`](#directory_list_response)
+    - [`file_info_response`](#file_info_response)
+    - [`file_delete_response`](#file_delete_response)
+  - [Client Session Events](#client-session-events)
+    - [`request_client_sessions`](#request_client_sessions)
+  - [Terminal Data](#terminal-data)
+    - [Terminal I/O Data](#terminal_data)
+  - [Server-Side Events](#server-side-events)
+    - [`device_status`](#device_status)
+    - [`devices`](#devices)
+
 ## Raw Message Format
 
 All communication over the WebSocket is managed by a [multiplexer](./multiplex.py) that wraps every message in a JSON object with a `channel` and a `payload`. This allows for multiple virtual communication channels over a single connection.
@@ -41,7 +86,7 @@ Actions are messages sent from the server to the device, placed within the `payl
 
 *   `command` (string, mandatory): The name of the action to be executed (e.g., `terminal_start`).
 *   `payload` (object, mandatory): An object containing the specific arguments for the action.
-*   `reply_channel` (string, optional): A channel name that the device will echo back in its response. The difference between this field and the `channel` field handled in the device connection [multiplexer](./multiplex.py), is simply that `channel` defines which application in the device is handeling this communication, while `reply_channel` defines which client session on the server side is communicating with the device. That's why the [multiplexer](./multiplex.py) for `channel` is here, while the multiplexer for the `reply_channel` is on the other side of the conversation. A lot like the source port number and destination port number in TCP/IP.
+*   `reply_channel` (string, optional): **DEPRECATED** - A channel name for backward compatibility. Modern implementations should use the `client_sessions` mechanism instead.
 
 ### `terminal_start`
 
@@ -177,6 +222,20 @@ Deletes a file or directory. Handled by [`file_delete`](./file_handlers.py).
 *   On success, the device will respond with a [`file_delete_response`](#file_delete_response) event.
 *   On error, a generic [`error`](#error) event is sent.
 
+### Client Session Management
+
+### `client_sessions_update`
+
+Sends updated client session information to the device. This is a special internal action used by the server to inform devices about connected client sessions.
+
+**Payload Fields:**
+
+*   `sessions` (array, mandatory): Array of client session objects containing connection information.
+
+**Responses:**
+
+This action does not generate a response event.
+
 ---
 
 ## Events
@@ -194,7 +253,8 @@ Events are messages sent from the device to the server, placed within the `paylo
 ```
 
 *   `event` (string, mandatory): The name of the event being sent (e.g., `terminal_started`).
-*   <a name="reply_channel"></a>`reply_channel` (string, optional): If the event is a direct response to an action that included a `reply_channel`, this field will contain the same value. This allows the server to correlate responses with their original requests.
+*   <a name="reply_channel"></a>`reply_channel` (string, optional): **DEPRECATED** - For backward compatibility only. Modern events include `client_sessions` array for targeting.
+*   `client_sessions` (array, optional): Array of client session channel names that should receive this event. This is the modern way to target specific connected clients.
 
 ### <a name="error"></a>`error`
 
@@ -329,3 +389,52 @@ Confirms that a file or directory has been deleted in response to a `file_delete
 *   `path` (string, mandatory): The path of the deleted file or directory.
 *   `deleted_type` (string, mandatory): The type of the deleted item ("file" or "directory").
 *   `success` (boolean, mandatory): Indicates whether the deletion was successful.
+
+### Client Session Events
+
+### <a name="request_client_sessions"></a>`request_client_sessions`
+
+Sent by the device to request the current list of connected client sessions from the server. This is an internal event used during device initialization and reconnection.
+
+**Event Fields:**
+
+This event carries no additional fields.
+
+### Terminal Data
+
+### <a name="terminal_data"></a>Terminal I/O Data
+
+Terminal input/output data is sent directly on terminal channels (not on the control channel). Each terminal session has its own dedicated channel identified by the terminal's UUID.
+
+**Terminal Data Format:**
+
+```json
+{
+  "channel": "<terminal_uuid>",
+  "payload": "<terminal_output_string>"
+}
+```
+
+*   Terminal output is sent as raw string data in the payload
+*   Input to terminals is sent the same way but in the opposite direction
+*   No event wrapper is used for terminal I/O data
+
+### Server-Side Events
+
+### <a name="device_status"></a>`device_status`
+
+Sent by the server to clients to indicate device online/offline status changes.
+
+**Event Fields:**
+
+*   `device` (object, mandatory): Device status information
+  *   `id` (integer, mandatory): Device ID
+  *   `online` (boolean, mandatory): Whether the device is online
+
+### <a name="devices"></a>`devices`
+
+Sent by the server to clients to provide initial device list snapshot.
+
+**Event Fields:**
+
+*   `devices` (array, mandatory): Array of device objects with status information

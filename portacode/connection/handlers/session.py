@@ -78,8 +78,15 @@ class TerminalSession:
             logger.warning("stdin pipe closed for terminal %s", self.id)
             return
         try:
-            self.proc.stdin.write(data.encode())
-            await self.proc.stdin.drain()
+            if hasattr(self.proc.stdin, 'write') and hasattr(self.proc.stdin, 'drain'):
+                # StreamWriter (pipe fallback)
+                self.proc.stdin.write(data.encode())
+                await self.proc.stdin.drain()
+            else:
+                # File object (PTY)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.proc.stdin.write, data.encode())
+                await loop.run_in_executor(None, self.proc.stdin.flush)
         except Exception as exc:
             logger.warning("Failed to write to terminal %s: %s", self.id, exc)
 
@@ -301,11 +308,8 @@ class SessionManager:
                 protocol = asyncio.StreamReaderProtocol(reader)
                 await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, "rb", buffering=0))
                 proc.stdout = reader
-                # Use writer for stdin
-                writer_transport, writer_protocol = await loop.connect_write_pipe(
-                    lambda: asyncio.Protocol(), os.fdopen(master_fd, "wb", buffering=0)
-                )
-                proc.stdin = asyncio.StreamWriter(writer_transport, writer_protocol, reader, loop)
+                # Use writer for stdin - create a simple file-like wrapper
+                proc.stdin = os.fdopen(master_fd, "wb", buffering=0)
             except Exception:
                 logger.warning("Failed to allocate PTY, falling back to pipes")
                 proc = await asyncio.create_subprocess_exec(
