@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 import uuid
 from asyncio.subprocess import Process
 from pathlib import Path
@@ -12,6 +13,11 @@ from collections import deque
 
 if TYPE_CHECKING:
     from ..multiplex import Channel
+
+# Terminal data rate limiting configuration
+TERMINAL_DATA_RATE_LIMIT_MS = 60  # Minimum time between terminal_data events (milliseconds)
+TERMINAL_DATA_MAX_WAIT_MS = 1000   # Maximum time to wait before sending accumulated data (milliseconds)
+TERMINAL_DATA_INITIAL_WAIT_MS = 10  # Time to wait for additional data even on first event (milliseconds)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,11 @@ class TerminalSession:
         self.terminal_manager = terminal_manager
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._buffer: deque[str] = deque(maxlen=400)
+        
+        # Rate limiting for terminal_data events
+        self._last_send_time: float = 0
+        self._pending_data: str = ""
+        self._debounce_task: Optional[asyncio.Task[None]] = None
 
     async def start_io_forwarding(self) -> None:
         """Spawn background task that copies stdout/stderr to the channel."""
@@ -57,23 +68,9 @@ class TerminalSession:
                         break
                     text = data.decode(errors="ignore")
                     logging.getLogger("portacode.terminal").debug(f"[MUX] Terminal {self.id} output: {text!r}")
-                    self._buffer.append(text)
-                    try:
-                        # Send terminal data via control channel with client session targeting
-                        if self.terminal_manager:
-                            await self.terminal_manager._send_session_aware({
-                                "event": "terminal_data",
-                                "channel": self.id,
-                                "data": text,
-                                "project_id": self.project_id
-                            }, project_id=self.project_id)
-                        else:
-                            # Fallback to raw channel for backward compatibility
-                            await self.channel.send(text)
-                    except Exception as exc:
-                        logger.warning("Failed to forward terminal output: %s", exc)
-                        await asyncio.sleep(0.5)
-                        continue
+                    
+                    # Use rate-limited sending instead of immediate sending
+                    await self._handle_terminal_data(text)
             finally:
                 if self.proc and self.proc.returncode is None:
                     pass  # Keep alive across reconnects
@@ -129,6 +126,20 @@ class TerminalSession:
                     except asyncio.CancelledError:
                         pass
             
+            # Cancel and flush any pending terminal data
+            if self._debounce_task and not self._debounce_task.done():
+                logger.info("session.stop: Cancelling debounce task for session %s", self.id)
+                self._debounce_task.cancel()
+                try:
+                    await self._debounce_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Send any remaining pending data
+            if self._pending_data:
+                logger.info("session.stop: Flushing pending terminal data for session %s", self.id)
+                await self._flush_pending_data()
+            
             # Wait for process to exit
             if self.proc.returncode is None:
                 logger.info("session.stop: Waiting for process to exit for session %s", self.id)
@@ -142,6 +153,70 @@ class TerminalSession:
         except Exception as exc:
             logger.exception("session.stop: Error stopping session %s: %s", self.id, exc)
             raise
+
+    async def _send_terminal_data_now(self, data: str) -> None:
+        """Send terminal data immediately and update last send time."""
+        self._last_send_time = time.time()
+        
+        # Add to buffer for snapshots
+        self._buffer.append(data)
+        
+        try:
+            # Send terminal data via control channel with client session targeting
+            if self.terminal_manager:
+                await self.terminal_manager._send_session_aware({
+                    "event": "terminal_data",
+                    "channel": self.id,
+                    "data": data,
+                    "project_id": self.project_id
+                }, project_id=self.project_id)
+            else:
+                # Fallback to raw channel for backward compatibility
+                await self.channel.send(data)
+        except Exception as exc:
+            logger.warning("Failed to forward terminal output: %s", exc)
+
+    async def _flush_pending_data(self) -> None:
+        """Send accumulated pending data and reset pending buffer."""
+        if self._pending_data:
+            data_to_send = self._pending_data
+            self._pending_data = ""
+            await self._send_terminal_data_now(data_to_send)
+        
+        # Clear the debounce task
+        self._debounce_task = None
+
+    async def _handle_terminal_data(self, data: str) -> None:
+        """Handle new terminal data with rate limiting and debouncing."""
+        current_time = time.time()
+        time_since_last_send = (current_time - self._last_send_time) * 1000  # Convert to milliseconds
+        
+        # Add new data to pending buffer
+        self._pending_data += data
+        
+        # Cancel existing debounce task if any
+        if self._debounce_task and not self._debounce_task.done():
+            self._debounce_task.cancel()
+        
+        # Always set up a debounce timer to catch rapid consecutive outputs
+        async def _debounce_timer():
+            try:
+                if time_since_last_send >= TERMINAL_DATA_RATE_LIMIT_MS:
+                    # Enough time has passed since last send, wait initial delay for more data
+                    wait_time = TERMINAL_DATA_INITIAL_WAIT_MS / 1000
+                else:
+                    # Too soon since last send, wait for either the rate limit period or max wait time
+                    wait_time = min(
+                        (TERMINAL_DATA_RATE_LIMIT_MS - time_since_last_send) / 1000,
+                        TERMINAL_DATA_MAX_WAIT_MS / 1000
+                    )
+                await asyncio.sleep(wait_time)
+                await self._flush_pending_data()
+            except asyncio.CancelledError:
+                # Timer was cancelled, another data event came in
+                pass
+        
+        self._debounce_task = asyncio.create_task(_debounce_timer())
 
     def snapshot_buffer(self) -> str:
         """Return concatenated last buffer contents suitable for UI."""
@@ -197,23 +272,9 @@ class WindowsTerminalSession(TerminalSession):
                     else:
                         text = data
                     logging.getLogger("portacode.terminal").debug(f"[MUX] Terminal {self.id} output: {text!r}")
-                    self._buffer.append(text)
-                    try:
-                        # Send terminal data via control channel with client session targeting
-                        if self.terminal_manager:
-                            await self.terminal_manager._send_session_aware({
-                                "event": "terminal_data",
-                                "channel": self.id,
-                                "data": text,
-                                "project_id": self.project_id
-                            }, project_id=self.project_id)
-                        else:
-                            # Fallback to raw channel for backward compatibility
-                            await self.channel.send(text)
-                    except Exception as exc:
-                        logger.warning("Failed to forward terminal output: %s", exc)
-                        await asyncio.sleep(0.5)
-                        continue
+                    
+                    # Use rate-limited sending instead of immediate sending
+                    await self._handle_terminal_data(text)
             finally:
                 if self._pty and self._pty.isalive():
                     self._pty.kill()
@@ -257,6 +318,20 @@ class WindowsTerminalSession(TerminalSession):
                         await self._reader_task
                     except asyncio.CancelledError:
                         pass
+            
+            # Cancel and flush any pending terminal data
+            if self._debounce_task and not self._debounce_task.done():
+                logger.info("session.stop: Cancelling debounce task for Windows session %s", self.id)
+                self._debounce_task.cancel()
+                try:
+                    await self._debounce_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Send any remaining pending data
+            if self._pending_data:
+                logger.info("session.stop: Flushing pending terminal data for Windows session %s", self.id)
+                await self._flush_pending_data()
             
             logger.info("session.stop: Successfully stopped Windows session %s", self.id)
                 
