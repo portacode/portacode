@@ -284,6 +284,9 @@ Confirms that a new terminal session has been successfully started. Triggered by
 
 *   `terminal_id` (string, mandatory): The unique ID of the newly created terminal session.
 *   `channel` (string, mandatory): The channel name for terminal I/O.
+*   `pid` (integer, mandatory): The process ID (PID) of the terminal process.
+*   `shell` (string, optional): The shell that was used to start the terminal.
+*   `cwd` (string, optional): The working directory where the terminal was started.
 *   `project_id` (string, optional): The project ID associated with the terminal.
 
 ### <a name="terminal_data"></a>`terminal_data`

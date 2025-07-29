@@ -5,3 +5,4 @@ __pycache__/
 dist
 .pypirc
 _version.py
+client_sessions.json

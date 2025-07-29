@@ -36,6 +36,9 @@ class TerminalStartHandler(AsyncHandler):
             "event": "terminal_started",
             "terminal_id": session_info["terminal_id"],
             "channel": session_info["channel"],
+            "pid": session_info["pid"],
+            "shell": session_info.get("shell"),
+            "cwd": session_info.get("cwd"),
             "project_id": session_info.get("project_id"),
         }
     
