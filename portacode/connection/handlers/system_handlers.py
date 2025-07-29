@@ -5,7 +5,7 @@ import os
 import platform
 from pathlib import Path
 from typing import Any, Dict
-
+from portacode import __version__
 import psutil
 
 from .base import SyncHandler
@@ -126,6 +126,8 @@ class SystemInfoHandler(SyncHandler):
         info["os_info"] = _get_os_info()
         logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
+        info["portacode_version"] = __version__
+
         return {
             "event": "system_info",
             "info": info,
