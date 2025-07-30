@@ -35,10 +35,11 @@ class ConnectionManager:
         service manager restart.
     """
 
-    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None):
+    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None, debug: bool = False):
         self.gateway_url = gateway_url
         self.keypair = keypair
         self.reconnect_delay = reconnect_delay
+        self.debug = debug
         # max_retries is now deprecated but kept for backwards compatibility
         self.max_retries = max_retries
 
@@ -87,7 +88,7 @@ class ConnectionManager:
                         if getattr(self, "_terminal_manager", None):
                             self._terminal_manager.attach_mux(self.mux)
                         else:
-                            self._terminal_manager = TerminalManager(self.mux)  # noqa: pylint=attribute-defined-outside-init
+                            self._terminal_manager = TerminalManager(self.mux, debug=self.debug)  # noqa: pylint=attribute-defined-outside-init
                     except Exception as exc:
                         logger.warning("TerminalManager unavailable: %s", exc)
 

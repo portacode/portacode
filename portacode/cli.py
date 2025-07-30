@@ -182,7 +182,7 @@ def connect(gateway: str | None, detach: bool, debug: bool, non_interactive: boo
         pid_file.write_text(str(os.getpid()))
 
     async def _main() -> None:
-        mgr = ConnectionManager(target_gateway, keypair)
+        mgr = ConnectionManager(target_gateway, keypair, debug=debug)
         await run_until_interrupt(mgr)
 
     try:
@@ -197,7 +197,7 @@ def _run_connection_forever(url: str, keypair, pid_file: Path):
         pid_file.write_text(str(os.getpid()))
 
         async def _main() -> None:
-            mgr = ConnectionManager(url, keypair)
+            mgr = ConnectionManager(url, keypair, debug=debug)
             await run_until_interrupt(mgr)
 
         asyncio.run(_main())
@@ -249,7 +249,7 @@ def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – C
 
     async def _run() -> None:
         keypair = get_or_create_keypair()
-        mgr = ConnectionManager(target_gateway, keypair)
+        mgr = ConnectionManager(target_gateway, keypair, debug=debug)
         await mgr.start()
 
         # Wait until mux is available & authenticated (rudimentary – 2s timeout)
