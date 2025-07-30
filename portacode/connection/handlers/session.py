@@ -19,6 +19,9 @@ TERMINAL_DATA_RATE_LIMIT_MS = 60  # Minimum time between terminal_data events (m
 TERMINAL_DATA_MAX_WAIT_MS = 1000   # Maximum time to wait before sending accumulated data (milliseconds)
 TERMINAL_DATA_INITIAL_WAIT_MS = 10  # Time to wait for additional data even on first event (milliseconds)
 
+# Terminal buffer size limit configuration
+TERMINAL_BUFFER_SIZE_LIMIT_BYTES = 10 * 1024  # Maximum buffer size in bytes (10KB)
+
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform.startswith("win")
@@ -49,7 +52,8 @@ class TerminalSession:
         self.project_id = project_id
         self.terminal_manager = terminal_manager
         self._reader_task: Optional[asyncio.Task[None]] = None
-        self._buffer: deque[str] = deque(maxlen=400)
+        self._buffer: deque[str] = deque()
+        self._buffer_size_bytes = 0  # Track total buffer size in bytes
         
         # Rate limiting for terminal_data events
         self._last_send_time: float = 0
@@ -158,8 +162,8 @@ class TerminalSession:
         """Send terminal data immediately and update last send time."""
         self._last_send_time = time.time()
         
-        # Add to buffer for snapshots
-        self._buffer.append(data)
+        # Add to buffer for snapshots with size limiting
+        self._add_to_buffer(data)
         
         try:
             # Send terminal data via control channel with client session targeting
@@ -217,6 +221,17 @@ class TerminalSession:
                 pass
         
         self._debounce_task = asyncio.create_task(_debounce_timer())
+
+    def _add_to_buffer(self, data: str) -> None:
+        """Add data to buffer while maintaining size limit."""
+        data_bytes = len(data.encode('utf-8'))
+        self._buffer.append(data)
+        self._buffer_size_bytes += data_bytes
+        
+        # Remove oldest entries until we're under the size limit
+        while self._buffer_size_bytes > TERMINAL_BUFFER_SIZE_LIMIT_BYTES and self._buffer:
+            oldest_data = self._buffer.popleft()
+            self._buffer_size_bytes -= len(oldest_data.encode('utf-8'))
 
     def snapshot_buffer(self) -> str:
         """Return concatenated last buffer contents suitable for UI."""
