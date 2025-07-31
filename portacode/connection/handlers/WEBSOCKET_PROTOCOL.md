@@ -19,6 +19,12 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`directory_list`](#directory_list)
     - [`file_info`](#file_info)
     - [`file_delete`](#file_delete)
+  - [Project State Actions](#project-state-actions)
+    - [`project_state_folder_expand`](#project_state_folder_expand)
+    - [`project_state_folder_collapse`](#project_state_folder_collapse)
+    - [`project_state_file_open`](#project_state_file_open)
+    - [`project_state_file_close`](#project_state_file_close)
+    - [`project_state_set_active_file`](#project_state_set_active_file)
   - [Client Session Management](#client-session-management)
     - [`client_sessions_update`](#client_sessions_update)
 - [Events](#events)
@@ -40,6 +46,14 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`directory_list_response`](#directory_list_response)
     - [`file_info_response`](#file_info_response)
     - [`file_delete_response`](#file_delete_response)
+  - [Project State Events](#project-state-events)
+    - [`project_state_initialized`](#project_state_initialized)
+    - [`project_state_update`](#project_state_update)
+    - [`project_state_folder_expand_response`](#project_state_folder_expand_response)
+    - [`project_state_folder_collapse_response`](#project_state_folder_collapse_response)
+    - [`project_state_file_open_response`](#project_state_file_open_response)
+    - [`project_state_file_close_response`](#project_state_file_close_response)
+    - [`project_state_set_active_file_response`](#project_state_set_active_file_response)
   - [Client Session Events](#client-session-events)
     - [`request_client_sessions`](#request_client_sessions)
   - [Terminal Data](#terminal-data)
@@ -223,6 +237,83 @@ Deletes a file or directory. Handled by [`file_delete`](./file_handlers.py).
 **Responses:**
 
 *   On success, the device will respond with a [`file_delete_response`](#file_delete_response) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+## Project State Actions
+
+Project state actions manage the state of project folders, including file structures, Git metadata, open files, and folder expansion states. These actions provide real-time synchronization between the client and server for project management functionality.
+
+**Note:** Project state is automatically initialized when a client session connects with a `project_folder_path` property. No manual initialization command is required.
+
+### `project_state_folder_expand`
+
+Expands a folder in the project tree, loading its contents and enabling monitoring for that folder level. When a folder is expanded, the system proactively loads one level down for all subdirectories to enable immediate expansion in the UI. This action also scans items in the expanded folder and preloads content for any non-empty subdirectories.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `folder_path` (string, mandatory): The absolute path to the folder to expand.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_folder_expand_response`](#project_state_folder_expand_response) event, followed by a [`project_state_update`](#project_state_update) event containing the updated file structure with preloaded subdirectory contents.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_folder_collapse`
+
+Collapses a folder in the project tree, stopping monitoring for that folder level.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `folder_path` (string, mandatory): The absolute path to the folder to collapse.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_folder_collapse_response`](#project_state_folder_collapse_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_file_open`
+
+Marks a file as open in the project state, tracking it as part of the current editing session.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to open.
+*   `set_active` (boolean, optional): Whether to set this file as the active file. Defaults to `true`.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_file_open_response`](#project_state_file_open_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_file_close`
+
+Marks a file as closed in the project state, removing it from the current editing session.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to close.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_file_close_response`](#project_state_file_close_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_set_active_file`
+
+Sets the currently active file in the project state. Only one file can be active at a time.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, optional): The absolute path to the file to set as active. If `null` or omitted, clears the active file.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_set_active_file_response`](#project_state_set_active_file_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### Client Session Management
@@ -439,6 +530,116 @@ Confirms that a file or directory has been deleted in response to a `file_delete
 *   `path` (string, mandatory): The path of the deleted file or directory.
 *   `deleted_type` (string, mandatory): The type of the deleted item ("file" or "directory").
 *   `success` (boolean, mandatory): Indicates whether the deletion was successful.
+
+### Project State Events
+
+### <a name="project_state_initialized"></a>`project_state_initialized`
+
+Confirms that project state has been successfully initialized for a client session. Contains the complete initial project state including file structure and Git metadata.
+
+**Event Fields:**
+
+*   `project_folder_path` (string, mandatory): The absolute path to the project folder.
+*   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
+*   `git_branch` (string, optional): The current Git branch name if available.
+*   `git_status_summary` (object, optional): Summary of Git status counts (modified, added, deleted, untracked files).
+*   `open_files` (array, mandatory): Array of file paths currently marked as open.
+*   `active_file` (string, optional): Path to the currently active file.
+*   `items` (array, mandatory): Flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
+    *   `name` (string, mandatory): The file or directory name.
+    *   `path` (string, mandatory): The absolute path to the file or directory.
+    *   `is_directory` (boolean, mandatory): Whether this item is a directory.
+    *   `parent_path` (string, mandatory): The absolute path to the parent directory.
+    *   `size` (integer, optional): File size in bytes. Only present for files, not directories.
+    *   `modified_time` (float, optional): Last modification time as Unix timestamp.
+    *   `is_git_tracked` (boolean, optional): Whether the file is tracked by Git. Only present if project is a Git repository.
+    *   `git_status` (string, optional): Git status of the file ("clean", "modified", "untracked", "ignored"). Only present if project is a Git repository.
+    *   `is_hidden` (boolean, mandatory): Whether the file/directory name starts with a dot (hidden file).
+    *   `is_ignored` (boolean, mandatory): Whether the file is ignored by Git. Only meaningful if project is a Git repository.
+    *   `children` (array, optional): Array of child FileItem objects for directories. Usually null in flattened structure as children are included as separate items.
+    *   `is_expanded` (boolean, mandatory): Whether this directory is expanded in the project tree. Only meaningful for directories.
+    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded. Always true for files, indicates loading state for directories.
+*   `timestamp` (float, mandatory): Unix timestamp of when the state was generated.
+
+### <a name="project_state_update"></a>`project_state_update`
+
+Sent automatically when project state changes due to file system modifications, Git changes, or user actions. Contains the complete updated project state.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID this update applies to.
+*   `project_folder_path` (string, mandatory): The absolute path to the project folder.
+*   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
+*   `git_branch` (string, optional): The current Git branch name if available.
+*   `git_status_summary` (object, optional): Updated summary of Git status counts.
+*   `open_files` (array, mandatory): Updated array of open file paths.
+*   `active_file` (string, optional): Updated active file path.
+*   `items` (array, mandatory): Updated flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
+    *   `name` (string, mandatory): The file or directory name.
+    *   `path` (string, mandatory): The absolute path to the file or directory.
+    *   `is_directory` (boolean, mandatory): Whether this item is a directory.
+    *   `parent_path` (string, mandatory): The absolute path to the parent directory.
+    *   `size` (integer, optional): File size in bytes. Only present for files, not directories.
+    *   `modified_time` (float, optional): Last modification time as Unix timestamp.
+    *   `is_git_tracked` (boolean, optional): Whether the file is tracked by Git. Only present if project is a Git repository.
+    *   `git_status` (string, optional): Git status of the file ("clean", "modified", "untracked", "ignored"). Only present if project is a Git repository.
+    *   `is_hidden` (boolean, mandatory): Whether the file/directory name starts with a dot (hidden file).
+    *   `is_ignored` (boolean, mandatory): Whether the file is ignored by Git. Only meaningful if project is a Git repository.
+    *   `children` (array, optional): Array of child FileItem objects for directories. Usually null in flattened structure as children are included as separate items.
+    *   `is_expanded` (boolean, mandatory): Whether this directory is expanded in the project tree. Only meaningful for directories.
+    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded. Always true for files, indicates loading state for directories.
+*   `timestamp` (float, mandatory): Unix timestamp of when the update was generated.
+
+### <a name="project_state_folder_expand_response"></a>`project_state_folder_expand_response`
+
+Confirms the result of a folder expand operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `folder_path` (string, mandatory): The path to the folder that was expanded.
+*   `success` (boolean, mandatory): Whether the expand operation was successful.
+
+### <a name="project_state_folder_collapse_response"></a>`project_state_folder_collapse_response`
+
+Confirms the result of a folder collapse operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `folder_path` (string, mandatory): The path to the folder that was collapsed.
+*   `success` (boolean, mandatory): Whether the collapse operation was successful.
+
+### <a name="project_state_file_open_response"></a>`project_state_file_open_response`
+
+Confirms the result of a file open operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file that was opened.
+*   `success` (boolean, mandatory): Whether the file open operation was successful.
+*   `set_active` (boolean, mandatory): Whether the file was also set as the active file.
+
+### <a name="project_state_file_close_response"></a>`project_state_file_close_response`
+
+Confirms the result of a file close operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file that was closed.
+*   `success` (boolean, mandatory): Whether the file close operation was successful.
+
+### <a name="project_state_set_active_file_response"></a>`project_state_set_active_file_response`
+
+Confirms the result of setting an active file.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, optional): The path to the file that was set as active (null if cleared).
+*   `success` (boolean, mandatory): Whether the operation was successful.
 
 ### Client Session Events
 

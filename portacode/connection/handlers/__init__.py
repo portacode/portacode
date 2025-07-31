@@ -21,6 +21,13 @@ from .file_handlers import (
     FileInfoHandler,
     FileDeleteHandler,
 )
+from .project_state_handlers import (
+    ProjectStateFolderExpandHandler,
+    ProjectStateFolderCollapseHandler,
+    ProjectStateFileOpenHandler,
+    ProjectStateFileCloseHandler,
+    ProjectStateSetActiveFileHandler,
+)
 
 __all__ = [
     "BaseHandler",
@@ -38,4 +45,10 @@ __all__ = [
     "DirectoryListHandler",
     "FileInfoHandler",
     "FileDeleteHandler",
+    # Project state handlers
+    "ProjectStateFolderExpandHandler",
+    "ProjectStateFolderCollapseHandler",
+    "ProjectStateFileOpenHandler",
+    "ProjectStateFileCloseHandler",
+    "ProjectStateSetActiveFileHandler",
 ] 

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional, List
 
 from .multiplex import Multiplexer, Channel
@@ -28,6 +29,11 @@ from .handlers import (
     TerminalListHandler,
     SystemInfoHandler,
     DirectoryListHandler,
+    ProjectStateFolderExpandHandler,
+    ProjectStateFolderCollapseHandler,
+    ProjectStateFileOpenHandler,
+    ProjectStateFileCloseHandler,
+    ProjectStateSetActiveFileHandler,
 )
 from .handlers.session import SessionManager
 
@@ -56,13 +62,50 @@ class ClientSessionManager:
         
         new_sessions = set(self._client_sessions.keys())
         newly_added_sessions = list(new_sessions - old_sessions)
+        disconnected_sessions = list(old_sessions - new_sessions)
         
-        logger.info(f"Updated client sessions: {len(self._client_sessions)} sessions, {len(newly_added_sessions)} newly added")
+        logger.info(f"Updated client sessions: {len(self._client_sessions)} sessions, {len(newly_added_sessions)} newly added, {len(disconnected_sessions)} disconnected")
         if newly_added_sessions:
             logger.info(f"Newly added sessions: {newly_added_sessions}")
+        if disconnected_sessions:
+            logger.info(f"Disconnected sessions: {disconnected_sessions}")
+            # Trigger cleanup for disconnected sessions
+            self._cleanup_disconnected_sessions(disconnected_sessions)
         
         self._write_debug_file()
         return newly_added_sessions
+    
+    def _cleanup_disconnected_sessions(self, disconnected_sessions: List[str]):
+        """Clean up resources for disconnected client sessions."""
+        logger.info("Cleaning up resources for %d disconnected sessions", len(disconnected_sessions))
+        
+        # Import here to avoid circular imports
+        from .handlers.project_state_handlers import _get_or_create_project_state_manager
+        
+        # Get the project state manager from context if it exists
+        # We need to get the context from the terminal manager
+        if hasattr(self, '_terminal_manager') and self._terminal_manager:
+            context = getattr(self._terminal_manager, '_context', {})
+            if context:
+                # Get or create the project state manager
+                control_channel = getattr(self._terminal_manager, '_control_channel', None)
+                if control_channel:
+                    project_manager = _get_or_create_project_state_manager(context, control_channel)
+                    
+                    # Clean up project states for each disconnected session
+                    for client_session_id in disconnected_sessions:
+                        logger.info("Cleaning up project states for disconnected session: %s", client_session_id)
+                        project_manager.cleanup_projects_by_client_session(client_session_id)
+                else:
+                    logger.warning("No control channel available for project state cleanup")
+            else:
+                logger.warning("No context available for project state cleanup")
+        else:
+            logger.warning("No terminal manager available for project state cleanup")
+    
+    def set_terminal_manager(self, terminal_manager):
+        """Set reference to terminal manager for cleanup purposes."""
+        self._terminal_manager = terminal_manager
     
     def get_sessions(self) -> Dict[str, Dict]:
         """Get all current client sessions."""
@@ -180,10 +223,12 @@ class TerminalManager:
 
     CONTROL_CHANNEL_ID = 0  # messages with JSON commands/events
 
-    def __init__(self, mux: Multiplexer):
+    def __init__(self, mux: Multiplexer, debug: bool = False):
         self.mux = mux
+        self.debug = debug
         self._session_manager = None  # Initialize as None first
         self._client_session_manager = ClientSessionManager()  # Initialize client session manager
+        self._client_session_manager.set_terminal_manager(self)  # Set reference for cleanup
         self._set_mux(mux, is_initial=True)
 
     # ------------------------------------------------------------------
@@ -227,6 +272,7 @@ class TerminalManager:
             "session_manager": self._session_manager,
             "client_session_manager": self._client_session_manager,
             "mux": mux,
+            "debug": self.debug,
         }
         
         # Initialize command registry
@@ -255,6 +301,12 @@ class TerminalManager:
         self._command_registry.register(TerminalListHandler)
         self._command_registry.register(SystemInfoHandler)
         self._command_registry.register(DirectoryListHandler)
+        # Project state handlers
+        self._command_registry.register(ProjectStateFolderExpandHandler)
+        self._command_registry.register(ProjectStateFolderCollapseHandler)
+        self._command_registry.register(ProjectStateFileOpenHandler)
+        self._command_registry.register(ProjectStateFileCloseHandler)
+        self._command_registry.register(ProjectStateSetActiveFileHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway
@@ -354,6 +406,9 @@ class TerminalManager:
                 
                 logger.info(f"terminal_manager: Found {len(project_ids)} unique project IDs from new sessions: {list(project_ids)}")
                 
+                # Initialize project states for sessions with project_folder_path
+                await self._initialize_project_states_for_new_sessions(newly_added_sessions, all_sessions)
+                
                 # Send terminal_list for each project to interested new sessions
                 for project_id in project_ids:
                     target_sessions = self._client_session_manager.get_target_sessions_for_new_clients(newly_added_sessions, project_id)
@@ -406,6 +461,56 @@ class TerminalManager:
                     
         except Exception as exc:
             logger.exception("terminal_manager: ❌ Error sending initial data to clients: %s", exc)
+    
+    async def _initialize_project_states_for_new_sessions(self, newly_added_sessions: List[str], all_sessions: Dict[str, Dict]):
+        """Initialize project states for new sessions that have project_folder_path."""
+        logger.info("terminal_manager: 🌳 Initializing project states for new sessions")
+        
+        try:
+            # Import here to avoid circular imports
+            from .handlers.project_state_handlers import _get_or_create_project_state_manager
+            
+            # Get or create the project state manager
+            manager = _get_or_create_project_state_manager(self._context, self._control_channel)
+            
+            for session_name in newly_added_sessions:
+                session = all_sessions.get(session_name)
+                if not session:
+                    continue
+                
+                project_folder_path = session.get("project_folder_path")
+                if not project_folder_path:
+                    logger.debug(f"terminal_manager: 🌳 Session {session_name} has no project_folder_path, skipping")
+                    continue
+                
+                logger.info(f"terminal_manager: 🌳 Initializing project state for session {session_name} with folder: {project_folder_path}")
+                
+                try:
+                    # Initialize project state
+                    project_state = await manager.initialize_project_state(session_name, project_folder_path)
+                    
+                    # Send initial project state to the client
+                    initial_state_payload = {
+                        "event": "project_state_initialized",
+                        "project_folder_path": project_state.project_folder_path,
+                        "is_git_repo": project_state.is_git_repo,
+                        "git_branch": project_state.git_branch,
+                        "git_status_summary": project_state.git_status_summary,
+                        "open_files": list(project_state.open_files),
+                        "active_file": project_state.active_file,
+                        "items": [manager._serialize_file_item(item) for item in project_state.items],
+                        "timestamp": time.time(),
+                        "client_sessions": [session_name]  # Target this specific session
+                    }
+                    
+                    await self._control_channel.send(initial_state_payload)
+                    logger.info(f"terminal_manager: ✅ Project state initialized and sent for session {session_name}")
+                    
+                except Exception as exc:
+                    logger.error(f"terminal_manager: ❌ Failed to initialize project state for session {session_name}: {exc}")
+                    
+        except Exception as exc:
+            logger.exception("terminal_manager: Error initializing project states for new sessions: %s", exc)
     
     async def _send_targeted_terminal_list(self, message: Dict[str, Any], target_sessions: List[str]) -> None:
         """Send terminal_list command to specific client sessions.
