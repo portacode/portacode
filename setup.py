@@ -28,6 +28,7 @@ setup(
         "pyte>=0.8",
         "pywinpty>=2.0; platform_system=='Windows'",
         "GitPython>=3.1.45",
+        "watchdog>=3.0",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],

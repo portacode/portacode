@@ -13,6 +13,8 @@ import platform
 
 from .base import AsyncHandler, SyncHandler
 
+logger = logging.getLogger(__name__)
+
 # Import GitPython with fallback
 try:
     import git
@@ -29,12 +31,12 @@ try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
     WATCHDOG_AVAILABLE = True
+    logger.info("Watchdog library available for file system monitoring")
 except ImportError:
     WATCHDOG_AVAILABLE = False
     Observer = None
     FileSystemEventHandler = None
-
-logger = logging.getLogger(__name__)
+    logger.warning("Watchdog library not available - file system monitoring disabled")
 
 
 @dataclass
@@ -206,6 +208,13 @@ class FileSystemWatcher:
         self.observer: Optional[Observer] = None
         self.event_handler: Optional[FileSystemEventHandler] = None
         self.watched_paths: Set[str] = set()
+        # Store reference to the event loop for thread-safe async task creation
+        try:
+            self.event_loop = asyncio.get_running_loop()
+            logger.info("Captured event loop reference for file system watcher")
+        except RuntimeError:
+            self.event_loop = None
+            logger.warning("No running event loop found - file system events may not work correctly")
         
         if WATCHDOG_AVAILABLE:
             self._initialize_watcher()
@@ -217,31 +226,69 @@ class FileSystemWatcher:
             return
         
         class ProjectEventHandler(FileSystemEventHandler):
-            def __init__(self, manager):
+            def __init__(self, manager, watcher):
                 self.manager = manager
+                self.watcher = watcher
+                super().__init__()
             
             def on_any_event(self, event):
-                # Debounce rapid file changes
-                asyncio.create_task(self.manager._handle_file_change(event))
+                # Skip events for .git folder and its contents to avoid noise
+                path_parts = Path(event.src_path).parts
+                if '.git' in path_parts:
+                    return
+                
+                # Skip debug files to avoid feedback loops
+                if event.src_path.endswith('project_state_debug.json'):
+                    return
+                
+                # Only process events that represent actual content changes
+                # Skip opened/closed events that don't indicate file modifications
+                if event.event_type in ('opened', 'closed'):
+                    return
+                
+                logger.info("File system event: %s - %s", event.event_type, event.src_path)
+                
+                # Schedule async task in the main event loop from this watchdog thread
+                if self.watcher.event_loop and not self.watcher.event_loop.is_closed():
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.manager._handle_file_change(event), 
+                            self.watcher.event_loop
+                        )
+                        logger.debug("Successfully scheduled file change handler for: %s", event.src_path)
+                    except Exception as e:
+                        logger.error("Failed to schedule file change handler: %s", e)
+                else:
+                    logger.warning("No event loop available to handle file change: %s", event.src_path)
         
-        self.event_handler = ProjectEventHandler(self.project_manager)
+        self.event_handler = ProjectEventHandler(self.project_manager, self)
         self.observer = Observer()
     
     def start_watching(self, path: str):
         """Start watching a specific path."""
         if not WATCHDOG_AVAILABLE or not self.observer:
+            logger.warning("Watchdog not available, cannot start watching: %s", path)
+            return
+        
+        # Extra safety check: never watch .git folders
+        if Path(path).name == '.git':
+            logger.debug("Refusing to watch .git folder: %s", path)
             return
         
         if path not in self.watched_paths:
             try:
+                # Use recursive=False to watch only direct contents of each folder
                 self.observer.schedule(self.event_handler, path, recursive=False)
                 self.watched_paths.add(path)
-                logger.debug("Started watching path: %s", path)
+                logger.info("Started watching path (non-recursive): %s", path)
                 
                 if not self.observer.is_alive():
                     self.observer.start()
+                    logger.info("Started file system observer")
             except Exception as e:
                 logger.error("Error starting file watcher for %s: %s", path, e)
+        else:
+            logger.debug("Path already being watched: %s", path)
     
     def stop_watching(self, path: str):
         """Stop watching a specific path."""
@@ -286,9 +333,9 @@ class ProjectStateManager:
     
     def _write_debug_state(self):
         """Write current state to debug JSON file."""
-        logger.info("_write_debug_state called: debug_mode=%s, debug_file_path=%s", self.debug_mode, self.debug_file_path)
+        logger.debug("_write_debug_state called: debug_mode=%s, debug_file_path=%s", self.debug_mode, self.debug_file_path)
         if not self.debug_mode or not self.debug_file_path:
-            logger.info("Debug mode not enabled or no debug file path, skipping debug write")
+            logger.debug("Debug mode not enabled or no debug file path, skipping debug write")
             return
         
         try:
@@ -308,10 +355,10 @@ class ProjectStateManager:
             with open(self.debug_file_path, 'w', encoding='utf-8') as f:
                 json.dump(debug_data, f, indent=2, default=str)
             
-            logger.info("Debug state written successfully to: %s", self.debug_file_path)
-            logger.info("Debug data summary: %d projects", len(debug_data))
+            logger.debug("Debug state written successfully to: %s", self.debug_file_path)
+            logger.debug("Debug data summary: %d projects", len(debug_data))
             for project_id, data in debug_data.items():
-                logger.info("Project %s: %d monitored_folders, %d items", 
+                logger.debug("Project %s: %d monitored_folders, %d items", 
                            project_id, len(data.get('monitored_folders', [])), len(data.get('items', [])))
                 
         except Exception as e:
@@ -382,36 +429,31 @@ class ProjectStateManager:
             self.file_watcher.start_watching(monitored_folder.folder_path)
     
     async def _sync_watchdog_with_monitored_folders(self, project_state: ProjectState):
-        """Ensure watchdog is monitoring exactly the folders in monitored_folders."""
-        # Get current monitored folder paths
-        monitored_paths = {mf.folder_path for mf in project_state.monitored_folders}
-        
-        # Get currently watched paths for this project (approximate - watchdog doesn't give us exact list)
-        # For now, we'll just ensure all monitored folders are being watched
+        """Ensure watchdog is monitoring each monitored folder individually (non-recursive)."""
+        # Watch each monitored folder individually to align with the monitored_folders structure
         for monitored_folder in project_state.monitored_folders:
             self.file_watcher.start_watching(monitored_folder.folder_path)
         
-        # Note: Watchdog library doesn't provide an easy way to stop watching specific paths
-        # without recreating the entire observer, so we rely on the cleanup method for project cleanup
+        logger.debug("Watchdog synchronized: watching %d monitored folders individually", len(project_state.monitored_folders))
     
     async def _sync_all_state_with_monitored_folders(self, project_state: ProjectState):
         """Synchronize all dependent state (watchdog, items) with monitored_folders changes."""
-        logger.info("_sync_all_state_with_monitored_folders called")
-        logger.info("Current monitored_folders count: %d", len(project_state.monitored_folders))
+        logger.debug("_sync_all_state_with_monitored_folders called")
+        logger.debug("Current monitored_folders count: %d", len(project_state.monitored_folders))
         
         # Sync watchdog monitoring
-        logger.info("Syncing watchdog monitoring")
+        logger.debug("Syncing watchdog monitoring")
         await self._sync_watchdog_with_monitored_folders(project_state)
         
         # Rebuild items structure from all monitored folders
-        logger.info("Rebuilding items structure")
+        logger.debug("Rebuilding items structure")
         await self._build_flattened_items_structure(project_state)
-        logger.info("Items count after rebuild: %d", len(project_state.items))
+        logger.debug("Items count after rebuild: %d", len(project_state.items))
         
         # Update debug state
-        logger.info("Writing debug state")
+        logger.debug("Writing debug state")
         self._write_debug_state()
-        logger.info("_sync_all_state_with_monitored_folders completed")
+        logger.debug("_sync_all_state_with_monitored_folders completed")
     
     async def _add_subdirectories_to_monitored(self, project_state: ProjectState, parent_folder_path: str):
         """Add all subdirectories of a folder to monitored_folders if not already present."""
@@ -434,10 +476,7 @@ class ProjectStateManager:
                             logger.info("Subdirectory already monitored: %s", entry.path)
             
             logger.info("Added any new folders: %s", added_any)
-            # If we added any new folders, sync all dependent state
-            if added_any:
-                logger.info("Calling sync_all_state_with_monitored_folders from _add_subdirectories_to_monitored")
-                await self._sync_all_state_with_monitored_folders(project_state)
+            # Note: sync will be handled by the caller, no need to sync here
                 
         except (OSError, PermissionError) as e:
             logger.error("Error scanning folder %s for subdirectories: %s", parent_folder_path, e)
@@ -702,6 +741,8 @@ class ProjectStateManager:
     
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
+        logger.debug("Processing file change: %s - %s", event.event_type, event.src_path)
+        
         self._pending_changes.add(event.src_path)
         
         # Cancel existing timer
@@ -709,27 +750,38 @@ class ProjectStateManager:
             self._change_debounce_timer.cancel()
         
         # Set new timer
+        logger.debug("Starting debounce timer for file changes")
         self._change_debounce_timer = asyncio.create_task(self._process_pending_changes())
     
     async def _process_pending_changes(self):
         """Process pending file changes after debounce delay."""
+        logger.info("Processing %d pending file changes after debounce", len(self._pending_changes))
         await asyncio.sleep(0.5)  # Debounce delay
         
         if not self._pending_changes:
+            logger.debug("No pending changes to process")
             return
+        
+        logger.debug("Pending changes: %s", list(self._pending_changes))
         
         # Process changes for each affected project
         affected_projects = set()
         for change_path in self._pending_changes:
+            logger.debug("Checking change path: %s", change_path)
             for client_session_key, project_state in self.projects.items():
                 if change_path.startswith(project_state.project_folder_path):
+                    logger.debug("Change affects project: %s", client_session_key)
                     affected_projects.add(client_session_key)
+        
+        logger.info("Refreshing %d affected projects", len(affected_projects))
         
         # Refresh affected projects
         for client_session_key in affected_projects:
+            logger.debug("Refreshing project state: %s", client_session_key)
             await self._refresh_project_state(client_session_key)
         
         self._pending_changes.clear()
+        logger.debug("Finished processing file changes")
     
     async def _refresh_project_state(self, client_session_key: str):
         """Refresh project state after file changes."""
@@ -743,10 +795,7 @@ class ProjectStateManager:
         if git_manager:
             project_state.git_status_summary = git_manager.get_status_summary()
         
-        # Check if any new directories were added that should be monitored
-        await self._detect_and_add_new_directories(project_state)
-        
-        # Sync all dependent state (items, watchdog)
+        # Sync all dependent state (items, watchdog) - no automatic directory detection
         await self._sync_all_state_with_monitored_folders(project_state)
         
         # Send update to clients
@@ -767,6 +816,26 @@ class ProjectStateManager:
     
     async def _send_project_state_update(self, project_state: ProjectState, server_project_id: str = None):
         """Send project state update to the specific client session only."""
+        # Create state signature for change detection
+        current_state_signature = {
+            "git_branch": project_state.git_branch,
+            "git_status_summary": project_state.git_status_summary,
+            "open_files": tuple(sorted(project_state.open_files)),
+            "active_file": project_state.active_file,
+            "items_count": len(project_state.items),
+            "monitored_folders": tuple((mf.folder_path, mf.is_expanded) for mf in sorted(project_state.monitored_folders, key=lambda x: x.folder_path))
+        }
+        
+        # Check if state has actually changed
+        last_signature = getattr(project_state, '_last_sent_signature', None)
+        if last_signature == current_state_signature:
+            logger.debug("Project state unchanged, skipping update for client: %s", project_state.client_session_id)
+            return
+        
+        # State has changed, send update
+        project_state._last_sent_signature = current_state_signature
+        logger.info("Sending project state update to client: %s", project_state.client_session_id)
+        
         payload = {
             "event": "project_state_update",
             "project_id": server_project_id or project_state.client_session_key,  # Use server ID if provided
