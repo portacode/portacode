@@ -23,8 +23,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_folder_expand`](#project_state_folder_expand)
     - [`project_state_folder_collapse`](#project_state_folder_collapse)
     - [`project_state_file_open`](#project_state_file_open)
-    - [`project_state_file_close`](#project_state_file_close)
-    - [`project_state_set_active_file`](#project_state_set_active_file)
+    - [`project_state_tab_close`](#project_state_tab_close)
+    - [`project_state_set_active_tab`](#project_state_set_active_tab)
+    - [`project_state_create_diff_tab`](#project_state_create_diff_tab)
   - [Client Session Management](#client-session-management)
     - [`client_sessions_update`](#client_sessions_update)
 - [Events](#events)
@@ -52,8 +53,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_folder_expand_response`](#project_state_folder_expand_response)
     - [`project_state_folder_collapse_response`](#project_state_folder_collapse_response)
     - [`project_state_file_open_response`](#project_state_file_open_response)
-    - [`project_state_file_close_response`](#project_state_file_close_response)
-    - [`project_state_set_active_file_response`](#project_state_set_active_file_response)
+    - [`project_state_tab_close_response`](#project_state_tab_close_response)
+    - [`project_state_set_active_tab_response`](#project_state_set_active_tab_response)
+    - [`project_state_create_diff_tab_response`](#project_state_create_diff_tab_response)
   - [Client Session Events](#client-session-events)
     - [`request_client_sessions`](#request_client_sessions)
   - [Terminal Data](#terminal-data)
@@ -288,32 +290,48 @@ Marks a file as open in the project state, tracking it as part of the current ed
 *   On success, the device will respond with a [`project_state_file_open_response`](#project_state_file_open_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
-### `project_state_file_close`
+### `project_state_tab_close`
 
-Marks a file as closed in the project state, removing it from the current editing session.
+Closes a tab in the project state, removing it from the current editing session.
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
-*   `file_path` (string, mandatory): The absolute path to the file to close.
+*   `tab_id` (string, mandatory): The unique ID of the tab to close.
 
 **Responses:**
 
-*   On success, the device will respond with a [`project_state_file_close_response`](#project_state_file_close_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On success, the device will respond with a [`project_state_tab_close_response`](#project_state_tab_close_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
-### `project_state_set_active_file`
+### `project_state_set_active_tab`
 
-Sets the currently active file in the project state. Only one file can be active at a time.
+Sets the currently active tab in the project state. Only one tab can be active at a time.
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
-*   `file_path` (string, optional): The absolute path to the file to set as active. If `null` or omitted, clears the active file.
+*   `tab_id` (string, optional): The unique ID of the tab to set as active. If `null` or omitted, clears the active tab.
 
 **Responses:**
 
-*   On success, the device will respond with a [`project_state_set_active_file_response`](#project_state_set_active_file_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On success, the device will respond with a [`project_state_set_active_tab_response`](#project_state_set_active_tab_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_create_diff_tab`
+
+Creates a diff tab for comparing file versions.
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to create a diff for.
+*   `original_content` (string, optional): The original content of the file. Defaults to empty string.
+*   `modified_content` (string, optional): The modified content of the file. Defaults to empty string.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_create_diff_tab_response`](#project_state_create_diff_tab_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### Client Session Management
@@ -543,8 +561,19 @@ Confirms that project state has been successfully initialized for a client sessi
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Summary of Git status counts (modified, added, deleted, untracked files).
-*   `open_files` (array, mandatory): Array of file paths currently marked as open.
-*   `active_file` (string, optional): Path to the currently active file.
+*   `open_tabs` (array, mandatory): Array of tab objects currently open. Each tab object contains:
+    *   `tab_id` (string, mandatory): Unique identifier for the tab.
+    *   `tab_type` (string, mandatory): Type of tab ("file", "diff", "untitled", "image", "audio", "video").
+    *   `title` (string, mandatory): Display title for the tab.
+    *   `file_path` (string, optional): Path for file-based tabs.
+    *   `content` (string, optional): Text content or base64 for media.
+    *   `original_content` (string, optional): For diff tabs - original content.
+    *   `modified_content` (string, optional): For diff tabs - modified content.
+    *   `is_dirty` (boolean, mandatory): Whether the tab has unsaved changes.
+    *   `mime_type` (string, optional): MIME type for media files.
+    *   `encoding` (string, optional): Content encoding (base64, utf-8, etc.).
+    *   `metadata` (object, optional): Additional metadata.
+*   `active_tab` (object, optional): The currently active tab object, or null if no tab is active.
 *   `items` (array, mandatory): Flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
     *   `name` (string, mandatory): The file or directory name.
     *   `path` (string, mandatory): The absolute path to the file or directory.
@@ -572,8 +601,8 @@ Sent automatically when project state changes due to file system modifications, 
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Updated summary of Git status counts.
-*   `open_files` (array, mandatory): Updated array of open file paths.
-*   `active_file` (string, optional): Updated active file path.
+*   `open_tabs` (array, mandatory): Updated array of tab objects currently open.
+*   `active_tab` (object, optional): Updated active tab object.
 *   `items` (array, mandatory): Updated flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
     *   `name` (string, mandatory): The file or directory name.
     *   `path` (string, mandatory): The absolute path to the file or directory.
@@ -621,25 +650,35 @@ Confirms the result of a file open operation.
 *   `success` (boolean, mandatory): Whether the file open operation was successful.
 *   `set_active` (boolean, mandatory): Whether the file was also set as the active file.
 
-### <a name="project_state_file_close_response"></a>`project_state_file_close_response`
+### <a name="project_state_tab_close_response"></a>`project_state_tab_close_response`
 
-Confirms the result of a file close operation.
-
-**Event Fields:**
-
-*   `project_id` (string, mandatory): The project ID the operation was performed on.
-*   `file_path` (string, mandatory): The path to the file that was closed.
-*   `success` (boolean, mandatory): Whether the file close operation was successful.
-
-### <a name="project_state_set_active_file_response"></a>`project_state_set_active_file_response`
-
-Confirms the result of setting an active file.
+Confirms the result of a tab close operation.
 
 **Event Fields:**
 
 *   `project_id` (string, mandatory): The project ID the operation was performed on.
-*   `file_path` (string, optional): The path to the file that was set as active (null if cleared).
+*   `tab_id` (string, mandatory): The ID of the tab that was closed.
+*   `success` (boolean, mandatory): Whether the tab close operation was successful.
+
+### <a name="project_state_set_active_tab_response"></a>`project_state_set_active_tab_response`
+
+Confirms the result of setting an active tab.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `tab_id` (string, optional): The ID of the tab that was set as active (null if cleared).
 *   `success` (boolean, mandatory): Whether the operation was successful.
+
+### <a name="project_state_create_diff_tab_response"></a>`project_state_create_diff_tab_response`
+
+Confirms the result of creating a diff tab.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file the diff tab was created for.
+*   `success` (boolean, mandatory): Whether the diff tab creation was successful.
 
 ### Client Session Events
 

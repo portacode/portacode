@@ -40,6 +40,21 @@ except ImportError:
 
 
 @dataclass
+class TabInfo:
+    """Represents an editor tab with content and metadata."""
+    tab_id: str  # Unique identifier for the tab
+    tab_type: str  # 'file', 'diff', 'untitled', 'image', 'audio', 'video'
+    title: str  # Display title for the tab
+    file_path: Optional[str] = None  # Path for file-based tabs
+    content: Optional[str] = None  # Text content or base64 for media
+    original_content: Optional[str] = None  # For diff view
+    modified_content: Optional[str] = None  # For diff view
+    is_dirty: bool = False  # Has unsaved changes
+    mime_type: Optional[str] = None  # For media files
+    encoding: Optional[str] = None  # Content encoding (base64, utf-8, etc.)
+    metadata: Optional[Dict[str, Any]] = None  # Additional metadata
+
+@dataclass
 class MonitoredFolder:
     """Represents a folder that is being monitored for changes."""
     folder_path: str
@@ -73,12 +88,12 @@ class ProjectState:
     is_git_repo: bool = False
     git_branch: Optional[str] = None
     git_status_summary: Optional[Dict[str, int]] = None
-    open_files: Set[str] = None
-    active_file: Optional[str] = None
+    open_tabs: List['TabInfo'] = None
+    active_tab: Optional['TabInfo'] = None
     
     def __post_init__(self):
-        if self.open_files is None:
-            self.open_files = set()
+        if self.open_tabs is None:
+            self.open_tabs = []
         if self.monitored_folders is None:
             self.monitored_folders = []
     
@@ -346,8 +361,8 @@ class ProjectStateManager:
                     "is_git_repo": state.is_git_repo,
                     "git_branch": state.git_branch,
                     "git_status_summary": state.git_status_summary,
-                    "open_files": list(state.open_files),
-                    "active_file": state.active_file,
+                    "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs],
+                    "active_tab": self._serialize_tab_info(state.active_tab) if state.active_tab else None,
                     "monitored_folders": [asdict(mf) for mf in state.monitored_folders],
                     "items": [self._serialize_file_item(item) for item in state.items]
                 }
@@ -370,6 +385,10 @@ class ProjectStateManager:
         if item.children:
             result["children"] = [self._serialize_file_item(child) for child in item.children]
         return result
+    
+    def _serialize_tab_info(self, tab: TabInfo) -> Dict[str, Any]:
+        """Serialize TabInfo for JSON output."""
+        return asdict(tab)
     
     async def initialize_project_state(self, client_session: str, project_folder_path: str) -> ProjectState:
         """Initialize project state for a client session."""
@@ -699,45 +718,101 @@ class ProjectStateManager:
                     return found
         return None
     
-    async def open_file(self, client_session_key: str, file_path: str) -> bool:
-        """Mark a file as open."""
+    async def open_file(self, client_session_key: str, file_path: str, set_active: bool = True) -> bool:
+        """Open a file in a new tab with content loaded."""
         if client_session_key not in self.projects:
             return False
         
         project_state = self.projects[client_session_key]
-        project_state.open_files.add(file_path)
+        
+        # Check if file is already open
+        existing_tab = next((tab for tab in project_state.open_tabs if tab.file_path == file_path and tab.tab_type == 'file'), None)
+        if existing_tab:
+            if set_active:
+                project_state.active_tab = existing_tab
+            self._write_debug_state()
+            return True
+        
+        # Create new file tab using tab factory
+        from .tab_factory import get_tab_factory
+        tab_factory = get_tab_factory()
+        
+        try:
+            new_tab = await tab_factory.create_file_tab(file_path)
+            project_state.open_tabs.append(new_tab)
+            if set_active:
+                project_state.active_tab = new_tab
+            
+            logger.info(f"Opened file tab: {file_path} (content loaded: {len(new_tab.content or '') > 0})")
+            self._write_debug_state()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create tab for file {file_path}: {e}")
+            return False
+    
+    async def close_tab(self, client_session_key: str, tab_id: str) -> bool:
+        """Close a tab by tab ID."""
+        if client_session_key not in self.projects:
+            return False
+        
+        project_state = self.projects[client_session_key]
+        
+        # Find and remove the tab
+        tab_to_remove = next((tab for tab in project_state.open_tabs if tab.tab_id == tab_id), None)
+        if not tab_to_remove:
+            return False
+        
+        project_state.open_tabs.remove(tab_to_remove)
+        
+        # Clear active tab if it was the closed tab
+        if project_state.active_tab and project_state.active_tab.tab_id == tab_id:
+            # Set active tab to the last remaining tab, or None if no tabs left
+            project_state.active_tab = project_state.open_tabs[-1] if project_state.open_tabs else None
+        
         self._write_debug_state()
         return True
     
-    async def close_file(self, client_session_key: str, file_path: str) -> bool:
-        """Mark a file as closed."""
+    async def set_active_tab(self, client_session_key: str, tab_id: Optional[str]) -> bool:
+        """Set the currently active tab."""
         if client_session_key not in self.projects:
             return False
         
         project_state = self.projects[client_session_key]
-        project_state.open_files.discard(file_path)
         
-        # Clear active file if it was the closed file
-        if project_state.active_file == file_path:
-            project_state.active_file = None
+        if tab_id:
+            # Find the tab by ID
+            tab = next((t for t in project_state.open_tabs if t.tab_id == tab_id), None)
+            if not tab:
+                return False
+            project_state.active_tab = tab
+        else:
+            project_state.active_tab = None
         
         self._write_debug_state()
         return True
     
-    async def set_active_file(self, client_session_key: str, file_path: Optional[str]) -> bool:
-        """Set the currently active file."""
+    async def create_diff_tab(self, client_session_key: str, file_path: str, original_content: str, modified_content: str) -> bool:
+        """Create a diff tab for comparing file versions."""
         if client_session_key not in self.projects:
             return False
         
         project_state = self.projects[client_session_key]
-        project_state.active_file = file_path
         
-        # Ensure active file is also marked as open
-        if file_path:
-            project_state.open_files.add(file_path)
+        # Create diff tab using tab factory
+        from .tab_factory import get_tab_factory
+        tab_factory = get_tab_factory()
         
-        self._write_debug_state()
-        return True
+        try:
+            diff_tab = await tab_factory.create_diff_tab(file_path, original_content, modified_content)
+            project_state.open_tabs.append(diff_tab)
+            project_state.active_tab = diff_tab
+            
+            logger.info(f"Created diff tab for: {file_path}")
+            self._write_debug_state()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create diff tab for {file_path}: {e}")
+            return False
     
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
@@ -820,8 +895,8 @@ class ProjectStateManager:
         current_state_signature = {
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
-            "open_files": tuple(sorted(project_state.open_files)),
-            "active_file": project_state.active_file,
+            "open_tabs": tuple((tab.tab_id, tab.tab_type, tab.title) for tab in project_state.open_tabs),
+            "active_tab": project_state.active_tab.tab_id if project_state.active_tab else None,
             "items_count": len(project_state.items),
             "monitored_folders": tuple((mf.folder_path, mf.is_expanded) for mf in sorted(project_state.monitored_folders, key=lambda x: x.folder_path))
         }
@@ -843,8 +918,8 @@ class ProjectStateManager:
             "is_git_repo": project_state.is_git_repo,
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
-            "open_files": list(project_state.open_files),
-            "active_file": project_state.active_file,
+            "open_tabs": [self._serialize_tab_info(tab) for tab in project_state.open_tabs],
+            "active_tab": self._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
             "items": [self._serialize_file_item(item) for item in project_state.items],
             "timestamp": time.time(),
             "client_sessions": [project_state.client_session_id]  # Target only this client session
@@ -1085,10 +1160,7 @@ class ProjectStateFileOpenHandler(AsyncHandler):
                 "set_active": set_active
             }
         
-        success = await manager.open_file(project_state_key, file_path)
-        
-        if success and set_active:
-            await manager.set_active_file(project_state_key, file_path)
+        success = await manager.open_file(project_state_key, file_path, set_active)
         
         if success:
             # Send updated state
@@ -1104,17 +1176,121 @@ class ProjectStateFileOpenHandler(AsyncHandler):
         }
 
 
-class ProjectStateFileCloseHandler(AsyncHandler):
-    """Handler for closing files in project state."""
+class ProjectStateTabCloseHandler(AsyncHandler):
+    """Handler for closing tabs in project state."""
     
     @property
     def command_name(self) -> str:
-        return "project_state_file_close"
+        return "project_state_tab_close"
     
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Close a file in project state."""
+        """Close a tab in project state."""
+        server_project_id = message.get("project_id")  # Server-side UUID (for response)
+        tab_id = message.get("tab_id")
+        source_client_session = message.get("source_client_session")  # This is our key
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not tab_id:
+            raise ValueError("tab_id is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Find project state using client session
+        project_state_key = None
+        for key in manager.projects.keys():
+            if key.startswith(source_client_session):
+                project_state_key = key
+                break
+        
+        if not project_state_key:
+            return {
+                "event": "project_state_tab_close_response",
+                "project_id": server_project_id,
+                "tab_id": tab_id,
+                "success": False
+            }
+        
+        success = await manager.close_tab(project_state_key, tab_id)
+        
+        if success:
+            # Send updated state
+            project_state = manager.projects[project_state_key]
+            await manager._send_project_state_update(project_state, server_project_id)
+        
+        return {
+            "event": "project_state_tab_close_response",
+            "project_id": server_project_id,  # Return the server-side project ID
+            "tab_id": tab_id,
+            "success": success
+        }
+
+
+class ProjectStateSetActiveTabHandler(AsyncHandler):
+    """Handler for setting active tab in project state."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_set_active_tab"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Set active tab in project state."""
+        server_project_id = message.get("project_id")  # Server-side UUID (for response)
+        tab_id = message.get("tab_id")  # Can be None to clear active tab
+        source_client_session = message.get("source_client_session")  # This is our key
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Find project state using client session
+        project_state_key = None
+        for key in manager.projects.keys():
+            if key.startswith(source_client_session):
+                project_state_key = key
+                break
+        
+        if not project_state_key:
+            return {
+                "event": "project_state_set_active_tab_response",
+                "project_id": server_project_id,
+                "tab_id": tab_id,
+                "success": False
+            }
+        
+        success = await manager.set_active_tab(project_state_key, tab_id)
+        
+        if success:
+            # Send updated state
+            project_state = manager.projects[project_state_key]
+            await manager._send_project_state_update(project_state, server_project_id)
+        
+        return {
+            "event": "project_state_set_active_tab_response",
+            "project_id": server_project_id,  # Return the server-side project ID
+            "tab_id": tab_id,
+            "success": success
+        }
+
+
+class ProjectStateCreateDiffTabHandler(AsyncHandler):
+    """Handler for creating diff tabs in project state."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_create_diff_tab"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a diff tab in project state."""
         server_project_id = message.get("project_id")  # Server-side UUID (for response)
         file_path = message.get("file_path")
+        original_content = message.get("original_content", "")
+        modified_content = message.get("modified_content", "")
         source_client_session = message.get("source_client_session")  # This is our key
         
         if not server_project_id:
@@ -1135,13 +1311,13 @@ class ProjectStateFileCloseHandler(AsyncHandler):
         
         if not project_state_key:
             return {
-                "event": "project_state_file_close_response",
+                "event": "project_state_create_diff_tab_response",
                 "project_id": server_project_id,
                 "file_path": file_path,
                 "success": False
             }
         
-        success = await manager.close_file(project_state_key, file_path)
+        success = await manager.create_diff_tab(project_state_key, file_path, original_content, modified_content)
         
         if success:
             # Send updated state
@@ -1149,57 +1325,7 @@ class ProjectStateFileCloseHandler(AsyncHandler):
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
-            "event": "project_state_file_close_response",
-            "project_id": server_project_id,  # Return the server-side project ID
-            "file_path": file_path,
-            "success": success
-        }
-
-
-class ProjectStateSetActiveFileHandler(AsyncHandler):
-    """Handler for setting active file in project state."""
-    
-    @property
-    def command_name(self) -> str:
-        return "project_state_set_active_file"
-    
-    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Set active file in project state."""
-        server_project_id = message.get("project_id")  # Server-side UUID (for response)
-        file_path = message.get("file_path")  # Can be None to clear active file
-        source_client_session = message.get("source_client_session")  # This is our key
-        
-        if not server_project_id:
-            raise ValueError("project_id is required")
-        if not source_client_session:
-            raise ValueError("source_client_session is required")
-        
-        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
-        
-        # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
-            return {
-                "event": "project_state_set_active_file_response",
-                "project_id": server_project_id,
-                "file_path": file_path,
-                "success": False
-            }
-        
-        success = await manager.set_active_file(project_state_key, file_path)
-        
-        if success:
-            # Send updated state
-            project_state = manager.projects[project_state_key]
-            await manager._send_project_state_update(project_state, server_project_id)
-        
-        return {
-            "event": "project_state_set_active_file_response",
+            "event": "project_state_create_diff_tab_response",
             "project_id": server_project_id,  # Return the server-side project ID
             "file_path": file_path,
             "success": success

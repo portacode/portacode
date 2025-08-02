@@ -32,8 +32,9 @@ from .handlers import (
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
     ProjectStateFileOpenHandler,
-    ProjectStateFileCloseHandler,
-    ProjectStateSetActiveFileHandler,
+    ProjectStateTabCloseHandler,
+    ProjectStateSetActiveTabHandler,
+    ProjectStateCreateDiffTabHandler,
 )
 from .handlers.session import SessionManager
 
@@ -305,8 +306,9 @@ class TerminalManager:
         self._command_registry.register(ProjectStateFolderExpandHandler)
         self._command_registry.register(ProjectStateFolderCollapseHandler)
         self._command_registry.register(ProjectStateFileOpenHandler)
-        self._command_registry.register(ProjectStateFileCloseHandler)
-        self._command_registry.register(ProjectStateSetActiveFileHandler)
+        self._command_registry.register(ProjectStateTabCloseHandler)
+        self._command_registry.register(ProjectStateSetActiveTabHandler)
+        self._command_registry.register(ProjectStateCreateDiffTabHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway
@@ -496,8 +498,8 @@ class TerminalManager:
                         "is_git_repo": project_state.is_git_repo,
                         "git_branch": project_state.git_branch,
                         "git_status_summary": project_state.git_status_summary,
-                        "open_files": list(project_state.open_files),
-                        "active_file": project_state.active_file,
+                        "open_tabs": [manager._serialize_tab_info(tab) for tab in project_state.open_tabs],
+                        "active_tab": manager._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
                         "items": [manager._serialize_file_item(item) for item in project_state.items],
                         "timestamp": time.time(),
                         "client_sessions": [session_name]  # Target this specific session

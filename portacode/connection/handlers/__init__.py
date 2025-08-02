@@ -25,8 +25,9 @@ from .project_state_handlers import (
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
     ProjectStateFileOpenHandler,
-    ProjectStateFileCloseHandler,
-    ProjectStateSetActiveFileHandler,
+    ProjectStateTabCloseHandler,
+    ProjectStateSetActiveTabHandler,
+    ProjectStateCreateDiffTabHandler,
 )
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "ProjectStateFolderExpandHandler",
     "ProjectStateFolderCollapseHandler",
     "ProjectStateFileOpenHandler",
-    "ProjectStateFileCloseHandler",
-    "ProjectStateSetActiveFileHandler",
+    "ProjectStateTabCloseHandler",
+    "ProjectStateSetActiveTabHandler",
+    "ProjectStateCreateDiffTabHandler",
 ] 
