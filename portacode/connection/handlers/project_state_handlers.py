@@ -167,47 +167,59 @@ class GitManager:
             return None
     
     def get_file_status(self, file_path: str) -> Dict[str, Any]:
-        """Get Git status for a specific file."""
+        """Get Git status for a specific file or directory."""
         if not self.is_git_repo or not self.repo:
             return {"is_tracked": False, "status": None, "is_ignored": False}
         
         try:
-            # Convert to relative path from repo root
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
-            # Check if file is ignored
-            is_ignored = False
-            try:
-                # Use git check-ignore to see if file is ignored
-                self.repo.git.check_ignore(rel_path)
-                is_ignored = True
-            except Exception:
-                is_ignored = False
+            # Check if ignored - GitPython handles path normalization internally
+            is_ignored = self.repo.ignored(rel_path)
+            if is_ignored:
+                return {"is_tracked": False, "status": "ignored", "is_ignored": True}
             
-            # Check if file is tracked
-            try:
-                self.repo.git.ls_files(rel_path, error_unmatch=True)
-                is_tracked = True
-            except Exception:
-                is_tracked = False
-            
-            # Get status
-            status = None
-            if is_tracked:
-                # Check for modifications
+            # For directories, only report status if they contain tracked or untracked files
+            if os.path.isdir(file_path):
+                # Check if directory contains any untracked files using path.startswith()
+                # This handles cross-platform path separators correctly
+                has_untracked = any(
+                    os.path.commonpath([f, rel_path]) == rel_path and f != rel_path
+                    for f in self.repo.untracked_files
+                )
+                if has_untracked:
+                    return {"is_tracked": False, "status": "untracked", "is_ignored": False}
+                
+                # Check if directory is dirty - GitPython handles path normalization
                 if self.repo.is_dirty(path=rel_path):
-                    status = "modified"
-                else:
-                    status = "clean"
-            elif is_ignored:
-                status = "ignored"
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False}
+                
+                # Check if directory has tracked files - let GitPython handle paths
+                try:
+                    tracked_files = self.repo.git.ls_files(rel_path)
+                    is_tracked = bool(tracked_files.strip())
+                    status = "clean" if is_tracked else None
+                    return {"is_tracked": is_tracked, "status": status, "is_ignored": False}
+                except Exception:
+                    return {"is_tracked": False, "status": None, "is_ignored": False}
+            
+            # For files
             else:
-                # Check if it's untracked
-                if os.path.exists(file_path):
-                    status = "untracked"
-            
-            return {"is_tracked": is_tracked, "status": status, "is_ignored": is_ignored}
-            
+                # Check if untracked - direct comparison works cross-platform
+                if rel_path in self.repo.untracked_files:
+                    return {"is_tracked": False, "status": "untracked", "is_ignored": False}
+                
+                # Check if tracked and dirty - GitPython handles path normalization
+                if self.repo.is_dirty(path=rel_path):
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False}
+                
+                # Check if tracked and clean - GitPython handles paths
+                try:
+                    self.repo.git.ls_files(rel_path, error_unmatch=True)
+                    return {"is_tracked": True, "status": "clean", "is_ignored": False}
+                except Exception:
+                    return {"is_tracked": False, "status": None, "is_ignored": False}
+                    
         except Exception as e:
             logger.debug("Error getting Git status for %s: %s", file_path, e)
             return {"is_tracked": False, "status": None, "is_ignored": False}
