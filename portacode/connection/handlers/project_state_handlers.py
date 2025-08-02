@@ -738,8 +738,9 @@ class ProjectStateManager:
                         if git_manager:
                             git_info = git_manager.get_file_status(entry.path)
                         
-                        # Check if this directory is expanded
+                        # Check if this directory is expanded and loaded
                         is_expanded = False
+                        is_loaded = True  # Files are always loaded; for directories, will be set based on monitored_folders
                         
                         file_item = FileItem(
                             name=entry.name,
@@ -753,7 +754,7 @@ class ProjectStateManager:
                             is_hidden=is_hidden,
                             is_ignored=git_info["is_ignored"],
                             is_expanded=is_expanded,
-                            is_loaded=not entry.is_dir()  # Files are always "loaded", directories need expansion
+                            is_loaded=is_loaded
                         )
                         
                         items.append(file_item)
@@ -769,7 +770,7 @@ class ProjectStateManager:
                 project_state.items = items
             elif parent_item:
                 parent_item.children = items
-                parent_item.is_loaded = True
+                # Don't set is_loaded here - it's set in _build_flattened_items_structure based on monitored_folders
                 
         except (OSError, PermissionError) as e:
             logger.error("Error loading directory %s: %s", directory_path, e)
@@ -778,18 +779,25 @@ class ProjectStateManager:
         """Build a flattened items structure including ALL items from ALL monitored folders."""
         all_items = []
         
-        # Create a set of expanded folder paths for quick lookup
+        # Create sets for quick lookup
         expanded_paths = {mf.folder_path for mf in project_state.monitored_folders if mf.is_expanded}
+        monitored_paths = {mf.folder_path for mf in project_state.monitored_folders}
         
         # Load items from ALL monitored folders
         for monitored_folder in project_state.monitored_folders:
             # Load direct children of this monitored folder
             children = await self._load_directory_items_list(monitored_folder.folder_path, monitored_folder.folder_path)
             
-            # Mark directories as expanded if they are in expanded_paths and add all items
+            # Set correct expansion and loading states for each child
             for child in children:
-                if child.is_directory and child.path in expanded_paths:
-                    child.is_expanded = True
+                if child.is_directory:
+                    # Set is_expanded based on expanded_paths
+                    child.is_expanded = child.path in expanded_paths
+                    # Set is_loaded based on monitored_paths (content loaded = in monitored folders)
+                    child.is_loaded = child.path in monitored_paths
+                else:
+                    # Files are always loaded
+                    child.is_loaded = True
                 all_items.append(child)
         
         # Remove duplicates (items might be loaded multiple times due to nested monitoring)
@@ -840,7 +848,7 @@ class ProjectStateManager:
                             is_hidden=is_hidden,
                             is_ignored=git_info["is_ignored"],
                             is_expanded=False,
-                            is_loaded=not entry.is_dir()
+                            is_loaded=True  # Will be set correctly in _build_flattened_items_structure
                         )
                         
                         items.append(file_item)

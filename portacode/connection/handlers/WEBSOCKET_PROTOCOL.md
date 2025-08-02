@@ -604,7 +604,7 @@ Confirms that project state has been successfully initialized for a client sessi
     *   `is_ignored` (boolean, mandatory): Whether the file is ignored by Git. Only meaningful if project is a Git repository.
     *   `children` (array, optional): Array of child FileItem objects for directories. Usually null in flattened structure as children are included as separate items.
     *   `is_expanded` (boolean, mandatory): Whether this directory is expanded in the project tree. Only meaningful for directories.
-    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded. Always true for files, indicates loading state for directories.
+    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded and are available. Always true for files. For directories, true indicates that the directory is being monitored (in monitored_folders) and its contents are loaded and available in the items list, enabling immediate expansion when requested.
 *   `timestamp` (float, mandatory): Unix timestamp of when the state was generated.
 
 ### <a name="project_state_update"></a>`project_state_update`
@@ -634,7 +634,7 @@ Sent automatically when project state changes due to file system modifications, 
     *   `is_ignored` (boolean, mandatory): Whether the file is ignored by Git. Only meaningful if project is a Git repository.
     *   `children` (array, optional): Array of child FileItem objects for directories. Usually null in flattened structure as children are included as separate items.
     *   `is_expanded` (boolean, mandatory): Whether this directory is expanded in the project tree. Only meaningful for directories.
-    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded. Always true for files, indicates loading state for directories.
+    *   `is_loaded` (boolean, mandatory): Whether the directory contents have been loaded and are available. Always true for files. For directories, true indicates that the directory is being monitored (in monitored_folders) and its contents are loaded and available in the items list, enabling immediate expansion when requested.
 *   `timestamp` (float, mandatory): Unix timestamp of when the update was generated.
 
 ### <a name="project_state_folder_expand_response"></a>`project_state_folder_expand_response`
