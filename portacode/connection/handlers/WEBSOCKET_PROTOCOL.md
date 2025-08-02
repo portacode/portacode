@@ -247,6 +247,13 @@ Project state actions manage the state of project folders, including file struct
 
 **Note:** Project state is automatically initialized when a client session connects with a `project_folder_path` property. No manual initialization command is required.
 
+**Tab Management:** Open tabs are internally managed using a dictionary structure with unique keys to prevent duplicates and race conditions:
+- File tabs use `file_path` as the unique key
+- Diff tabs use a composite key: `diff:{file_path}:{from_ref}:{to_ref}:{from_hash}:{to_hash}`
+- Untitled tabs use their `tab_id` as the unique key
+
+This ensures that sending the same command multiple times (e.g., `project_state_diff_open` with identical parameters) will not create duplicate tabs but will instead activate the existing tab.
+
 ### `project_state_folder_expand`
 
 Expands a folder in the project tree, loading its contents and enabling monitoring for that folder level. When a folder is expanded, the system proactively loads one level down for all subdirectories to enable immediate expansion in the UI. This action also scans items in the expanded folder and preloads content for any non-empty subdirectories.
@@ -278,6 +285,8 @@ Collapses a folder in the project tree, stopping monitoring for that folder leve
 ### `project_state_file_open`
 
 Marks a file as open in the project state, tracking it as part of the current editing session.
+
+**Duplicate Prevention:** This action prevents creating duplicate file tabs by using the `file_path` as a unique key. If a file tab with the same path already exists, it will be activated instead of creating a new one.
 
 **Payload Fields:**
 
@@ -321,6 +330,8 @@ Sets the currently active tab in the project state. Only one tab can be active a
 ### `project_state_diff_open`
 
 Opens a diff tab for comparing file versions at different points in the git timeline. This replaces the previous `project_state_create_diff_tab` action with a more efficient approach that doesn't require the client to provide file content, instead using git timeline references.
+
+**Duplicate Prevention:** This action prevents creating duplicate diff tabs by using a unique key based on `file_path`, `from_ref`, `to_ref`, `from_hash`, and `to_hash`. If a diff tab with the same parameters already exists, it will be activated instead of creating a new one.
 
 **Payload Fields:**
 
@@ -578,7 +589,7 @@ Confirms that project state has been successfully initialized for a client sessi
         *   `is_staged` (boolean): Always true for staged changes.
     *   `unstaged_changes` (array, optional): Array of unstaged file changes with same structure as staged_changes but `is_staged` is always false.
     *   `untracked_files` (array, optional): Array of untracked files with same structure as staged_changes but `is_staged` is always false and `change_type` is always 'untracked'.
-*   `open_tabs` (array, mandatory): Array of tab objects currently open. Each tab object contains:
+*   `open_tabs` (array, mandatory): Array of tab objects currently open. Internally stored as a dictionary with unique keys to prevent duplicates, but serialized as an array for API responses. Each tab object contains:
     *   `tab_id` (string, mandatory): Unique identifier for the tab.
     *   `tab_type` (string, mandatory): Type of tab ("file", "diff", "untitled", "image", "audio", "video").
     *   `title` (string, mandatory): Display title for the tab.
@@ -619,7 +630,7 @@ Sent automatically when project state changes due to file system modifications, 
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Updated summary of Git status counts.
 *   `git_detailed_status` (object, optional): Updated detailed Git status with comprehensive file change information and content hashes (same structure as in `project_state_initialized`).
-*   `open_tabs` (array, mandatory): Updated array of tab objects currently open.
+*   `open_tabs` (array, mandatory): Updated array of tab objects currently open. Internally stored as a dictionary with unique keys to prevent duplicates, but serialized as an array for API responses.
 *   `active_tab` (object, optional): Updated active tab object.
 *   `items` (array, mandatory): Updated flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
     *   `name` (string, mandatory): The file or directory name.

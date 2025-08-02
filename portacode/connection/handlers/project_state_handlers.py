@@ -118,12 +118,12 @@ class ProjectState:
     git_branch: Optional[str] = None
     git_status_summary: Optional[Dict[str, int]] = None  # Kept for backward compatibility
     git_detailed_status: Optional[GitDetailedStatus] = None  # New detailed git state
-    open_tabs: List['TabInfo'] = None
+    open_tabs: Dict[str, 'TabInfo'] = None  # Changed from List to Dict with unique keys
     active_tab: Optional['TabInfo'] = None
     
     def __post_init__(self):
         if self.open_tabs is None:
-            self.open_tabs = []
+            self.open_tabs = {}
         if self.monitored_folders is None:
             self.monitored_folders = []
     
@@ -580,7 +580,7 @@ class ProjectStateManager:
                     "git_branch": state.git_branch,
                     "git_status_summary": state.git_status_summary,
                     "git_detailed_status": asdict(state.git_detailed_status) if state.git_detailed_status else None,
-                    "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs],
+                    "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs.values()],
                     "active_tab": self._serialize_tab_info(state.active_tab) if state.active_tab else None,
                     "monitored_folders": [asdict(mf) for mf in state.monitored_folders],
                     "items": [self._serialize_file_item(item) for item in state.items]
@@ -953,9 +953,12 @@ class ProjectStateManager:
         
         project_state = self.projects[client_session_key]
         
+        # Generate unique key for file tab
+        tab_key = generate_tab_key('file', file_path)
+        
         # Check if file is already open
-        existing_tab = next((tab for tab in project_state.open_tabs if tab.file_path == file_path and tab.tab_type == 'file'), None)
-        if existing_tab:
+        if tab_key in project_state.open_tabs:
+            existing_tab = project_state.open_tabs[tab_key]
             if set_active:
                 project_state.active_tab = existing_tab
             self._write_debug_state()
@@ -967,7 +970,7 @@ class ProjectStateManager:
         
         try:
             new_tab = await tab_factory.create_file_tab(file_path)
-            project_state.open_tabs.append(new_tab)
+            project_state.open_tabs[tab_key] = new_tab
             if set_active:
                 project_state.active_tab = new_tab
             
@@ -985,17 +988,25 @@ class ProjectStateManager:
         
         project_state = self.projects[client_session_key]
         
-        # Find and remove the tab
-        tab_to_remove = next((tab for tab in project_state.open_tabs if tab.tab_id == tab_id), None)
+        # Find and remove the tab by searching through the dictionary values
+        tab_key_to_remove = None
+        tab_to_remove = None
+        for key, tab in project_state.open_tabs.items():
+            if tab.tab_id == tab_id:
+                tab_key_to_remove = key
+                tab_to_remove = tab
+                break
+        
         if not tab_to_remove:
             return False
         
-        project_state.open_tabs.remove(tab_to_remove)
+        del project_state.open_tabs[tab_key_to_remove]
         
         # Clear active tab if it was the closed tab
         if project_state.active_tab and project_state.active_tab.tab_id == tab_id:
             # Set active tab to the last remaining tab, or None if no tabs left
-            project_state.active_tab = project_state.open_tabs[-1] if project_state.open_tabs else None
+            remaining_tabs = list(project_state.open_tabs.values())
+            project_state.active_tab = remaining_tabs[-1] if remaining_tabs else None
         
         self._write_debug_state()
         return True
@@ -1008,8 +1019,12 @@ class ProjectStateManager:
         project_state = self.projects[client_session_key]
         
         if tab_id:
-            # Find the tab by ID
-            tab = next((t for t in project_state.open_tabs if t.tab_id == tab_id), None)
+            # Find the tab by ID in the dictionary values
+            tab = None
+            for t in project_state.open_tabs.values():
+                if t.tab_id == tab_id:
+                    tab = t
+                    break
             if not tab:
                 return False
             project_state.active_tab = tab
@@ -1032,6 +1047,19 @@ class ProjectStateManager:
         if not git_manager or not git_manager.is_git_repo:
             logger.error("Cannot create diff tab: not a git repository")
             return False
+        
+        # Generate unique key for diff tab
+        tab_key = generate_tab_key('diff', file_path, 
+                                 from_ref=from_ref, to_ref=to_ref, 
+                                 from_hash=from_hash, to_hash=to_hash)
+        
+        # Check if this diff tab is already open
+        if tab_key in project_state.open_tabs:
+            existing_tab = project_state.open_tabs[tab_key]
+            project_state.active_tab = existing_tab
+            logger.info(f"Diff tab already exists, activating: {tab_key}")
+            self._write_debug_state()
+            return True
         
         try:
             # Get content based on the reference type
@@ -1103,7 +1131,7 @@ class ProjectStateManager:
                 'diff_timeline': True
             })
             
-            project_state.open_tabs.append(diff_tab)
+            project_state.open_tabs[tab_key] = diff_tab
             project_state.active_tab = diff_tab
             
             logger.info(f"Created timeline diff tab for: {file_path} ({from_ref} → {to_ref})")
@@ -1197,7 +1225,7 @@ class ProjectStateManager:
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
             "git_detailed_status": str(project_state.git_detailed_status) if project_state.git_detailed_status else None,
-            "open_tabs": tuple((tab.tab_id, tab.tab_type, tab.title) for tab in project_state.open_tabs),
+            "open_tabs": tuple((tab.tab_id, tab.tab_type, tab.title) for tab in project_state.open_tabs.values()),
             "active_tab": project_state.active_tab.tab_id if project_state.active_tab else None,
             "items_count": len(project_state.items),
             "monitored_folders": tuple((mf.folder_path, mf.is_expanded) for mf in sorted(project_state.monitored_folders, key=lambda x: x.folder_path))
@@ -1221,7 +1249,7 @@ class ProjectStateManager:
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
             "git_detailed_status": asdict(project_state.git_detailed_status) if project_state.git_detailed_status else None,
-            "open_tabs": [self._serialize_tab_info(tab) for tab in project_state.open_tabs],
+            "open_tabs": [self._serialize_tab_info(tab) for tab in project_state.open_tabs.values()],
             "active_tab": self._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
             "items": [self._serialize_file_item(item) for item in project_state.items],
             "timestamp": time.time(),
@@ -1272,6 +1300,35 @@ class ProjectStateManager:
             self.cleanup_project(client_session_key)
         
         logger.info("Cleaned up %d project states", len(keys_to_remove))
+
+
+def generate_tab_key(tab_type: str, file_path: str, **kwargs) -> str:
+    """Generate a unique key for a tab.
+    
+    Args:
+        tab_type: Type of tab ('file', 'diff', 'untitled', etc.)
+        file_path: Path to the file
+        **kwargs: Additional parameters for diff tabs (from_ref, to_ref, from_hash, to_hash)
+    
+    Returns:
+        Unique string key for the tab
+    """
+    import uuid
+    
+    if tab_type == 'file':
+        return file_path
+    elif tab_type == 'diff':
+        from_ref = kwargs.get('from_ref', '')
+        to_ref = kwargs.get('to_ref', '')
+        from_hash = kwargs.get('from_hash', '')
+        to_hash = kwargs.get('to_hash', '')
+        return f"diff:{file_path}:{from_ref}:{to_ref}:{from_hash}:{to_hash}"
+    elif tab_type == 'untitled':
+        # For untitled tabs, use the tab_id as the key since they don't have a file path
+        return kwargs.get('tab_id', str(uuid.uuid4()))
+    else:
+        # For other tab types, use file_path if available, otherwise tab_id
+        return file_path if file_path else kwargs.get('tab_id', str(uuid.uuid4()))
 
 
 # Helper function for other handlers to get/create project state manager
