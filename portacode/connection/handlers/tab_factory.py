@@ -189,6 +189,38 @@ class TabFactory:
             metadata={'diff_mode': True}
         )
     
+    async def create_diff_tab_with_title(self, file_path: str, original_content: str, 
+                                       modified_content: str, title: str, 
+                                       tab_id: Optional[str] = None) -> TabInfo:
+        """Create a diff tab with a custom title for git timeline comparisons.
+        
+        Args:
+            file_path: Path to the file being compared
+            original_content: Original version of the file
+            modified_content: Modified version of the file
+            title: Custom title for the diff tab
+            tab_id: Optional tab ID, will generate UUID if not provided
+            
+        Returns:
+            TabInfo object configured for diff viewing with custom title
+        """
+        if tab_id is None:
+            tab_id = str(uuid.uuid4())
+        
+        return TabInfo(
+            tab_id=tab_id,
+            tab_type='diff',
+            title=title,
+            file_path=str(file_path),
+            content=None,  # Diff tabs don't use regular content
+            original_content=original_content,
+            modified_content=modified_content,
+            is_dirty=False,
+            mime_type=None,
+            encoding='utf-8',
+            metadata={'diff_mode': True, 'timeline_diff': True}
+        )
+    
     async def create_untitled_tab(self, content: str = "", language: str = "plaintext", 
                                 tab_id: Optional[str] = None) -> TabInfo:
         """Create an untitled tab for new content.

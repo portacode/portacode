@@ -34,7 +34,7 @@ from .handlers import (
     ProjectStateFileOpenHandler,
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
-    ProjectStateCreateDiffTabHandler,
+    ProjectStateDiffOpenHandler,
 )
 from .handlers.session import SessionManager
 
@@ -308,7 +308,7 @@ class TerminalManager:
         self._command_registry.register(ProjectStateFileOpenHandler)
         self._command_registry.register(ProjectStateTabCloseHandler)
         self._command_registry.register(ProjectStateSetActiveTabHandler)
-        self._command_registry.register(ProjectStateCreateDiffTabHandler)
+        self._command_registry.register(ProjectStateDiffOpenHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway

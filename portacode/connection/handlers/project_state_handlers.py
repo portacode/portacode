@@ -1,6 +1,7 @@
 """Project state handlers for maintaining project folder structure and git metadata."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -79,6 +80,34 @@ class FileItem:
 
 
 @dataclass
+class GitFileChange:
+    """Represents a single file change in git."""
+    file_repo_path: str  # Relative path from repository root
+    file_name: str  # Just the filename (basename)
+    file_abs_path: str  # Absolute path to the file
+    change_type: str  # 'added', 'modified', 'deleted', 'untracked' - follows git's native types
+    content_hash: Optional[str] = None  # SHA256 hash of current file content
+    is_staged: bool = False  # Whether this change is staged
+
+
+@dataclass
+class GitDetailedStatus:
+    """Represents detailed git status with file hashes."""
+    head_commit_hash: Optional[str] = None  # Hash of HEAD commit
+    staged_changes: List[GitFileChange] = None  # Changes in the staging area
+    unstaged_changes: List[GitFileChange] = None  # Changes in working directory
+    untracked_files: List[GitFileChange] = None  # Untracked files
+    
+    def __post_init__(self):
+        if self.staged_changes is None:
+            self.staged_changes = []
+        if self.unstaged_changes is None:
+            self.unstaged_changes = []
+        if self.untracked_files is None:
+            self.untracked_files = []
+
+
+@dataclass
 class ProjectState:
     """Represents the complete state of a project."""
     client_session_key: str  # The composite key: client_session_id + "_" + hash(project_folder_path)
@@ -87,7 +116,8 @@ class ProjectState:
     monitored_folders: List[MonitoredFolder] = None
     is_git_repo: bool = False
     git_branch: Optional[str] = None
-    git_status_summary: Optional[Dict[str, int]] = None
+    git_status_summary: Optional[Dict[str, int]] = None  # Kept for backward compatibility
+    git_detailed_status: Optional[GitDetailedStatus] = None  # New detailed git state
     open_tabs: List['TabInfo'] = None
     active_tab: Optional['TabInfo'] = None
     
@@ -213,6 +243,182 @@ class GitManager:
         except Exception as e:
             logger.debug("Error getting Git status summary: %s", e)
             return {}
+    
+    def _compute_file_hash(self, file_path: str) -> Optional[str]:
+        """Compute SHA256 hash of file content."""
+        try:
+            with open(file_path, 'rb') as f:
+                file_hash = hashlib.sha256()
+                chunk = f.read(8192)
+                while chunk:
+                    file_hash.update(chunk)
+                    chunk = f.read(8192)
+                return file_hash.hexdigest()
+        except (OSError, IOError) as e:
+            logger.debug("Error computing hash for %s: %s", file_path, e)
+            return None
+    
+    def get_head_commit_hash(self) -> Optional[str]:
+        """Get the hash of the HEAD commit."""
+        if not self.is_git_repo or not self.repo:
+            return None
+        
+        try:
+            return self.repo.head.commit.hexsha
+        except Exception as e:
+            logger.debug("Error getting HEAD commit hash: %s", e)
+            return None
+    
+    def get_detailed_status(self) -> GitDetailedStatus:
+        """Get detailed Git status with file hashes using GitPython APIs."""
+        if not self.is_git_repo or not self.repo:
+            return GitDetailedStatus()
+        
+        try:
+            detailed_status = GitDetailedStatus()
+            detailed_status.head_commit_hash = self.get_head_commit_hash()
+            
+            # Get all changed files using GitPython's index diff
+            # Get staged changes (index vs HEAD)
+            staged_files = self.repo.index.diff("HEAD")
+            for diff_item in staged_files:
+                file_repo_path = diff_item.a_path or diff_item.b_path
+                file_abs_path = os.path.join(self.project_path, file_repo_path)
+                file_name = os.path.basename(file_repo_path)
+                
+                # Determine change type - stick to git's native types
+                if diff_item.deleted_file:
+                    change_type = 'deleted'
+                    content_hash = None
+                elif diff_item.new_file:
+                    change_type = 'added'
+                    content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                else:
+                    # For modified files (including renames that git detected)
+                    change_type = 'modified'
+                    content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                
+                change = GitFileChange(
+                    file_repo_path=file_repo_path,
+                    file_name=file_name,
+                    file_abs_path=file_abs_path,
+                    change_type=change_type,
+                    content_hash=content_hash,
+                    is_staged=True
+                )
+                logger.info("GIT STATUS DEBUG - Created staged change: %s", asdict(change))
+                detailed_status.staged_changes.append(change)
+            
+            # Get unstaged changes (working tree vs index)
+            unstaged_files = self.repo.index.diff(None)
+            for diff_item in unstaged_files:
+                file_repo_path = diff_item.a_path or diff_item.b_path
+                file_abs_path = os.path.join(self.project_path, file_repo_path)
+                file_name = os.path.basename(file_repo_path)
+                
+                # Determine change type - stick to git's native types
+                if diff_item.deleted_file:
+                    change_type = 'deleted'
+                    content_hash = None
+                elif diff_item.new_file:
+                    change_type = 'added'
+                    content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                else:
+                    change_type = 'modified'
+                    content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                
+                change = GitFileChange(
+                    file_repo_path=file_repo_path,
+                    file_name=file_name,
+                    file_abs_path=file_abs_path,
+                    change_type=change_type,
+                    content_hash=content_hash,
+                    is_staged=False
+                )
+                logger.info("GIT STATUS DEBUG - Created unstaged change: %s", asdict(change))
+                detailed_status.unstaged_changes.append(change)
+            
+            # Get untracked files
+            untracked_files = self.repo.untracked_files
+            for file_repo_path in untracked_files:
+                file_abs_path = os.path.join(self.project_path, file_repo_path)
+                file_name = os.path.basename(file_repo_path)
+                content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                
+                change = GitFileChange(
+                    file_repo_path=file_repo_path,
+                    file_name=file_name,
+                    file_abs_path=file_abs_path,
+                    change_type='untracked',
+                    content_hash=content_hash,
+                    is_staged=False
+                )
+                logger.info("GIT STATUS DEBUG - Created untracked change: %s", asdict(change))
+                detailed_status.untracked_files.append(change)
+            
+            return detailed_status
+            
+        except Exception as e:
+            logger.error("Error getting detailed Git status: %s", e)
+            return GitDetailedStatus()
+    
+    def _get_change_type(self, status_char: str) -> str:
+        """Convert git status character to change type."""
+        status_map = {
+            'A': 'added',
+            'M': 'modified', 
+            'D': 'deleted',
+            'R': 'renamed',
+            'C': 'copied',
+            'U': 'unmerged',
+            '?': 'untracked'
+        }
+        return status_map.get(status_char, 'unknown')
+    
+    def get_file_content_at_commit(self, file_path: str, commit_hash: Optional[str] = None) -> Optional[str]:
+        """Get file content at a specific commit. If commit_hash is None, gets HEAD content."""
+        if not self.is_git_repo or not self.repo:
+            return None
+        
+        try:
+            if commit_hash is None:
+                commit_hash = 'HEAD'
+            
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Get file content at the specified commit
+            try:
+                content = self.repo.git.show(f"{commit_hash}:{rel_path}")
+                return content
+            except Exception as e:
+                logger.debug("File %s not found at commit %s: %s", rel_path, commit_hash, e)
+                return None
+                
+        except Exception as e:
+            logger.error("Error getting file content at commit %s for %s: %s", commit_hash, file_path, e)
+            return None
+    
+    def get_file_content_staged(self, file_path: str) -> Optional[str]:
+        """Get staged content of a file."""
+        if not self.is_git_repo or not self.repo:
+            return None
+        
+        try:
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Get staged content
+            try:
+                content = self.repo.git.show(f":{rel_path}")
+                return content
+            except Exception as e:
+                logger.debug("File %s not found in staging area: %s", rel_path, e)
+                return None
+                
+        except Exception as e:
+            logger.error("Error getting staged content for %s: %s", file_path, e)
+            return None
 
 
 class FileSystemWatcher:
@@ -361,6 +567,7 @@ class ProjectStateManager:
                     "is_git_repo": state.is_git_repo,
                     "git_branch": state.git_branch,
                     "git_status_summary": state.git_status_summary,
+                    "git_detailed_status": asdict(state.git_detailed_status) if state.git_detailed_status else None,
                     "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs],
                     "active_tab": self._serialize_tab_info(state.active_tab) if state.active_tab else None,
                     "monitored_folders": [asdict(mf) for mf in state.monitored_folders],
@@ -410,7 +617,8 @@ class ProjectStateManager:
             items=[],
             is_git_repo=git_manager.is_git_repo,
             git_branch=git_manager.get_branch_name(),
-            git_status_summary=git_manager.get_status_summary()
+            git_status_summary=git_manager.get_status_summary(),
+            git_detailed_status=git_manager.get_detailed_status()
         )
         
         # Initialize monitored folders with project root and its immediate subdirectories
@@ -509,7 +717,7 @@ class ProjectStateManager:
     
     async def _load_directory_items(self, project_state: ProjectState, directory_path: str, is_root: bool = False, parent_item: Optional[FileItem] = None):
         """Load directory items with Git metadata."""
-        git_manager = self.git_managers.get(project_state.project_id)
+        git_manager = self.git_managers.get(project_state.client_session_key)
         
         try:
             items = []
@@ -791,27 +999,99 @@ class ProjectStateManager:
         self._write_debug_state()
         return True
     
-    async def create_diff_tab(self, client_session_key: str, file_path: str, original_content: str, modified_content: str) -> bool:
-        """Create a diff tab for comparing file versions."""
+    async def open_diff_tab(self, client_session_key: str, file_path: str, 
+                           from_ref: str, to_ref: str, from_hash: Optional[str] = None, 
+                           to_hash: Optional[str] = None) -> bool:
+        """Open a diff tab comparing file versions at different git timeline points."""
         if client_session_key not in self.projects:
             return False
         
         project_state = self.projects[client_session_key]
+        git_manager = self.git_managers.get(client_session_key)
         
-        # Create diff tab using tab factory
-        from .tab_factory import get_tab_factory
-        tab_factory = get_tab_factory()
+        if not git_manager or not git_manager.is_git_repo:
+            logger.error("Cannot create diff tab: not a git repository")
+            return False
         
         try:
-            diff_tab = await tab_factory.create_diff_tab(file_path, original_content, modified_content)
+            # Get content based on the reference type
+            original_content = ""
+            modified_content = ""
+            
+            # Handle 'from' reference
+            if from_ref == "head":
+                original_content = git_manager.get_file_content_at_commit(file_path) or ""
+            elif from_ref == "staged":
+                original_content = git_manager.get_file_content_staged(file_path) or ""
+            elif from_ref == "working":
+                # Read current file content
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            original_content = f.read()
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.error("Error reading working file %s: %s", file_path, e)
+                        original_content = f"# Error reading file: {e}"
+            elif from_ref == "commit" and from_hash:
+                original_content = git_manager.get_file_content_at_commit(file_path, from_hash) or ""
+            
+            # Handle 'to' reference
+            if to_ref == "head":
+                modified_content = git_manager.get_file_content_at_commit(file_path) or ""
+            elif to_ref == "staged":
+                modified_content = git_manager.get_file_content_staged(file_path) or ""
+            elif to_ref == "working":
+                # Read current file content
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            modified_content = f.read()
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.error("Error reading working file %s: %s", file_path, e)
+                        modified_content = f"# Error reading file: {e}"
+            elif to_ref == "commit" and to_hash:
+                modified_content = git_manager.get_file_content_at_commit(file_path, to_hash) or ""
+            
+            # Create diff tab using tab factory
+            from .tab_factory import get_tab_factory
+            tab_factory = get_tab_factory()
+            
+            # Create a descriptive title for the diff
+            title_parts = []
+            if from_ref == "commit" and from_hash:
+                title_parts.append(from_hash[:8])
+            else:
+                title_parts.append(from_ref)
+            title_parts.append("→")
+            if to_ref == "commit" and to_hash:
+                title_parts.append(to_hash[:8])
+            else:
+                title_parts.append(to_ref)
+            
+            diff_title = f"{os.path.basename(file_path)} ({' '.join(title_parts)})"
+            
+            diff_tab = await tab_factory.create_diff_tab_with_title(
+                file_path, original_content, modified_content, diff_title
+            )
+            
+            # Add metadata about the diff references
+            diff_tab.metadata.update({
+                'from_ref': from_ref,
+                'to_ref': to_ref,
+                'from_hash': from_hash,
+                'to_hash': to_hash,
+                'diff_timeline': True
+            })
+            
             project_state.open_tabs.append(diff_tab)
             project_state.active_tab = diff_tab
             
-            logger.info(f"Created diff tab for: {file_path}")
+            logger.info(f"Created timeline diff tab for: {file_path} ({from_ref} → {to_ref})")
             self._write_debug_state()
             return True
+            
         except Exception as e:
-            logger.error(f"Failed to create diff tab for {file_path}: {e}")
+            logger.error(f"Failed to create timeline diff tab for {file_path}: {e}")
             return False
     
     async def _handle_file_change(self, event):
@@ -869,6 +1149,7 @@ class ProjectStateManager:
         # Update Git status
         if git_manager:
             project_state.git_status_summary = git_manager.get_status_summary()
+            project_state.git_detailed_status = git_manager.get_detailed_status()
         
         # Sync all dependent state (items, watchdog) - no automatic directory detection
         await self._sync_all_state_with_monitored_folders(project_state)
@@ -895,6 +1176,7 @@ class ProjectStateManager:
         current_state_signature = {
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
+            "git_detailed_status": str(project_state.git_detailed_status) if project_state.git_detailed_status else None,
             "open_tabs": tuple((tab.tab_id, tab.tab_type, tab.title) for tab in project_state.open_tabs),
             "active_tab": project_state.active_tab.tab_id if project_state.active_tab else None,
             "items_count": len(project_state.items),
@@ -918,6 +1200,7 @@ class ProjectStateManager:
             "is_git_repo": project_state.is_git_repo,
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
+            "git_detailed_status": asdict(project_state.git_detailed_status) if project_state.git_detailed_status else None,
             "open_tabs": [self._serialize_tab_info(tab) for tab in project_state.open_tabs],
             "active_tab": self._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
             "items": [self._serialize_file_item(item) for item in project_state.items],
@@ -1278,27 +1561,46 @@ class ProjectStateSetActiveTabHandler(AsyncHandler):
         }
 
 
-class ProjectStateCreateDiffTabHandler(AsyncHandler):
-    """Handler for creating diff tabs in project state."""
+class ProjectStateDiffOpenHandler(AsyncHandler):
+    """Handler for opening diff tabs based on git timeline references."""
     
     @property
     def command_name(self) -> str:
-        return "project_state_create_diff_tab"
+        return "project_state_diff_open"
     
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a diff tab in project state."""
+        """Open a diff tab comparing file versions at different git timeline points."""
         server_project_id = message.get("project_id")  # Server-side UUID (for response)
         file_path = message.get("file_path")
-        original_content = message.get("original_content", "")
-        modified_content = message.get("modified_content", "")
+        from_ref = message.get("from_ref")  # 'head', 'staged', 'working', 'commit'
+        to_ref = message.get("to_ref")  # 'head', 'staged', 'working', 'commit'
+        from_hash = message.get("from_hash")  # Optional commit hash for from_ref='commit'
+        to_hash = message.get("to_hash")  # Optional commit hash for to_ref='commit'
         source_client_session = message.get("source_client_session")  # This is our key
         
         if not server_project_id:
             raise ValueError("project_id is required")
         if not file_path:
             raise ValueError("file_path is required")
+        if not from_ref:
+            raise ValueError("from_ref is required")
+        if not to_ref:
+            raise ValueError("to_ref is required")
         if not source_client_session:
             raise ValueError("source_client_session is required")
+        
+        # Validate reference types
+        valid_refs = {'head', 'staged', 'working', 'commit'}
+        if from_ref not in valid_refs:
+            raise ValueError(f"Invalid from_ref: {from_ref}. Must be one of {valid_refs}")
+        if to_ref not in valid_refs:
+            raise ValueError(f"Invalid to_ref: {to_ref}. Must be one of {valid_refs}")
+        
+        # Validate commit hashes are provided when needed
+        if from_ref == 'commit' and not from_hash:
+            raise ValueError("from_hash is required when from_ref='commit'")
+        if to_ref == 'commit' and not to_hash:
+            raise ValueError("to_hash is required when to_ref='commit'")
         
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
@@ -1311,13 +1613,18 @@ class ProjectStateCreateDiffTabHandler(AsyncHandler):
         
         if not project_state_key:
             return {
-                "event": "project_state_create_diff_tab_response",
+                "event": "project_state_diff_open_response",
                 "project_id": server_project_id,
                 "file_path": file_path,
-                "success": False
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "success": False,
+                "error": "Project state not found"
             }
         
-        success = await manager.create_diff_tab(project_state_key, file_path, original_content, modified_content)
+        success = await manager.open_diff_tab(
+            project_state_key, file_path, from_ref, to_ref, from_hash, to_hash
+        )
         
         if success:
             # Send updated state
@@ -1325,8 +1632,14 @@ class ProjectStateCreateDiffTabHandler(AsyncHandler):
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
-            "event": "project_state_create_diff_tab_response",
+            "event": "project_state_diff_open_response",
             "project_id": server_project_id,  # Return the server-side project ID
             "file_path": file_path,
+            "from_ref": from_ref,
+            "to_ref": to_ref,
+            "from_hash": from_hash,
+            "to_hash": to_hash,
             "success": success
         }
+
+

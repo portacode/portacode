@@ -25,7 +25,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_file_open`](#project_state_file_open)
     - [`project_state_tab_close`](#project_state_tab_close)
     - [`project_state_set_active_tab`](#project_state_set_active_tab)
-    - [`project_state_create_diff_tab`](#project_state_create_diff_tab)
+    - [`project_state_diff_open`](#project_state_diff_open)
   - [Client Session Management](#client-session-management)
     - [`client_sessions_update`](#client_sessions_update)
 - [Events](#events)
@@ -55,7 +55,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_file_open_response`](#project_state_file_open_response)
     - [`project_state_tab_close_response`](#project_state_tab_close_response)
     - [`project_state_set_active_tab_response`](#project_state_set_active_tab_response)
-    - [`project_state_create_diff_tab_response`](#project_state_create_diff_tab_response)
+    - [`project_state_diff_open_response`](#project_state_diff_open_response)
   - [Client Session Events](#client-session-events)
     - [`request_client_sessions`](#request_client_sessions)
   - [Terminal Data](#terminal-data)
@@ -318,20 +318,26 @@ Sets the currently active tab in the project state. Only one tab can be active a
 *   On success, the device will respond with a [`project_state_set_active_tab_response`](#project_state_set_active_tab_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
-### `project_state_create_diff_tab`
+### `project_state_diff_open`
 
-Creates a diff tab for comparing file versions.
+Opens a diff tab for comparing file versions at different points in the git timeline. This replaces the previous `project_state_create_diff_tab` action with a more efficient approach that doesn't require the client to provide file content, instead using git timeline references.
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
 *   `file_path` (string, mandatory): The absolute path to the file to create a diff for.
-*   `original_content` (string, optional): The original content of the file. Defaults to empty string.
-*   `modified_content` (string, optional): The modified content of the file. Defaults to empty string.
+*   `from_ref` (string, mandatory): The source reference point. Must be one of:
+    - `"head"`: Content from the HEAD commit
+    - `"staged"`: Content from the staging area
+    - `"working"`: Current working directory content
+    - `"commit"`: Content from a specific commit (requires `from_hash`)
+*   `to_ref` (string, mandatory): The target reference point. Same options as `from_ref`.
+*   `from_hash` (string, optional): Required when `from_ref` is `"commit"`. The commit hash to get content from.
+*   `to_hash` (string, optional): Required when `to_ref` is `"commit"`. The commit hash to get content from.
 
 **Responses:**
 
-*   On success, the device will respond with a [`project_state_create_diff_tab_response`](#project_state_create_diff_tab_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On success, the device will respond with a [`project_state_diff_open_response`](#project_state_diff_open_response) event, followed by a [`project_state_update`](#project_state_update) event.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### Client Session Management
@@ -561,6 +567,17 @@ Confirms that project state has been successfully initialized for a client sessi
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Summary of Git status counts (modified, added, deleted, untracked files).
+*   `git_detailed_status` (object, optional): Detailed Git status with comprehensive file change information and content hashes. Contains:
+    *   `head_commit_hash` (string, optional): SHA hash of the HEAD commit.
+    *   `staged_changes` (array, optional): Array of staged file changes. Each change contains:
+        *   `file_repo_path` (string): Relative path from repository root.
+        *   `file_name` (string): Just the filename (basename).
+        *   `file_abs_path` (string): Absolute path to the file.
+        *   `change_type` (string): Type of change following git's native types ('added', 'modified', 'deleted', 'untracked'). Note: renames appear as separate 'deleted' and 'added' entries unless git detects them as modifications.
+        *   `content_hash` (string, optional): SHA256 hash of current file content. Null for deleted files.
+        *   `is_staged` (boolean): Always true for staged changes.
+    *   `unstaged_changes` (array, optional): Array of unstaged file changes with same structure as staged_changes but `is_staged` is always false.
+    *   `untracked_files` (array, optional): Array of untracked files with same structure as staged_changes but `is_staged` is always false and `change_type` is always 'untracked'.
 *   `open_tabs` (array, mandatory): Array of tab objects currently open. Each tab object contains:
     *   `tab_id` (string, mandatory): Unique identifier for the tab.
     *   `tab_type` (string, mandatory): Type of tab ("file", "diff", "untitled", "image", "audio", "video").
@@ -601,6 +618,7 @@ Sent automatically when project state changes due to file system modifications, 
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Updated summary of Git status counts.
+*   `git_detailed_status` (object, optional): Updated detailed Git status with comprehensive file change information and content hashes (same structure as in `project_state_initialized`).
 *   `open_tabs` (array, mandatory): Updated array of tab objects currently open.
 *   `active_tab` (object, optional): Updated active tab object.
 *   `items` (array, mandatory): Updated flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
@@ -670,15 +688,20 @@ Confirms the result of setting an active tab.
 *   `tab_id` (string, optional): The ID of the tab that was set as active (null if cleared).
 *   `success` (boolean, mandatory): Whether the operation was successful.
 
-### <a name="project_state_create_diff_tab_response"></a>`project_state_create_diff_tab_response`
+### <a name="project_state_diff_open_response"></a>`project_state_diff_open_response`
 
-Confirms the result of creating a diff tab.
+Confirms the result of opening a diff tab with git timeline references.
 
 **Event Fields:**
 
 *   `project_id` (string, mandatory): The project ID the operation was performed on.
 *   `file_path` (string, mandatory): The path to the file the diff tab was created for.
+*   `from_ref` (string, mandatory): The source reference point that was used.
+*   `to_ref` (string, mandatory): The target reference point that was used.
+*   `from_hash` (string, optional): The commit hash used for `from_ref` if it was `"commit"`.
+*   `to_hash` (string, optional): The commit hash used for `to_ref` if it was `"commit"`.
 *   `success` (boolean, mandatory): Whether the diff tab creation was successful.
+*   `error` (string, optional): Error message if the operation failed.
 
 ### Client Session Events
 

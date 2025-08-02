@@ -27,7 +27,7 @@ from .project_state_handlers import (
     ProjectStateFileOpenHandler,
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
-    ProjectStateCreateDiffTabHandler,
+    ProjectStateDiffOpenHandler,
 )
 
 __all__ = [
@@ -52,5 +52,5 @@ __all__ = [
     "ProjectStateFileOpenHandler",
     "ProjectStateTabCloseHandler",
     "ProjectStateSetActiveTabHandler",
-    "ProjectStateCreateDiffTabHandler",
+    "ProjectStateDiffOpenHandler",
 ] 
