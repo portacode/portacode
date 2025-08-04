@@ -465,11 +465,6 @@ class FileSystemWatcher:
                 super().__init__()
             
             def on_any_event(self, event):
-                # Skip events for .git folder and its contents to avoid noise
-                path_parts = Path(event.src_path).parts
-                if '.git' in path_parts:
-                    return
-                
                 # Skip debug files to avoid feedback loops
                 if event.src_path.endswith('project_state_debug.json'):
                     return
@@ -479,7 +474,33 @@ class FileSystemWatcher:
                 if event.event_type in ('opened', 'closed'):
                     return
                 
-                logger.info("File system event: %s - %s", event.event_type, event.src_path)
+                # Handle .git folder events separately for git status monitoring
+                path_parts = Path(event.src_path).parts
+                if '.git' in path_parts:
+                    # Get the relative path within .git directory
+                    try:
+                        git_index = path_parts.index('.git')
+                        git_relative_path = '/'.join(path_parts[git_index + 1:])
+                        git_file = Path(event.src_path).name
+                        
+                        # Monitor git files that indicate repository state changes
+                        should_monitor_git_file = (
+                            git_file == 'index' or  # Staging area changes
+                            git_file == 'HEAD' or   # Branch switches
+                            git_relative_path.startswith('refs/heads/') or  # Branch updates
+                            git_relative_path.startswith('refs/remotes/') or  # Remote tracking branches
+                            git_relative_path.startswith('logs/refs/heads/') or  # Branch history
+                            git_relative_path.startswith('logs/HEAD')  # HEAD history
+                        )
+                        
+                        if should_monitor_git_file:
+                            logger.info("Git status change detected: %s - %s", event.event_type, event.src_path)
+                        else:
+                            return  # Skip other .git files
+                    except (ValueError, IndexError):
+                        return  # Skip if can't parse .git path
+                else:
+                    logger.info("File system event: %s - %s", event.event_type, event.src_path)
                 
                 # Schedule async task in the main event loop from this watchdog thread
                 if self.watcher.event_loop and not self.watcher.event_loop.is_closed():
@@ -503,11 +524,6 @@ class FileSystemWatcher:
             logger.warning("Watchdog not available, cannot start watching: %s", path)
             return
         
-        # Extra safety check: never watch .git folders
-        if Path(path).name == '.git':
-            logger.debug("Refusing to watch .git folder: %s", path)
-            return
-        
         if path not in self.watched_paths:
             try:
                 # Use recursive=False to watch only direct contents of each folder
@@ -522,6 +538,27 @@ class FileSystemWatcher:
                 logger.error("Error starting file watcher for %s: %s", path, e)
         else:
             logger.debug("Path already being watched: %s", path)
+    
+    def start_watching_git_directory(self, git_path: str):
+        """Start watching a .git directory for git status changes."""
+        if not WATCHDOG_AVAILABLE or not self.observer:
+            logger.warning("Watchdog not available, cannot start watching git directory: %s", git_path)
+            return
+        
+        if git_path not in self.watched_paths:
+            try:
+                # Watch .git directory recursively to catch changes in refs/, logs/, etc.
+                self.observer.schedule(self.event_handler, git_path, recursive=True)
+                self.watched_paths.add(git_path)
+                logger.info("Started watching git directory (recursive): %s", git_path)
+                
+                if not self.observer.is_alive():
+                    self.observer.start()
+                    logger.info("Started file system observer")
+            except Exception as e:
+                logger.error("Error starting git directory watcher for %s: %s", git_path, e)
+        else:
+            logger.debug("Git directory already being watched: %s", git_path)
     
     def stop_watching(self, path: str):
         """Stop watching a specific path."""
@@ -672,6 +709,13 @@ class ProjectStateManager:
         # Watch each monitored folder individually to align with the monitored_folders structure
         for monitored_folder in project_state.monitored_folders:
             self.file_watcher.start_watching(monitored_folder.folder_path)
+        
+        # For git repositories, also watch the .git directory for git status changes
+        if project_state.is_git_repo:
+            git_dir_path = os.path.join(project_state.project_folder_path, '.git')
+            if os.path.exists(git_dir_path):
+                self.file_watcher.start_watching_git_directory(git_dir_path)
+                logger.debug("Started monitoring .git directory for git status changes: %s", git_dir_path)
         
         logger.debug("Watchdog synchronized: watching %d monitored folders individually", len(project_state.monitored_folders))
     
@@ -1196,6 +1240,7 @@ class ProjectStateManager:
         
         # Update Git status
         if git_manager:
+            project_state.git_branch = git_manager.get_branch_name()
             project_state.git_status_summary = git_manager.get_status_summary()
             project_state.git_detailed_status = git_manager.get_detailed_status()
         
@@ -1267,6 +1312,11 @@ class ProjectStateManager:
             # Stop watching all monitored folders for this project
             for monitored_folder in project_state.monitored_folders:
                 self.file_watcher.stop_watching(monitored_folder.folder_path)
+            
+            # Stop watching .git directory if it was being monitored
+            if project_state.is_git_repo:
+                git_dir_path = os.path.join(project_state.project_folder_path, '.git')
+                self.file_watcher.stop_watching(git_dir_path)
             
             # Clean up managers
             self.git_managers.pop(client_session_key, None)

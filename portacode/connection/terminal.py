@@ -28,7 +28,11 @@ from .handlers import (
     TerminalStopHandler,
     TerminalListHandler,
     SystemInfoHandler,
+    FileReadHandler,
+    FileWriteHandler,
     DirectoryListHandler,
+    FileInfoHandler,
+    FileDeleteHandler,
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
     ProjectStateFileOpenHandler,
@@ -301,7 +305,12 @@ class TerminalManager:
         self._command_registry.register(TerminalStopHandler)
         self._command_registry.register(TerminalListHandler)
         self._command_registry.register(SystemInfoHandler)
+        # File operation handlers
+        self._command_registry.register(FileReadHandler)
+        self._command_registry.register(FileWriteHandler)
         self._command_registry.register(DirectoryListHandler)
+        self._command_registry.register(FileInfoHandler)
+        self._command_registry.register(FileDeleteHandler)
         # Project state handlers
         self._command_registry.register(ProjectStateFolderExpandHandler)
         self._command_registry.register(ProjectStateFolderCollapseHandler)
