@@ -206,4 +206,163 @@ class FileDeleteHandler(SyncHandler):
         except OSError as e:
             if "Directory not empty" in str(e):
                 raise ValueError(f"Directory not empty (use recursive=True): {path}")
-            raise RuntimeError(f"Failed to delete: {e}") 
+            raise RuntimeError(f"Failed to delete: {e}")
+
+
+class FileCreateHandler(SyncHandler):
+    """Handler for creating new files."""
+    
+    @property
+    def command_name(self) -> str:
+        return "file_create"
+    
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new file."""
+        parent_path = message.get("parent_path")
+        file_name = message.get("file_name")
+        content = message.get("content", "")
+        
+        if not parent_path:
+            raise ValueError("parent_path parameter is required")
+        if not file_name:
+            raise ValueError("file_name parameter is required")
+        
+        # Validate file name (no path separators or special chars)
+        if "/" in file_name or "\\" in file_name or file_name in [".", ".."]:
+            raise ValueError("Invalid file name")
+        
+        try:
+            # Ensure parent directory exists
+            parent_dir = Path(parent_path)
+            if not parent_dir.exists():
+                raise ValueError(f"Parent directory does not exist: {parent_path}")
+            if not parent_dir.is_dir():
+                raise ValueError(f"Parent path is not a directory: {parent_path}")
+            
+            # Create the full file path
+            file_path = parent_dir / file_name
+            
+            # Check if file already exists
+            if file_path.exists():
+                raise ValueError(f"File already exists: {file_name}")
+            
+            # Create the file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            return {
+                "event": "file_create_response",
+                "parent_path": parent_path,
+                "file_name": file_name,
+                "file_path": str(file_path),
+                "success": True,
+            }
+        except PermissionError:
+            raise RuntimeError(f"Permission denied: {parent_path}")
+        except OSError as e:
+            raise RuntimeError(f"Failed to create file: {e}")
+
+
+class FolderCreateHandler(SyncHandler):
+    """Handler for creating new folders."""
+    
+    @property
+    def command_name(self) -> str:
+        return "folder_create"
+    
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new folder."""
+        parent_path = message.get("parent_path")
+        folder_name = message.get("folder_name")
+        
+        if not parent_path:
+            raise ValueError("parent_path parameter is required")
+        if not folder_name:
+            raise ValueError("folder_name parameter is required")
+        
+        # Validate folder name (no path separators or special chars)
+        if "/" in folder_name or "\\" in folder_name or folder_name in [".", ".."]:
+            raise ValueError("Invalid folder name")
+        
+        try:
+            # Ensure parent directory exists
+            parent_dir = Path(parent_path)
+            if not parent_dir.exists():
+                raise ValueError(f"Parent directory does not exist: {parent_path}")
+            if not parent_dir.is_dir():
+                raise ValueError(f"Parent path is not a directory: {parent_path}")
+            
+            # Create the full folder path
+            folder_path = parent_dir / folder_name
+            
+            # Check if folder already exists
+            if folder_path.exists():
+                raise ValueError(f"Folder already exists: {folder_name}")
+            
+            # Create the folder
+            folder_path.mkdir(parents=False, exist_ok=False)
+            
+            return {
+                "event": "folder_create_response",
+                "parent_path": parent_path,
+                "folder_name": folder_name,
+                "folder_path": str(folder_path),
+                "success": True,
+            }
+        except PermissionError:
+            raise RuntimeError(f"Permission denied: {parent_path}")
+        except OSError as e:
+            raise RuntimeError(f"Failed to create folder: {e}")
+
+
+class FileRenameHandler(SyncHandler):
+    """Handler for renaming files and folders."""
+    
+    @property
+    def command_name(self) -> str:
+        return "file_rename"
+    
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Rename a file or folder."""
+        old_path = message.get("old_path")
+        new_name = message.get("new_name")
+        
+        if not old_path:
+            raise ValueError("old_path parameter is required")
+        if not new_name:
+            raise ValueError("new_name parameter is required")
+        
+        # Validate new name (no path separators or special chars)
+        if "/" in new_name or "\\" in new_name or new_name in [".", ".."]:
+            raise ValueError("Invalid new name")
+        
+        try:
+            old_path_obj = Path(old_path)
+            if not old_path_obj.exists():
+                raise ValueError(f"Path does not exist: {old_path}")
+            
+            # Create new path in same directory
+            new_path = old_path_obj.parent / new_name
+            
+            # Check if target already exists
+            if new_path.exists():
+                raise ValueError(f"Target already exists: {new_name}")
+            
+            # Determine if it's a file or directory
+            is_directory = old_path_obj.is_dir()
+            
+            # Rename the file/folder
+            old_path_obj.rename(new_path)
+            
+            return {
+                "event": "file_rename_response",
+                "old_path": old_path,
+                "new_path": str(new_path),
+                "new_name": new_name,
+                "is_directory": is_directory,
+                "success": True,
+            }
+        except PermissionError:
+            raise RuntimeError(f"Permission denied: {old_path}")
+        except OSError as e:
+            raise RuntimeError(f"Failed to rename: {e}")

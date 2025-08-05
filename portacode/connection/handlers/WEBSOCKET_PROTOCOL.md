@@ -19,6 +19,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`directory_list`](#directory_list)
     - [`file_info`](#file_info)
     - [`file_delete`](#file_delete)
+    - [`file_create`](#file_create)
+    - [`folder_create`](#folder_create)
+    - [`file_rename`](#file_rename)
   - [Project State Actions](#project-state-actions)
     - [`project_state_folder_expand`](#project_state_folder_expand)
     - [`project_state_folder_collapse`](#project_state_folder_collapse)
@@ -47,6 +50,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`directory_list_response`](#directory_list_response)
     - [`file_info_response`](#file_info_response)
     - [`file_delete_response`](#file_delete_response)
+    - [`file_create_response`](#file_create_response)
+    - [`folder_create_response`](#folder_create_response)
+    - [`file_rename_response`](#file_rename_response)
   - [Project State Events](#project-state-events)
     - [`project_state_initialized`](#project_state_initialized)
     - [`project_state_update`](#project_state_update)
@@ -239,6 +245,49 @@ Deletes a file or directory. Handled by [`file_delete`](./file_handlers.py).
 **Responses:**
 
 *   On success, the device will respond with a [`file_delete_response`](#file_delete_response) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `file_create`
+
+Creates a new file. Handled by [`file_create`](./file_handlers.py).
+
+**Payload Fields:**
+
+*   `parent_path` (string, mandatory): The absolute path to the parent directory where the file should be created.
+*   `file_name` (string, mandatory): The name of the file to create. Must not contain path separators or be special directories (`.`, `..`).
+*   `content` (string, optional): The initial content for the file. Defaults to empty string.
+
+**Responses:**
+
+*   On success, the device will respond with a [`file_create_response`](#file_create_response) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `folder_create`
+
+Creates a new folder/directory. Handled by [`folder_create`](./file_handlers.py).
+
+**Payload Fields:**
+
+*   `parent_path` (string, mandatory): The absolute path to the parent directory where the folder should be created.
+*   `folder_name` (string, mandatory): The name of the folder to create. Must not contain path separators or be special directories (`.`, `..`).
+
+**Responses:**
+
+*   On success, the device will respond with a [`folder_create_response`](#folder_create_response) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `file_rename`
+
+Renames a file or folder. Handled by [`file_rename`](./file_handlers.py).
+
+**Payload Fields:**
+
+*   `old_path` (string, mandatory): The absolute path to the file or folder to rename.
+*   `new_name` (string, mandatory): The new name (not full path) for the item. Must not contain path separators or be special directories (`.`, `..`).
+
+**Responses:**
+
+*   On success, the device will respond with a [`file_rename_response`](#file_rename_response) event.
 *   On error, a generic [`error`](#error) event is sent.
 
 ## Project State Actions
@@ -565,6 +614,40 @@ Confirms that a file or directory has been deleted in response to a `file_delete
 *   `path` (string, mandatory): The path of the deleted file or directory.
 *   `deleted_type` (string, mandatory): The type of the deleted item ("file" or "directory").
 *   `success` (boolean, mandatory): Indicates whether the deletion was successful.
+
+### <a name="file_create_response"></a>`file_create_response`
+
+Confirms that a file has been created successfully in response to a `file_create` action. Handled by [`file_create`](./file_handlers.py).
+
+**Event Fields:**
+
+*   `parent_path` (string, mandatory): The path of the parent directory where the file was created.
+*   `file_name` (string, mandatory): The name of the created file.
+*   `file_path` (string, mandatory): The full absolute path to the created file.
+*   `success` (boolean, mandatory): Indicates whether the creation was successful.
+
+### <a name="folder_create_response"></a>`folder_create_response`
+
+Confirms that a folder has been created successfully in response to a `folder_create` action. Handled by [`folder_create`](./file_handlers.py).
+
+**Event Fields:**
+
+*   `parent_path` (string, mandatory): The path of the parent directory where the folder was created.
+*   `folder_name` (string, mandatory): The name of the created folder.
+*   `folder_path` (string, mandatory): The full absolute path to the created folder.
+*   `success` (boolean, mandatory): Indicates whether the creation was successful.
+
+### <a name="file_rename_response"></a>`file_rename_response`
+
+Confirms that a file or folder has been renamed successfully in response to a `file_rename` action. Handled by [`file_rename`](./file_handlers.py).
+
+**Event Fields:**
+
+*   `old_path` (string, mandatory): The original path of the renamed item.
+*   `new_path` (string, mandatory): The new path of the renamed item.
+*   `new_name` (string, mandatory): The new name of the item.
+*   `is_directory` (boolean, mandatory): Indicates whether the renamed item is a directory.
+*   `success` (boolean, mandatory): Indicates whether the rename was successful.
 
 ### Project State Events
 

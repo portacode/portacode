@@ -20,6 +20,9 @@ from .file_handlers import (
     DirectoryListHandler,
     FileInfoHandler,
     FileDeleteHandler,
+    FileCreateHandler,
+    FolderCreateHandler,
+    FileRenameHandler,
 )
 from .project_state_handlers import (
     ProjectStateFolderExpandHandler,
@@ -46,6 +49,9 @@ __all__ = [
     "DirectoryListHandler",
     "FileInfoHandler",
     "FileDeleteHandler",
+    "FileCreateHandler",
+    "FolderCreateHandler",
+    "FileRenameHandler",
     # Project state handlers
     "ProjectStateFolderExpandHandler",
     "ProjectStateFolderCollapseHandler",
