@@ -2025,6 +2025,44 @@ class ProjectStateManager:
             "client_sessions": [project_state.client_session_id]  # Target only this client session
         }
         
+        # Log payload size analysis before sending
+        try:
+            import json
+            payload_json = json.dumps(payload)
+            payload_size_kb = len(payload_json.encode('utf-8')) / 1024
+            
+            if payload_size_kb > 100:  # Log for large project state updates
+                logger.warning("📦 Large project_state_update: %.1f KB for client %s", 
+                              payload_size_kb, project_state.client_session_id)
+                
+                # Analyze which parts are large
+                large_components = []
+                for key, value in payload.items():
+                    if key in ['open_tabs', 'active_tab', 'items', 'git_detailed_status']:
+                        component_size = len(json.dumps(value).encode('utf-8')) / 1024
+                        if component_size > 10:  # Components > 10KB
+                            large_components.append(f"{key}: {component_size:.1f}KB")
+                
+                if large_components:
+                    logger.warning("📦 Large components in project_state_update: %s", ", ".join(large_components))
+                
+                # Special analysis for active_tab which often contains HTML diff
+                if payload.get('active_tab') and isinstance(payload['active_tab'], dict):
+                    active_tab = payload['active_tab']
+                    tab_type = active_tab.get('tab_type', 'unknown')
+                    if tab_type == 'diff' and active_tab.get('metadata'):
+                        metadata = active_tab['metadata']
+                        if 'html_diff_versions' in metadata:
+                            html_diff_size = len(json.dumps(metadata['html_diff_versions']).encode('utf-8')) / 1024
+                            logger.warning("📦 HTML diff in active_tab: %.1f KB (tab_type: %s)", html_diff_size, tab_type)
+                            
+            elif payload_size_kb > 50:
+                logger.info("📦 Medium project_state_update: %.1f KB for client %s", 
+                           payload_size_kb, project_state.client_session_id)
+        
+        except Exception as e:
+            logger.warning("Failed to analyze payload size: %s", e)
+        
         # Send via control channel with client session targeting
         await self.control_channel.send(payload)
     
