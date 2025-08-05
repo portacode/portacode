@@ -74,21 +74,36 @@ class ClientSessionManager:
             logger.info(f"Newly added sessions: {newly_added_sessions}")
         if disconnected_sessions:
             logger.info(f"Disconnected sessions: {disconnected_sessions}")
-            # Trigger cleanup for disconnected sessions
-            self._cleanup_disconnected_sessions(disconnected_sessions)
+            # NOTE: Not automatically cleaning up project states for disconnected sessions
+            # to handle temporary disconnections gracefully. Project states will be cleaned
+            # up only when explicitly notified by the server of permanent disconnection.
+            logger.info("Project states preserved for potential reconnection of these sessions")
+        
+        # Handle project state management based on session changes
+        if newly_added_sessions or disconnected_sessions:
+            # Schedule project state management to run asynchronously
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule both cleanup and initialization
+                    loop.create_task(self._manage_project_states_for_session_changes(newly_added_sessions, sessions))
+                else:
+                    logger.debug("No event loop running, skipping project state management")
+            except Exception as e:
+                logger.debug("Could not schedule project state management: %s", e)
         
         self._write_debug_file()
         return newly_added_sessions
     
-    def _cleanup_disconnected_sessions(self, disconnected_sessions: List[str]):
-        """Clean up resources for disconnected client sessions."""
-        logger.info("Cleaning up resources for %d disconnected sessions", len(disconnected_sessions))
+    def cleanup_client_session_explicitly(self, client_session_id: str):
+        """Explicitly clean up resources for a client session when notified by server."""
+        logger.info("Explicitly cleaning up resources for client session: %s", client_session_id)
         
         # Import here to avoid circular imports
         from .handlers.project_state_handlers import _get_or_create_project_state_manager
         
         # Get the project state manager from context if it exists
-        # We need to get the context from the terminal manager
         if hasattr(self, '_terminal_manager') and self._terminal_manager:
             context = getattr(self._terminal_manager, '_context', {})
             if context:
@@ -96,17 +111,114 @@ class ClientSessionManager:
                 control_channel = getattr(self._terminal_manager, '_control_channel', None)
                 if control_channel:
                     project_manager = _get_or_create_project_state_manager(context, control_channel)
-                    
-                    # Clean up project states for each disconnected session
-                    for client_session_id in disconnected_sessions:
-                        logger.info("Cleaning up project states for disconnected session: %s", client_session_id)
-                        project_manager.cleanup_projects_by_client_session(client_session_id)
+                    logger.info("Cleaning up project state for client session: %s", client_session_id)
+                    project_manager.cleanup_projects_by_client_session(client_session_id)
                 else:
                     logger.warning("No control channel available for project state cleanup")
             else:
                 logger.warning("No context available for project state cleanup")
         else:
             logger.warning("No terminal manager available for project state cleanup")
+            
+    async def _manage_project_states_for_session_changes(self, newly_added_sessions: List[str], all_sessions: List[Dict]):
+        """Comprehensive project state management for session changes."""
+        try:
+            # Import here to avoid circular imports
+            from .handlers.project_state_handlers import _get_or_create_project_state_manager
+            
+            if not hasattr(self, '_terminal_manager') or not self._terminal_manager:
+                logger.warning("No terminal manager available for project state management")
+                return
+            
+            context = getattr(self._terminal_manager, '_context', {})
+            if not context:
+                logger.warning("No context available for project state management")
+                return
+            
+            control_channel = getattr(self._terminal_manager, '_control_channel', None)
+            if not control_channel:
+                logger.warning("No control channel available for project state management")
+                return
+            
+            project_manager = _get_or_create_project_state_manager(context, control_channel)
+            
+            # Convert sessions list to dict for easier lookup
+            sessions_dict = {session.get('channel_name'): session for session in all_sessions if session.get('channel_name')}
+            
+            # First, clean up project states for sessions that are no longer project sessions or don't exist
+            current_project_sessions = set()
+            for session in all_sessions:
+                channel_name = session.get('channel_name')
+                project_id = session.get('project_id')
+                project_folder_path = session.get('project_folder_path')
+                
+                if channel_name and project_id is not None and project_folder_path:
+                    current_project_sessions.add(channel_name)
+                    logger.debug(f"Active project session: {channel_name} -> {project_folder_path} (project_id: {project_id})")
+            
+            # Clean up project states that don't match current project sessions
+            existing_project_states = list(project_manager.projects.keys())
+            for session_id in existing_project_states:
+                if session_id not in current_project_sessions:
+                    logger.info(f"Cleaning up project state for session {session_id} (no longer a project session)")
+                    project_manager.cleanup_project(session_id)
+            
+            # Initialize project states for new project sessions
+            for session_name in newly_added_sessions:
+                session = sessions_dict.get(session_name)
+                if not session:
+                    continue
+                
+                project_id = session.get('project_id')
+                project_folder_path = session.get('project_folder_path')
+                
+                if project_id is not None and project_folder_path:
+                    logger.info(f"Initializing project state for new project session {session_name}: {project_folder_path}")
+                    
+                    try:
+                        # Initialize project state (this includes migration logic)
+                        project_state = await project_manager.initialize_project_state(session_name, project_folder_path)
+                        logger.info(f"Successfully initialized project state for {session_name}")
+                        
+                        # Send initial project state to the client
+                        # (implementation can be added here if needed)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to initialize project state for {session_name}: {e}")
+                
+        except Exception as e:
+            logger.error("Error managing project states for session changes: %s", e)
+    
+    async def _cleanup_orphaned_project_states(self):
+        """Clean up project states that don't match any current client session."""
+        try:
+            # Import here to avoid circular imports
+            from .handlers.project_state_handlers import _get_or_create_project_state_manager
+            
+            # Get current client session IDs
+            current_sessions = list(self._client_sessions.keys())
+            
+            if hasattr(self, '_terminal_manager') and self._terminal_manager:
+                context = getattr(self._terminal_manager, '_context', {})
+                if context:
+                    control_channel = getattr(self._terminal_manager, '_control_channel', None)
+                    if control_channel:
+                        project_manager = _get_or_create_project_state_manager(context, control_channel)
+                        project_manager.cleanup_orphaned_project_states(current_sessions)
+                    else:
+                        logger.warning("No control channel available for orphaned project state cleanup")
+                else:
+                    logger.warning("No context available for orphaned project state cleanup")
+            else:
+                logger.warning("No terminal manager available for orphaned project state cleanup")
+                
+        except Exception as e:
+            logger.error("Error cleaning up orphaned project states: %s", e)
+    
+    def _cleanup_disconnected_sessions(self, disconnected_sessions: List[str]):
+        """Legacy method - now just logs disconnections without cleanup."""
+        logger.info("Sessions disconnected (but preserving project states): %s", disconnected_sessions)
+        # Project states are preserved to handle reconnections gracefully
     
     def set_terminal_manager(self, terminal_manager):
         """Set reference to terminal manager for cleanup purposes."""
@@ -489,9 +601,10 @@ class TerminalManager:
                 if not session:
                     continue
                 
+                project_id = session.get("project_id")
                 project_folder_path = session.get("project_folder_path")
-                if not project_folder_path:
-                    logger.debug(f"terminal_manager: 🌳 Session {session_name} has no project_folder_path, skipping")
+                if project_id is None or not project_folder_path:
+                    logger.debug(f"terminal_manager: 🌳 Session {session_name} has no project_id or project_folder_path, skipping")
                     continue
                 
                 logger.info(f"terminal_manager: 🌳 Initializing project state for session {session_name} with folder: {project_folder_path}")

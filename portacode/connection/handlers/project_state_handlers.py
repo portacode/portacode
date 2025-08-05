@@ -134,7 +134,7 @@ class GitDetailedStatus:
 @dataclass
 class ProjectState:
     """Represents the complete state of a project."""
-    client_session_key: str  # The composite key: client_session_id + "_" + hash(project_folder_path)
+    client_session_id: str  # The client session ID - one project per client session
     project_folder_path: str
     items: List[FileItem]
     monitored_folders: List[MonitoredFolder] = None
@@ -150,11 +150,6 @@ class ProjectState:
             self.open_tabs = {}
         if self.monitored_folders is None:
             self.monitored_folders = []
-    
-    @property
-    def client_session_id(self) -> str:
-        """Extract the clean client session ID from the composite key."""
-        return self.client_session_key.split('_')[0]
 
 
 class GitManager:
@@ -944,7 +939,7 @@ class GitManager:
                     is_staged=True,
                     diff_details=diff_details
                 )
-                logger.info("GIT STATUS DEBUG - Created staged change: %s", asdict(change))
+                logger.debug("Created staged change for: %s (%s)", file_name, change_type)
                 detailed_status.staged_changes.append(change)
             
             # Get unstaged changes (working tree vs index)
@@ -996,7 +991,7 @@ class GitManager:
                     is_staged=False,
                     diff_details=diff_details
                 )
-                logger.info("GIT STATUS DEBUG - Created unstaged change: %s", asdict(change))
+                logger.debug("Created unstaged change for: %s (%s)", file_name, change_type)
                 detailed_status.unstaged_changes.append(change)
             
             # Get untracked files
@@ -1025,7 +1020,7 @@ class GitManager:
                     is_staged=False,
                     diff_details=diff_details
                 )
-                logger.info("GIT STATUS DEBUG - Created untracked change: %s", asdict(change))
+                logger.debug("Created untracked change for: %s", file_name)
                 detailed_status.untracked_files.append(change)
             
             return detailed_status
@@ -1154,13 +1149,17 @@ class FileSystemWatcher:
                         )
                         
                         if should_monitor_git_file:
-                            logger.info("Git status change detected: %s - %s", event.event_type, event.src_path)
+                            logger.debug("Git status change detected: %s - %s", event.event_type, os.path.basename(event.src_path))
                         else:
                             return  # Skip other .git files
                     except (ValueError, IndexError):
                         return  # Skip if can't parse .git path
                 else:
-                    logger.info("File system event: %s - %s", event.event_type, event.src_path)
+                    # Only log significant file changes, not every single event
+                    if event.event_type in ['created', 'deleted'] or event.src_path.endswith(('.py', '.js', '.html', '.css', '.json', '.md')):
+                        logger.debug("File system event: %s - %s", event.event_type, os.path.basename(event.src_path))
+                    else:
+                        logger.debug("File event: %s", os.path.basename(event.src_path))
                 
                 # Schedule async task in the main event loop from this watchdog thread
                 if self.watcher.event_loop and not self.watcher.event_loop.is_closed():
@@ -1262,66 +1261,87 @@ class ProjectStateManager:
             logger.info("Project state debug mode enabled, output to: %s", debug_file_path)
     
     def _write_debug_state(self):
-        """Write current state to debug JSON file."""
-        logger.debug("_write_debug_state called: debug_mode=%s, debug_file_path=%s", self.debug_mode, self.debug_file_path)
+        """Write current state to debug JSON file (thread-safe)."""
         if not self.debug_mode or not self.debug_file_path:
-            logger.debug("Debug mode not enabled or no debug file path, skipping debug write")
             return
         
-        try:
-            debug_data = {}
-            for project_id, state in self.projects.items():
-                debug_data[project_id] = {
-                    "project_folder_path": state.project_folder_path,
-                    "is_git_repo": state.is_git_repo,
-                    "git_branch": state.git_branch,
-                    "git_status_summary": state.git_status_summary,
-                    "git_detailed_status": asdict(state.git_detailed_status) if state.git_detailed_status else None,
-                    "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs.values()],
-                    "active_tab": self._serialize_tab_info(state.active_tab) if state.active_tab else None,
-                    "monitored_folders": [asdict(mf) for mf in state.monitored_folders],
-                    "items": [self._serialize_file_item(item) for item in state.items]
+        # Use a lock to prevent multiple instances from writing simultaneously
+        with _manager_lock:
+            try:
+                debug_data = {
+                    "_instance_info": {
+                        "pid": os.getpid(),
+                        "timestamp": time.time(),
+                        "project_count": len(self.projects)
+                    }
                 }
-            
-            with open(self.debug_file_path, 'w', encoding='utf-8') as f:
-                json.dump(debug_data, f, indent=2, default=str)
-            
-            logger.debug("Debug state written successfully to: %s", self.debug_file_path)
-            logger.debug("Debug data summary: %d projects", len(debug_data))
-            for project_id, data in debug_data.items():
-                logger.debug("Project %s: %d monitored_folders, %d items", 
-                           project_id, len(data.get('monitored_folders', [])), len(data.get('items', [])))
                 
-        except Exception as e:
-            logger.error("Error writing debug state: %s", e)
+                for project_id, state in self.projects.items():
+                    debug_data[project_id] = {
+                        "project_folder_path": state.project_folder_path,
+                        "is_git_repo": state.is_git_repo,
+                        "git_branch": state.git_branch,
+                        "git_status_summary": state.git_status_summary,
+                        "git_detailed_status": asdict(state.git_detailed_status) if state.git_detailed_status and hasattr(state.git_detailed_status, '__dataclass_fields__') else None,
+                        "open_tabs": [self._serialize_tab_info(tab) for tab in state.open_tabs.values()],
+                        "active_tab": self._serialize_tab_info(state.active_tab) if state.active_tab else None,
+                        "monitored_folders": [asdict(mf) if hasattr(mf, '__dataclass_fields__') else {} for mf in state.monitored_folders],
+                        "items": [self._serialize_file_item(item) for item in state.items]
+                    }
+                
+                # Write atomically by writing to temp file first, then renaming
+                temp_file_path = self.debug_file_path + ".tmp"
+                with open(temp_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(debug_data, f, indent=2, default=str)
+                
+                # Atomic rename
+                os.rename(temp_file_path, self.debug_file_path)
+                
+                # Only log debug info occasionally to avoid spam
+                if len(debug_data) > 1:  # >1 because we always have _instance_info
+                    logger.debug("Debug state updated: %d projects (PID: %s)", len(debug_data) - 1, os.getpid())
+                    
+            except Exception as e:
+                logger.error("Error writing debug state: %s", e)
     
     def _serialize_file_item(self, item: FileItem) -> Dict[str, Any]:
         """Serialize FileItem for JSON output."""
-        result = asdict(item)
+        result = asdict(item) if hasattr(item, '__dataclass_fields__') else {}
         if item.children:
             result["children"] = [self._serialize_file_item(child) for child in item.children]
         return result
     
     def _serialize_tab_info(self, tab: TabInfo) -> Dict[str, Any]:
         """Serialize TabInfo for JSON output."""
-        return asdict(tab)
+        return asdict(tab) if hasattr(tab, '__dataclass_fields__') else {}
     
-    async def initialize_project_state(self, client_session: str, project_folder_path: str) -> ProjectState:
+    async def initialize_project_state(self, client_session_id: str, project_folder_path: str) -> ProjectState:
         """Initialize project state for a client session."""
-        client_session_key = f"{client_session}_{hash(project_folder_path)}"
+        # Check if this client session already has a project state
+        if client_session_id in self.projects:
+            existing_project = self.projects[client_session_id]
+            # If it's the same folder, return existing state
+            if existing_project.project_folder_path == project_folder_path:
+                logger.info("Returning existing project state for client session: %s", client_session_id)
+                return existing_project
+            else:
+                # Different folder - cleanup old state and create new one
+                logger.info("Client session %s switching projects from %s to %s", 
+                          client_session_id, existing_project.project_folder_path, project_folder_path)
+                self.cleanup_project(client_session_id)
         
-        if client_session_key in self.projects:
-            return self.projects[client_session_key]
+        # Note: Multiple client sessions can have independent project states for the same folder
+        # Each client session gets its own project state instance
         
-        logger.info("Initializing project state for client session: %s, folder: %s", client_session, project_folder_path)
+        logger.info("Initializing project state for client session: %s, folder: %s", client_session_id, project_folder_path)
         
         # Initialize Git manager
         git_manager = GitManager(project_folder_path)
-        self.git_managers[client_session_key] = git_manager
+        self.git_managers[client_session_id] = git_manager
         
         # Create project state
         project_state = ProjectState(
-            client_session_key=client_session_key,
+            client_session_id=client_session_id,
             project_folder_path=project_folder_path,
             items=[],
             is_git_repo=git_manager.is_git_repo,
@@ -1336,7 +1356,7 @@ class ProjectStateManager:
         # Sync all dependent state (items, watchdog)
         await self._sync_all_state_with_monitored_folders(project_state)
         
-        self.projects[client_session_key] = project_state
+        self.projects[client_session_id] = project_state
         self._write_debug_state()
         
         return project_state
@@ -1377,12 +1397,11 @@ class ProjectStateManager:
                 self.file_watcher.start_watching_git_directory(git_dir_path)
                 logger.debug("Started monitoring .git directory for git status changes: %s", git_dir_path)
         
-        logger.debug("Watchdog synchronized: watching %d monitored folders individually", len(project_state.monitored_folders))
+        # Watchdog synchronized
     
     async def _sync_all_state_with_monitored_folders(self, project_state: ProjectState):
         """Synchronize all dependent state (watchdog, items) with monitored_folders changes."""
-        logger.debug("_sync_all_state_with_monitored_folders called")
-        logger.debug("Current monitored_folders count: %d", len(project_state.monitored_folders))
+        # Syncing state with monitored folders
         
         # Sync watchdog monitoring
         logger.debug("Syncing watchdog monitoring")
@@ -1391,10 +1410,9 @@ class ProjectStateManager:
         # Rebuild items structure from all monitored folders
         logger.debug("Rebuilding items structure")
         await self._build_flattened_items_structure(project_state)
-        logger.debug("Items count after rebuild: %d", len(project_state.items))
+        # Items rebuilt
         
-        # Update debug state
-        logger.debug("Writing debug state")
+        # Update debug state less frequently
         self._write_debug_state()
         logger.debug("_sync_all_state_with_monitored_folders completed")
     
@@ -1433,7 +1451,7 @@ class ProjectStateManager:
     
     async def _load_directory_items(self, project_state: ProjectState, directory_path: str, is_root: bool = False, parent_item: Optional[FileItem] = None):
         """Load directory items with Git metadata."""
-        git_manager = self.git_managers.get(project_state.client_session_key)
+        git_manager = self.git_managers.get(project_state.client_session_id)
         
         try:
             items = []
@@ -1581,15 +1599,15 @@ class ProjectStateManager:
         
         return items
     
-    async def expand_folder(self, client_session_key: str, folder_path: str) -> bool:
+    async def expand_folder(self, client_session_id: str, folder_path: str) -> bool:
         """Expand a folder and load its contents."""
-        logger.info("expand_folder called: client_session_key=%s, folder_path=%s", client_session_key, folder_path)
+        logger.info("expand_folder called: client_session_id=%s, folder_path=%s", client_session_id, folder_path)
         
-        if client_session_key not in self.projects:
-            logger.error("Project state not found for key: %s", client_session_key)
+        if client_session_id not in self.projects:
+            logger.error("Project state not found for client session: %s", client_session_id)
             return False
         
-        project_state = self.projects[client_session_key]
+        project_state = self.projects[client_session_id]
         logger.info("Found project state. Current monitored_folders count: %d", len(project_state.monitored_folders))
         
         # Debug: log all monitored folders
@@ -1617,12 +1635,12 @@ class ProjectStateManager:
         logger.info("expand_folder completed successfully")
         return True
     
-    async def collapse_folder(self, client_session_key: str, folder_path: str) -> bool:
+    async def collapse_folder(self, client_session_id: str, folder_path: str) -> bool:
         """Collapse a folder."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return False
         
-        project_state = self.projects[client_session_key]
+        project_state = self.projects[client_session_id]
         
         # Update the monitored folder to collapsed state
         monitored_folder = self._find_monitored_folder(project_state, folder_path)
@@ -1650,12 +1668,12 @@ class ProjectStateManager:
                     return found
         return None
     
-    async def open_file(self, client_session_key: str, file_path: str, set_active: bool = True) -> bool:
+    async def open_file(self, client_session_id: str, file_path: str, set_active: bool = True) -> bool:
         """Open a file in a new tab with content loaded."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return False
         
-        project_state = self.projects[client_session_key]
+        project_state = self.projects[client_session_id]
         
         # Generate unique key for file tab
         tab_key = generate_tab_key('file', file_path)
@@ -1692,12 +1710,12 @@ class ProjectStateManager:
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
     
-    async def close_tab(self, client_session_key: str, tab_id: str) -> bool:
+    async def close_tab(self, client_session_id: str, tab_id: str) -> bool:
         """Close a tab by tab ID."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return False
         
-        project_state = self.projects[client_session_key]
+        project_state = self.projects[client_session_id]
         
         # Find and remove the tab by searching through the dictionary values
         tab_key_to_remove = None
@@ -1719,15 +1737,14 @@ class ProjectStateManager:
             remaining_tabs = list(project_state.open_tabs.values())
             project_state.active_tab = remaining_tabs[-1] if remaining_tabs else None
         
-        self._write_debug_state()
         return True
     
-    async def set_active_tab(self, client_session_key: str, tab_id: Optional[str]) -> bool:
+    async def set_active_tab(self, client_session_id: str, tab_id: Optional[str]) -> bool:
         """Set the currently active tab."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return False
         
-        project_state = self.projects[client_session_key]
+        project_state = self.projects[client_session_id]
         
         if tab_id:
             # Find the tab by ID in the dictionary values
@@ -1742,18 +1759,17 @@ class ProjectStateManager:
         else:
             project_state.active_tab = None
         
-        self._write_debug_state()
         return True
     
-    async def open_diff_tab(self, client_session_key: str, file_path: str, 
+    async def open_diff_tab(self, client_session_id: str, file_path: str, 
                            from_ref: str, to_ref: str, from_hash: Optional[str] = None, 
                            to_hash: Optional[str] = None) -> bool:
         """Open a diff tab comparing file versions at different git timeline points."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return False
         
-        project_state = self.projects[client_session_key]
-        git_manager = self.git_managers.get(client_session_key)
+        project_state = self.projects[client_session_id]
+        git_manager = self.git_managers.get(client_session_id)
         
         if not git_manager or not git_manager.is_git_repo:
             logger.error("Cannot create diff tab: not a git repository")
@@ -1894,50 +1910,57 @@ class ProjectStateManager:
         self._pending_changes.add(event.src_path)
         
         # Cancel existing timer
-        if self._change_debounce_timer:
+        if self._change_debounce_timer and not self._change_debounce_timer.done():
             self._change_debounce_timer.cancel()
         
-        # Set new timer
-        logger.debug("Starting debounce timer for file changes")
-        self._change_debounce_timer = asyncio.create_task(self._process_pending_changes())
+        # Set new timer with proper exception handling
+        async def debounced_process():
+            try:
+                await asyncio.sleep(0.5)  # Debounce delay
+                await self._process_pending_changes()
+            except asyncio.CancelledError:
+                logger.debug("Debounce timer cancelled")
+            except Exception as e:
+                logger.error("Error in debounced file processing: %s", e)
+        
+        self._change_debounce_timer = asyncio.create_task(debounced_process())
     
     async def _process_pending_changes(self):
-        """Process pending file changes after debounce delay."""
-        logger.info("Processing %d pending file changes after debounce", len(self._pending_changes))
-        await asyncio.sleep(0.5)  # Debounce delay
-        
+        """Process pending file changes."""
         if not self._pending_changes:
             logger.debug("No pending changes to process")
             return
         
-        logger.debug("Pending changes: %s", list(self._pending_changes))
+        logger.debug("Processing %d pending file changes", len(self._pending_changes))
+        
+        logger.debug("Processing changes in %d files", len(self._pending_changes))
         
         # Process changes for each affected project
         affected_projects = set()
         for change_path in self._pending_changes:
-            logger.debug("Checking change path: %s", change_path)
-            for client_session_key, project_state in self.projects.items():
+            for client_session_id, project_state in self.projects.items():
                 if change_path.startswith(project_state.project_folder_path):
-                    logger.debug("Change affects project: %s", client_session_key)
-                    affected_projects.add(client_session_key)
+                    affected_projects.add(client_session_id)
         
-        logger.info("Refreshing %d affected projects", len(affected_projects))
+        if affected_projects:
+            logger.debug("Refreshing %d affected projects", len(affected_projects))
+        else:
+            logger.debug("No affected projects to refresh")
         
         # Refresh affected projects
-        for client_session_key in affected_projects:
-            logger.debug("Refreshing project state: %s", client_session_key)
-            await self._refresh_project_state(client_session_key)
+        for client_session_id in affected_projects:
+            await self._refresh_project_state(client_session_id)
         
         self._pending_changes.clear()
         logger.debug("Finished processing file changes")
     
-    async def _refresh_project_state(self, client_session_key: str):
+    async def _refresh_project_state(self, client_session_id: str):
         """Refresh project state after file changes."""
-        if client_session_key not in self.projects:
+        if client_session_id not in self.projects:
             return
         
-        project_state = self.projects[client_session_key]
-        git_manager = self.git_managers[client_session_key]
+        project_state = self.projects[client_session_id]
+        git_manager = self.git_managers[client_session_id]
         
         # Update Git status
         if git_manager:
@@ -1989,12 +2012,12 @@ class ProjectStateManager:
         
         payload = {
             "event": "project_state_update",
-            "project_id": server_project_id or project_state.client_session_key,  # Use server ID if provided
+            "project_id": server_project_id or project_state.client_session_id,  # Use server ID if provided
             "project_folder_path": project_state.project_folder_path,
             "is_git_repo": project_state.is_git_repo,
             "git_branch": project_state.git_branch,
             "git_status_summary": project_state.git_status_summary,
-            "git_detailed_status": asdict(project_state.git_detailed_status) if project_state.git_detailed_status else None,
+            "git_detailed_status": asdict(project_state.git_detailed_status) if project_state.git_detailed_status and hasattr(project_state.git_detailed_status, '__dataclass_fields__') else (logger.warning(f"git_detailed_status is not a dataclass: {type(project_state.git_detailed_status)} - {project_state.git_detailed_status}") or None),
             "open_tabs": [self._serialize_tab_info(tab) for tab in project_state.open_tabs.values()],
             "active_tab": self._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
             "items": [self._serialize_file_item(item) for item in project_state.items],
@@ -2005,10 +2028,10 @@ class ProjectStateManager:
         # Send via control channel with client session targeting
         await self.control_channel.send(payload)
     
-    def cleanup_project(self, client_session_key: str):
+    def cleanup_project(self, client_session_id: str):
         """Clean up project state and resources."""
-        if client_session_key in self.projects:
-            project_state = self.projects[client_session_key]
+        if client_session_id in self.projects:
+            project_state = self.projects[client_session_id]
             
             # Stop watching all monitored folders for this project
             for monitored_folder in project_state.monitored_folders:
@@ -2020,37 +2043,49 @@ class ProjectStateManager:
                 self.file_watcher.stop_watching(git_dir_path)
             
             # Clean up managers
-            self.git_managers.pop(client_session_key, None)
-            self.projects.pop(client_session_key, None)
+            self.git_managers.pop(client_session_id, None)
+            self.projects.pop(client_session_id, None)
             
-            logger.info("Cleaned up project state: %s", client_session_key)
+            logger.info("Cleaned up project state: %s", client_session_id)
             self._write_debug_state()
     
     def cleanup_projects_by_client_session(self, client_session_id: str):
-        """Clean up all project states for a specific client session."""
-        logger.info("Cleaning up all project states for client session: %s", client_session_id)
+        """Clean up project state for a specific client session when explicitly notified of disconnection."""
+        logger.info("Explicitly cleaning up project state for disconnected client session: %s", client_session_id)
         
-        # Find all project states that belong to this client session
-        keys_to_remove = []
-        for client_session_key in self.projects.keys():
-            if client_session_key.startswith(client_session_id):
-                keys_to_remove.append(client_session_key)
-        
-        # Clean up each project state
-        for client_session_key in keys_to_remove:
-            self.cleanup_project(client_session_key)
-        
-        logger.info("Cleaned up %d project states for client session: %s", len(keys_to_remove), client_session_id)
+        # With the new design, each client session has only one project
+        if client_session_id in self.projects:
+            self.cleanup_project(client_session_id)
+            logger.info("Cleaned up project state for client session: %s", client_session_id)
+        else:
+            logger.info("No project state found for client session: %s", client_session_id)
     
     def cleanup_all_projects(self):
         """Clean up all project states. Used for shutdown or reset."""
         logger.info("Cleaning up all project states")
         
-        keys_to_remove = list(self.projects.keys())
-        for client_session_key in keys_to_remove:
-            self.cleanup_project(client_session_key)
+        client_session_ids = list(self.projects.keys())
+        for client_session_id in client_session_ids:
+            self.cleanup_project(client_session_id)
         
-        logger.info("Cleaned up %d project states", len(keys_to_remove))
+        logger.info("Cleaned up %d project states", len(client_session_ids))
+    
+    def cleanup_orphaned_project_states(self, current_client_sessions: List[str]):
+        """Clean up project states that don't match any current client session."""
+        current_sessions_set = set(current_client_sessions)
+        orphaned_keys = []
+        
+        for session_id in list(self.projects.keys()):
+            if session_id not in current_sessions_set:
+                orphaned_keys.append(session_id)
+        
+        if orphaned_keys:
+            logger.info("Found %d orphaned project states, cleaning up: %s", len(orphaned_keys), orphaned_keys)
+            for session_id in orphaned_keys:
+                self.cleanup_project(session_id)
+            logger.info("Cleaned up %d orphaned project states", len(orphaned_keys))
+        else:
+            logger.debug("No orphaned project states found")
 
 
 def generate_tab_key(tab_type: str, file_path: str, **kwargs) -> str:
@@ -2082,30 +2117,69 @@ def generate_tab_key(tab_type: str, file_path: str, **kwargs) -> str:
         return file_path if file_path else kwargs.get('tab_id', str(uuid.uuid4()))
 
 
+# Global singleton instance
+_global_project_state_manager: Optional['ProjectStateManager'] = None
+_manager_lock = threading.Lock()
+
 # Helper function for other handlers to get/create project state manager
 def _get_or_create_project_state_manager(context: Dict[str, Any], control_channel) -> 'ProjectStateManager':
-    """Get or create project state manager with debug setup."""
+    """Get or create project state manager with debug setup (SINGLETON PATTERN)."""
+    global _global_project_state_manager
+    
     logger.info("_get_or_create_project_state_manager called")
     logger.info("Context debug flag: %s", context.get("debug", False))
     
-    if "project_state_manager" not in context:
-        logger.info("Creating new ProjectStateManager")
-        manager = ProjectStateManager(control_channel, context)
-        
-        # Set up debug mode if enabled
-        if context.get("debug", False):
-            debug_file_path = os.path.join(os.getcwd(), "project_state_debug.json")
-            logger.info("Setting up debug mode with file: %s", debug_file_path)
-            manager.set_debug_mode(True, debug_file_path)
+    with _manager_lock:
+        if _global_project_state_manager is None:
+            logger.info("Creating new GLOBAL ProjectStateManager (singleton)")
+            manager = ProjectStateManager(control_channel, context)
+            
+            # Set up debug mode if enabled
+            if context.get("debug", False):
+                debug_file_path = os.path.join(os.getcwd(), "project_state_debug.json")
+                logger.info("Setting up debug mode with file: %s", debug_file_path)
+                manager.set_debug_mode(True, debug_file_path)
+            else:
+                logger.info("Debug mode not enabled in context")
+            
+            _global_project_state_manager = manager
+            logger.info("Created and stored new GLOBAL manager (PID: %s)", os.getpid())
+            return manager
         else:
-            logger.info("Debug mode not enabled in context")
-        
-        context["project_state_manager"] = manager
-        logger.info("Created and stored new manager")
-        return manager
-    else:
-        logger.info("Returning existing project state manager")
-        return context["project_state_manager"]
+            logger.info("Returning existing GLOBAL project state manager (PID: %s)", os.getpid())
+            # Update the control channel reference in case it changed
+            _global_project_state_manager.control_channel = control_channel
+            
+            # Log active project states for debugging
+            if _global_project_state_manager.projects:
+                logger.debug("Active project states: %s", list(_global_project_state_manager.projects.keys()))
+            else:
+                logger.debug("No active project states in global manager")
+            
+            return _global_project_state_manager
+
+
+def _reset_global_project_state_manager():
+    """Reset the global project state manager (for testing/cleanup)."""
+    global _global_project_state_manager
+    with _manager_lock:
+        if _global_project_state_manager:
+            logger.info("Resetting global project state manager")
+            _global_project_state_manager = None
+        else:
+            logger.debug("Global project state manager already None")
+
+
+def _debug_global_manager_state():
+    """Debug function to log the current state of the global manager."""
+    global _global_project_state_manager
+    with _manager_lock:
+        if _global_project_state_manager:
+            logger.info("Global ProjectStateManager exists (PID: %s)", os.getpid())
+            logger.info("Active project states: %s", list(_global_project_state_manager.projects.keys()))
+            logger.info("Total project states: %d", len(_global_project_state_manager.projects))
+        else:
+            logger.info("No global ProjectStateManager exists (PID: %s)", os.getpid())
 
 
 # Handler classes
@@ -2138,34 +2212,30 @@ class ProjectStateFolderExpandHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         logger.info("Got manager: %s", manager)
         
-        # Find project state using client session - we need to find which project state this client session has
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
-            logger.error("No project state found for client session: %s", source_client_session)
+        # With the new design, client session ID maps directly to project state
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             response = {
                 "event": "project_state_folder_expand_response",
                 "project_id": server_project_id,
                 "folder_path": folder_path,
-                "success": False
+                "success": False,
+                "error": f"No project state found for client session: {source_client_session}"
             }
-            logger.info("Returning response: %s", response)
+            logger.error("Returning error response: %s", response)
             return response
         
-        logger.info("Found project state key: %s", project_state_key)
+        logger.info("Found project state for client session: %s", source_client_session)
         
         logger.info("Calling manager.expand_folder...")
-        success = await manager.expand_folder(project_state_key, folder_path)
+        success = await manager.expand_folder(source_client_session, folder_path)
         logger.info("expand_folder returned: %s", success)
         
         if success:
             # Send updated state
             logger.info("Sending project state update...")
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
             logger.info("Project state update sent")
         
@@ -2203,25 +2273,22 @@ class ProjectStateFolderCollapseHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
         # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             return {
                 "event": "project_state_folder_collapse_response",
                 "project_id": server_project_id,
                 "folder_path": folder_path,
-                "success": False
+                "success": False,
+                "error": f"No project state found for client session: {source_client_session}"
             }
         
-        success = await manager.collapse_folder(project_state_key, folder_path)
+        success = await manager.collapse_folder(source_client_session, folder_path)
         
         if success:
             # Send updated state
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
@@ -2256,26 +2323,23 @@ class ProjectStateFileOpenHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
         # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             return {
                 "event": "project_state_file_open_response",
                 "project_id": server_project_id,
                 "file_path": file_path,
                 "success": False,
-                "set_active": set_active
+                "set_active": set_active,
+                "error": f"No project state found for client session: {source_client_session}"
             }
         
-        success = await manager.open_file(project_state_key, file_path, set_active)
+        success = await manager.open_file(source_client_session, file_path, set_active)
         
         if success:
             # Send updated state
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
@@ -2310,25 +2374,22 @@ class ProjectStateTabCloseHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
         # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             return {
                 "event": "project_state_tab_close_response",
                 "project_id": server_project_id,
                 "tab_id": tab_id,
-                "success": False
+                "success": False,
+                "error": f"No project state found for client session: {source_client_session}"
             }
         
-        success = await manager.close_tab(project_state_key, tab_id)
+        success = await manager.close_tab(source_client_session, tab_id)
         
         if success:
             # Send updated state
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
@@ -2360,25 +2421,22 @@ class ProjectStateSetActiveTabHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
         # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             return {
                 "event": "project_state_set_active_tab_response",
                 "project_id": server_project_id,
                 "tab_id": tab_id,
-                "success": False
+                "success": False,
+                "error": f"No project state found for client session: {source_client_session}"
             }
         
-        success = await manager.set_active_tab(project_state_key, tab_id)
+        success = await manager.set_active_tab(source_client_session, tab_id)
         
         if success:
             # Send updated state
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
@@ -2433,13 +2491,9 @@ class ProjectStateDiffOpenHandler(AsyncHandler):
         manager = _get_or_create_project_state_manager(self.context, self.control_channel)
         
         # Find project state using client session
-        project_state_key = None
-        for key in manager.projects.keys():
-            if key.startswith(source_client_session):
-                project_state_key = key
-                break
-        
-        if not project_state_key:
+        if source_client_session not in manager.projects:
+            logger.error("No project state found for client session: %s. Available project states: %s", 
+                        source_client_session, list(manager.projects.keys()))
             return {
                 "event": "project_state_diff_open_response",
                 "project_id": server_project_id,
@@ -2447,16 +2501,16 @@ class ProjectStateDiffOpenHandler(AsyncHandler):
                 "from_ref": from_ref,
                 "to_ref": to_ref,
                 "success": False,
-                "error": "Project state not found"
+                "error": f"No project state found for client session: {source_client_session}"
             }
         
         success = await manager.open_diff_tab(
-            project_state_key, file_path, from_ref, to_ref, from_hash, to_hash
+            source_client_session, file_path, from_ref, to_ref, from_hash, to_hash
         )
         
         if success:
             # Send updated state
-            project_state = manager.projects[project_state_key]
+            project_state = manager.projects[source_client_session]
             await manager._send_project_state_update(project_state, server_project_id)
         
         return {
@@ -2469,5 +2523,35 @@ class ProjectStateDiffOpenHandler(AsyncHandler):
             "to_hash": to_hash,
             "success": success
         }
+
+
+# Handler for explicit client session cleanup
+async def handle_client_session_cleanup(handler, payload: Dict[str, Any], source_client_session: str) -> Dict[str, Any]:
+    """Handle explicit cleanup of a client session when server notifies of permanent disconnection."""
+    client_session_id = payload.get('client_session_id')
+    
+    if not client_session_id:
+        logger.error("client_session_id is required for client session cleanup")
+        return {
+            "event": "client_session_cleanup_response",
+            "success": False,
+            "error": "client_session_id is required"
+        }
+    
+    logger.info("Handling explicit cleanup for client session: %s", client_session_id)
+    
+    # Get the project state manager
+    manager = _get_or_create_project_state_manager(handler.context, handler.control_channel)
+    
+    # Clean up the client session's project state
+    manager.cleanup_projects_by_client_session(client_session_id)
+    
+    logger.info("Client session cleanup completed: %s", client_session_id)
+    
+    return {
+        "event": "client_session_cleanup_response",
+        "client_session_id": client_session_id,
+        "success": True
+    }
 
 
