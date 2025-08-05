@@ -6,3 +6,4 @@ dist
 .pypirc
 _version.py
 client_sessions.json
+project_state_debug.json

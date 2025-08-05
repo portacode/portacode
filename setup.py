@@ -29,6 +29,8 @@ setup(
         "pywinpty>=2.0; platform_system=='Windows'",
         "GitPython>=3.1.45",
         "watchdog>=3.0",
+        "diff-match-patch>=20230430",
+        "Pygments>=2.14.0",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],

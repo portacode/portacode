@@ -158,7 +158,8 @@ class TabFactory:
         return TabInfo(**tab_info)
     
     async def create_diff_tab(self, file_path: str, original_content: str, 
-                            modified_content: str, tab_id: Optional[str] = None) -> TabInfo:
+                            modified_content: str, tab_id: Optional[str] = None,
+                            diff_details: Optional[Dict[str, Any]] = None) -> TabInfo:
         """Create a diff tab for comparing file versions.
         
         Args:
@@ -166,6 +167,7 @@ class TabFactory:
             original_content: Original version of the file
             modified_content: Modified version of the file
             tab_id: Optional tab ID, will generate UUID if not provided
+            diff_details: Optional detailed diff information from diff-match-patch
             
         Returns:
             TabInfo object configured for diff viewing
@@ -174,6 +176,10 @@ class TabFactory:
             tab_id = str(uuid.uuid4())
         
         file_path = Path(file_path)
+        
+        metadata = {'diff_mode': True}
+        if diff_details:
+            metadata['diff_details'] = diff_details
         
         return TabInfo(
             tab_id=tab_id,
@@ -186,12 +192,13 @@ class TabFactory:
             is_dirty=False,
             mime_type=None,
             encoding='utf-8',
-            metadata={'diff_mode': True}
+            metadata=metadata
         )
     
     async def create_diff_tab_with_title(self, file_path: str, original_content: str, 
                                        modified_content: str, title: str, 
-                                       tab_id: Optional[str] = None) -> TabInfo:
+                                       tab_id: Optional[str] = None,
+                                       diff_details: Optional[Dict[str, Any]] = None) -> TabInfo:
         """Create a diff tab with a custom title for git timeline comparisons.
         
         Args:
@@ -200,12 +207,17 @@ class TabFactory:
             modified_content: Modified version of the file
             title: Custom title for the diff tab
             tab_id: Optional tab ID, will generate UUID if not provided
+            diff_details: Optional detailed diff information from diff-match-patch
             
         Returns:
             TabInfo object configured for diff viewing with custom title
         """
         if tab_id is None:
             tab_id = str(uuid.uuid4())
+        
+        metadata = {'diff_mode': True, 'timeline_diff': True}
+        if diff_details:
+            metadata['diff_details'] = diff_details
         
         return TabInfo(
             tab_id=tab_id,
@@ -218,7 +230,7 @@ class TabFactory:
             is_dirty=False,
             mime_type=None,
             encoding='utf-8',
-            metadata={'diff_mode': True, 'timeline_diff': True}
+            metadata=metadata
         )
     
     async def create_untitled_tab(self, content: str = "", language: str = "plaintext", 

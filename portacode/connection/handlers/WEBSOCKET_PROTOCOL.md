@@ -587,6 +587,16 @@ Confirms that project state has been successfully initialized for a client sessi
         *   `change_type` (string): Type of change following git's native types ('added', 'modified', 'deleted', 'untracked'). Note: renames appear as separate 'deleted' and 'added' entries unless git detects them as modifications.
         *   `content_hash` (string, optional): SHA256 hash of current file content. Null for deleted files.
         *   `is_staged` (boolean): Always true for staged changes.
+        *   `diff_details` (object, optional): Per-character diff information computed using diff-match-patch algorithm. Contains:
+            *   `diffs` (array): Array of diff operations, each containing:
+                *   `operation` (integer): Diff operation type (-1 = delete, 0 = equal, 1 = insert).
+                *   `text` (string): The text content for this operation.
+            *   `stats` (object): Statistics about the diff:
+                *   `char_additions` (integer): Number of characters added.
+                *   `char_deletions` (integer): Number of characters deleted.
+                *   `char_unchanged` (integer): Number of characters unchanged.
+                *   `total_changes` (integer): Total number of character changes (additions + deletions).
+            *   `algorithm` (string): Always "diff-match-patch" indicating the algorithm used.
     *   `unstaged_changes` (array, optional): Array of unstaged file changes with same structure as staged_changes but `is_staged` is always false.
     *   `untracked_files` (array, optional): Array of untracked files with same structure as staged_changes but `is_staged` is always false and `change_type` is always 'untracked'.
 *   `open_tabs` (array, mandatory): Array of tab objects currently open. Internally stored as a dictionary with unique keys to prevent duplicates, but serialized as an array for API responses. Each tab object contains:
@@ -629,7 +639,7 @@ Sent automatically when project state changes due to file system modifications, 
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.
 *   `git_status_summary` (object, optional): Updated summary of Git status counts.
-*   `git_detailed_status` (object, optional): Updated detailed Git status with comprehensive file change information and content hashes (same structure as in `project_state_initialized`).
+*   `git_detailed_status` (object, optional): Updated detailed Git status with comprehensive file change information, content hashes, and per-character diff details (same structure as in `project_state_initialized`).
 *   `open_tabs` (array, mandatory): Updated array of tab objects currently open. Internally stored as a dictionary with unique keys to prevent duplicates, but serialized as an array for API responses.
 *   `active_tab` (object, optional): Updated active tab object.
 *   `items` (array, mandatory): Updated flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
