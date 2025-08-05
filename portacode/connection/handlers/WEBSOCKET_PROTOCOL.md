@@ -29,6 +29,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_tab_close`](#project_state_tab_close)
     - [`project_state_set_active_tab`](#project_state_set_active_tab)
     - [`project_state_diff_open`](#project_state_diff_open)
+    - [`project_state_git_stage`](#project_state_git_stage)
+    - [`project_state_git_unstage`](#project_state_git_unstage)
+    - [`project_state_git_revert`](#project_state_git_revert)
   - [Client Session Management](#client-session-management)
     - [`client_sessions_update`](#client_sessions_update)
 - [Events](#events)
@@ -62,6 +65,9 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_tab_close_response`](#project_state_tab_close_response)
     - [`project_state_set_active_tab_response`](#project_state_set_active_tab_response)
     - [`project_state_diff_open_response`](#project_state_diff_open_response)
+    - [`project_state_git_stage_response`](#project_state_git_stage_response)
+    - [`project_state_git_unstage_response`](#project_state_git_unstage_response)
+    - [`project_state_git_revert_response`](#project_state_git_revert_response)
   - [Client Session Events](#client-session-events)
     - [`request_client_sessions`](#request_client_sessions)
   - [Terminal Data](#terminal-data)
@@ -398,6 +404,48 @@ Opens a diff tab for comparing file versions at different points in the git time
 **Responses:**
 
 *   On success, the device will respond with a [`project_state_diff_open_response`](#project_state_diff_open_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_git_stage`
+
+Stages a file for commit in the project's git repository. Handled by [`project_state_git_stage`](./project_state_handlers.py).
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to stage.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_git_stage_response`](#project_state_git_stage_response) event, followed by a [`project_state_update`](#project_state_update) event with updated git status.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_git_unstage`
+
+Unstages a file (removes from staging area) in the project's git repository. Handled by [`project_state_git_unstage`](./project_state_handlers.py).
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to unstage.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_git_unstage_response`](#project_state_git_unstage_response) event, followed by a [`project_state_update`](#project_state_update) event with updated git status.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_git_revert`
+
+Reverts a file to its HEAD version, discarding local changes in the project's git repository. Handled by [`project_state_git_revert`](./project_state_handlers.py).
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file to revert.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_git_revert_response`](#project_state_git_revert_response) event, followed by a [`project_state_update`](#project_state_update) event with updated git status.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### Client Session Management
@@ -805,6 +853,39 @@ Confirms the result of opening a diff tab with git timeline references.
 *   `from_hash` (string, optional): The commit hash used for `from_ref` if it was `"commit"`.
 *   `to_hash` (string, optional): The commit hash used for `to_ref` if it was `"commit"`.
 *   `success` (boolean, mandatory): Whether the diff tab creation was successful.
+*   `error` (string, optional): Error message if the operation failed.
+
+### <a name="project_state_git_stage_response"></a>`project_state_git_stage_response`
+
+Confirms the result of a git stage operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file that was staged.
+*   `success` (boolean, mandatory): Whether the stage operation was successful.
+*   `error` (string, optional): Error message if the operation failed.
+
+### <a name="project_state_git_unstage_response"></a>`project_state_git_unstage_response`
+
+Confirms the result of a git unstage operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file that was unstaged.
+*   `success` (boolean, mandatory): Whether the unstage operation was successful.
+*   `error` (string, optional): Error message if the operation failed.
+
+### <a name="project_state_git_revert_response"></a>`project_state_git_revert_response`
+
+Confirms the result of a git revert operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file that was reverted.
+*   `success` (boolean, mandatory): Whether the revert operation was successful.
 *   `error` (string, optional): Error message if the operation failed.
 
 ### Client Session Events

@@ -42,6 +42,9 @@ from .handlers import (
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
     ProjectStateDiffOpenHandler,
+    ProjectStateGitStageHandler,
+    ProjectStateGitUnstageHandler,
+    ProjectStateGitRevertHandler,
 )
 from .handlers.session import SessionManager
 
@@ -436,6 +439,9 @@ class TerminalManager:
         self._command_registry.register(ProjectStateTabCloseHandler)
         self._command_registry.register(ProjectStateSetActiveTabHandler)
         self._command_registry.register(ProjectStateDiffOpenHandler)
+        self._command_registry.register(ProjectStateGitStageHandler)
+        self._command_registry.register(ProjectStateGitUnstageHandler)
+        self._command_registry.register(ProjectStateGitRevertHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway

@@ -1086,6 +1086,60 @@ class GitManager:
         except Exception as e:
             logger.error("Error getting staged content for %s: %s", file_path, e)
             return None
+    
+    def stage_file(self, file_path: str) -> bool:
+        """Stage a file for commit."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Stage the file
+            self.repo.index.add([rel_path])
+            logger.info("Successfully staged file: %s", rel_path)
+            return True
+            
+        except Exception as e:
+            logger.error("Error staging file %s: %s", file_path, e)
+            raise RuntimeError(f"Failed to stage file: {e}")
+    
+    def unstage_file(self, file_path: str) -> bool:
+        """Unstage a file (remove from staging area)."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Reset the file from HEAD (unstage)
+            self.repo.git.restore('--staged', rel_path)
+            logger.info("Successfully unstaged file: %s", rel_path)
+            return True
+            
+        except Exception as e:
+            logger.error("Error unstaging file %s: %s", file_path, e)
+            raise RuntimeError(f"Failed to unstage file: {e}")
+    
+    def revert_file(self, file_path: str) -> bool:
+        """Revert a file to its HEAD version (discard local changes)."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Restore the file from HEAD
+            self.repo.git.restore(rel_path)
+            logger.info("Successfully reverted file: %s", rel_path)
+            return True
+            
+        except Exception as e:
+            logger.error("Error reverting file %s: %s", file_path, e)
+            raise RuntimeError(f"Failed to revert file: {e}")
 
 
 class FileSystemWatcher:
@@ -2591,5 +2645,152 @@ async def handle_client_session_cleanup(handler, payload: Dict[str, Any], source
         "client_session_id": client_session_id,
         "success": True
     }
+
+
+class ProjectStateGitStageHandler(AsyncHandler):
+    """Handler for staging files in git for a project."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_git_stage"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Stage a file in git for a project."""
+        server_project_id = message.get("project_id")
+        file_path = message.get("file_path")
+        source_client_session = message.get("source_client_session")
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not file_path:
+            raise ValueError("file_path is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        logger.info("Staging file %s for project %s (client session: %s)", 
+                   file_path, server_project_id, source_client_session)
+        
+        # Get the project state manager
+        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Get git manager for the client session
+        git_manager = manager.git_managers.get(source_client_session)
+        if not git_manager:
+            raise ValueError("No git repository found for this project")
+        
+        # Stage the file
+        success = git_manager.stage_file(file_path)
+        
+        if success:
+            # Update git status and send updated state
+            project_state = manager.projects[source_client_session]
+            project_state.git_status_summary = git_manager.get_status_summary()
+            project_state.git_detailed_status = git_manager.get_detailed_status()
+            await manager._send_project_state_update(project_state, server_project_id)
+        
+        return {
+            "event": "project_state_git_stage_response",
+            "project_id": server_project_id,
+            "file_path": file_path,
+            "success": success
+        }
+
+
+class ProjectStateGitUnstageHandler(AsyncHandler):
+    """Handler for unstaging files in git for a project."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_git_unstage"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Unstage a file in git for a project."""
+        server_project_id = message.get("project_id")
+        file_path = message.get("file_path")
+        source_client_session = message.get("source_client_session")
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not file_path:
+            raise ValueError("file_path is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        logger.info("Unstaging file %s for project %s (client session: %s)", 
+                   file_path, server_project_id, source_client_session)
+        
+        # Get the project state manager
+        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Get git manager for the client session
+        git_manager = manager.git_managers.get(source_client_session)
+        if not git_manager:
+            raise ValueError("No git repository found for this project")
+        
+        # Unstage the file
+        success = git_manager.unstage_file(file_path)
+        
+        if success:
+            # Update git status and send updated state
+            project_state = manager.projects[source_client_session]
+            project_state.git_status_summary = git_manager.get_status_summary()
+            project_state.git_detailed_status = git_manager.get_detailed_status()
+            await manager._send_project_state_update(project_state, server_project_id)
+        
+        return {
+            "event": "project_state_git_unstage_response",
+            "project_id": server_project_id,
+            "file_path": file_path,
+            "success": success
+        }
+
+
+class ProjectStateGitRevertHandler(AsyncHandler):
+    """Handler for reverting files in git for a project."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_git_revert"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Revert a file in git for a project."""
+        server_project_id = message.get("project_id")
+        file_path = message.get("file_path")
+        source_client_session = message.get("source_client_session")
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not file_path:
+            raise ValueError("file_path is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        logger.info("Reverting file %s for project %s (client session: %s)", 
+                   file_path, server_project_id, source_client_session)
+        
+        # Get the project state manager
+        manager = _get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Get git manager for the client session
+        git_manager = manager.git_managers.get(source_client_session)
+        if not git_manager:
+            raise ValueError("No git repository found for this project")
+        
+        # Revert the file
+        success = git_manager.revert_file(file_path)
+        
+        if success:
+            # Update git status and send updated state
+            project_state = manager.projects[source_client_session]
+            project_state.git_status_summary = git_manager.get_status_summary()
+            project_state.git_detailed_status = git_manager.get_detailed_status()
+            await manager._send_project_state_update(project_state, server_project_id)
+        
+        return {
+            "event": "project_state_git_revert_response",
+            "project_id": server_project_id,
+            "file_path": file_path,
+            "success": success
+        }
 
 

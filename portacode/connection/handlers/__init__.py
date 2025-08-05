@@ -31,6 +31,9 @@ from .project_state_handlers import (
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
     ProjectStateDiffOpenHandler,
+    ProjectStateGitStageHandler,
+    ProjectStateGitUnstageHandler,
+    ProjectStateGitRevertHandler,
 )
 
 __all__ = [
@@ -59,4 +62,7 @@ __all__ = [
     "ProjectStateTabCloseHandler",
     "ProjectStateSetActiveTabHandler",
     "ProjectStateDiffOpenHandler",
+    "ProjectStateGitStageHandler",
+    "ProjectStateGitUnstageHandler",
+    "ProjectStateGitRevertHandler",
 ] 
