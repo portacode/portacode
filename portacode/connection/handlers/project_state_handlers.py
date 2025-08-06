@@ -1209,13 +1209,17 @@ class FileSystemWatcher:
         # Store reference to the event loop for thread-safe async task creation
         try:
             self.event_loop = asyncio.get_running_loop()
-            logger.info("Captured event loop reference for file system watcher")
+            logger.info("🔍 [TRACE] ✅ Captured event loop reference for file system watcher: %s", self.event_loop)
         except RuntimeError:
             self.event_loop = None
-            logger.warning("No running event loop found - file system events may not work correctly")
+            logger.error("🔍 [TRACE] ❌ No running event loop found - file system events may not work correctly")
         
+        logger.info("🔍 [TRACE] WATCHDOG_AVAILABLE: %s", WATCHDOG_AVAILABLE)
         if WATCHDOG_AVAILABLE:
+            logger.info("🔍 [TRACE] Initializing file system watcher...")
             self._initialize_watcher()
+        else:
+            logger.error("🔍 [TRACE] ❌ Watchdog not available - file monitoring disabled")
     
     def _initialize_watcher(self):
         """Initialize file system watcher."""
@@ -1230,23 +1234,30 @@ class FileSystemWatcher:
                 super().__init__()
             
             def on_any_event(self, event):
+                logger.info("🔍 [TRACE] FileSystemWatcher detected event: %s on path: %s", event.event_type, event.src_path)
+                
                 # Skip debug files to avoid feedback loops
                 if event.src_path.endswith('project_state_debug.json'):
+                    logger.info("🔍 [TRACE] Skipping debug file: %s", event.src_path)
                     return
                 
                 # Only process events that represent actual content changes
                 # Skip opened/closed events that don't indicate file modifications
                 if event.event_type in ('opened', 'closed'):
+                    logger.info("🔍 [TRACE] Skipping opened/closed event: %s", event.event_type)
                     return
                 
                 # Handle .git folder events separately for git status monitoring
                 path_parts = Path(event.src_path).parts
                 if '.git' in path_parts:
+                    logger.info("🔍 [TRACE] Processing .git folder event: %s", event.src_path)
                     # Get the relative path within .git directory
                     try:
                         git_index = path_parts.index('.git')
                         git_relative_path = '/'.join(path_parts[git_index + 1:])
                         git_file = Path(event.src_path).name
+                        
+                        logger.info("🔍 [TRACE] Git file details - relative_path: %s, file: %s", git_relative_path, git_file)
                         
                         # Monitor git files that indicate repository state changes
                         should_monitor_git_file = (
@@ -1259,12 +1270,15 @@ class FileSystemWatcher:
                         )
                         
                         if should_monitor_git_file:
-                            logger.debug("Git status change detected: %s - %s", event.event_type, os.path.basename(event.src_path))
+                            logger.info("🔍 [TRACE] ✅ Git file matches monitoring criteria: %s", event.src_path)
                         else:
+                            logger.info("🔍 [TRACE] ❌ Git file does NOT match monitoring criteria - SKIPPING: %s", event.src_path)
                             return  # Skip other .git files
                     except (ValueError, IndexError):
+                        logger.info("🔍 [TRACE] ❌ Could not parse .git path - SKIPPING: %s", event.src_path)
                         return  # Skip if can't parse .git path
                 else:
+                    logger.info("🔍 [TRACE] Processing non-git file event: %s", event.src_path)
                     # Only log significant file changes, not every single event
                     if event.event_type in ['created', 'deleted'] or event.src_path.endswith(('.py', '.js', '.html', '.css', '.json', '.md')):
                         logger.debug("File system event: %s - %s", event.event_type, os.path.basename(event.src_path))
@@ -1272,17 +1286,21 @@ class FileSystemWatcher:
                         logger.debug("File event: %s", os.path.basename(event.src_path))
                 
                 # Schedule async task in the main event loop from this watchdog thread
+                logger.info("🔍 [TRACE] About to schedule async handler - event_loop exists: %s, closed: %s", 
+                           self.watcher.event_loop is not None, 
+                           self.watcher.event_loop.is_closed() if self.watcher.event_loop else "N/A")
+                
                 if self.watcher.event_loop and not self.watcher.event_loop.is_closed():
                     try:
                         future = asyncio.run_coroutine_threadsafe(
                             self.manager._handle_file_change(event), 
                             self.watcher.event_loop
                         )
-                        logger.debug("Successfully scheduled file change handler for: %s", event.src_path)
+                        logger.info("🔍 [TRACE] ✅ Successfully scheduled file change handler for: %s", event.src_path)
                     except Exception as e:
-                        logger.error("Failed to schedule file change handler: %s", e)
+                        logger.error("🔍 [TRACE] ❌ Failed to schedule file change handler: %s", e)
                 else:
-                    logger.warning("No event loop available to handle file change: %s", event.src_path)
+                    logger.error("🔍 [TRACE] ❌ No event loop available to handle file change: %s", event.src_path)
         
         self.event_handler = ProjectEventHandler(self.project_manager, self)
         self.observer = Observer()
@@ -1503,9 +1521,15 @@ class ProjectStateManager:
         # For git repositories, also watch the .git directory for git status changes
         if project_state.is_git_repo:
             git_dir_path = os.path.join(project_state.project_folder_path, '.git')
+            logger.info("🔍 [TRACE] Project is git repo, checking .git directory: %s", git_dir_path)
             if os.path.exists(git_dir_path):
+                logger.info("🔍 [TRACE] ✅ Starting to watch .git directory: %s", git_dir_path)
                 self.file_watcher.start_watching_git_directory(git_dir_path)
-                logger.debug("Started monitoring .git directory for git status changes: %s", git_dir_path)
+                logger.info("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", git_dir_path)
+            else:
+                logger.error("🔍 [TRACE] ❌ .git directory does not exist: %s", git_dir_path)
+        else:
+            logger.info("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring")
         
         # Watchdog synchronized
     
@@ -2017,73 +2041,103 @@ class ProjectStateManager:
     
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
-        logger.debug("Processing file change: %s - %s", event.event_type, event.src_path)
+        logger.info("🔍 [TRACE] _handle_file_change called: %s - %s", event.event_type, event.src_path)
         
         self._pending_changes.add(event.src_path)
+        logger.info("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", event.src_path, len(self._pending_changes))
         
         # Cancel existing timer
         if self._change_debounce_timer and not self._change_debounce_timer.done():
+            logger.info("🔍 [TRACE] Cancelling existing debounce timer")
             self._change_debounce_timer.cancel()
         
         # Set new timer with proper exception handling
         async def debounced_process():
             try:
+                logger.info("🔍 [TRACE] Starting debounce delay (0.5s)...")
                 await asyncio.sleep(0.5)  # Debounce delay
+                logger.info("🔍 [TRACE] Debounce delay complete, processing pending changes...")
                 await self._process_pending_changes()
             except asyncio.CancelledError:
-                logger.debug("Debounce timer cancelled")
+                logger.info("🔍 [TRACE] Debounce timer cancelled")
             except Exception as e:
-                logger.error("Error in debounced file processing: %s", e)
+                logger.error("🔍 [TRACE] ❌ Error in debounced file processing: %s", e)
         
+        logger.info("🔍 [TRACE] Creating new debounce timer task...")
         self._change_debounce_timer = asyncio.create_task(debounced_process())
     
     async def _process_pending_changes(self):
         """Process pending file changes."""
+        logger.info("🔍 [TRACE] _process_pending_changes called")
+        
         if not self._pending_changes:
-            logger.debug("No pending changes to process")
+            logger.info("🔍 [TRACE] No pending changes to process")
             return
         
-        logger.debug("Processing %d pending file changes", len(self._pending_changes))
-        
-        logger.debug("Processing changes in %d files", len(self._pending_changes))
+        logger.info("🔍 [TRACE] Processing %d pending file changes: %s", len(self._pending_changes), list(self._pending_changes))
         
         # Process changes for each affected project
         affected_projects = set()
+        logger.info("🔍 [TRACE] Checking %d active projects for affected paths", len(self.projects))
+        
         for change_path in self._pending_changes:
+            logger.info("🔍 [TRACE] Checking change path: %s", change_path)
             for client_session_id, project_state in self.projects.items():
+                logger.info("🔍 [TRACE] Comparing with project path: %s (session: %s)", 
+                           project_state.project_folder_path, client_session_id)
                 if change_path.startswith(project_state.project_folder_path):
+                    logger.info("🔍 [TRACE] ✅ Change affects project session: %s", client_session_id)
                     affected_projects.add(client_session_id)
+                else:
+                    logger.info("🔍 [TRACE] ❌ Change does NOT affect project session: %s", client_session_id)
         
         if affected_projects:
-            logger.debug("Refreshing %d affected projects", len(affected_projects))
+            logger.info("🔍 [TRACE] Found %d affected projects: %s", len(affected_projects), list(affected_projects))
         else:
-            logger.debug("No affected projects to refresh")
+            logger.info("🔍 [TRACE] ❌ No affected projects to refresh")
         
         # Refresh affected projects
         for client_session_id in affected_projects:
+            logger.info("🔍 [TRACE] About to refresh project state for session: %s", client_session_id)
             await self._refresh_project_state(client_session_id)
         
         self._pending_changes.clear()
-        logger.debug("Finished processing file changes")
+        logger.info("🔍 [TRACE] ✅ Finished processing file changes")
     
     async def _refresh_project_state(self, client_session_id: str):
         """Refresh project state after file changes."""
+        logger.info("🔍 [TRACE] _refresh_project_state called for session: %s", client_session_id)
+        
         if client_session_id not in self.projects:
+            logger.info("🔍 [TRACE] ❌ Session not found in projects: %s", client_session_id)
             return
         
         project_state = self.projects[client_session_id]
         git_manager = self.git_managers[client_session_id]
+        logger.info("🔍 [TRACE] Found project state and git manager for session: %s", client_session_id)
         
         # Update Git status
         if git_manager:
+            logger.info("🔍 [TRACE] Updating git status for session: %s", client_session_id)
+            old_branch = project_state.git_branch
+            old_status_summary = project_state.git_status_summary
+            
             project_state.git_branch = git_manager.get_branch_name()
             project_state.git_status_summary = git_manager.get_status_summary()
             project_state.git_detailed_status = git_manager.get_detailed_status()
+            
+            logger.info("🔍 [TRACE] Git status updated - branch: %s->%s, summary: %s->%s", 
+                       old_branch, project_state.git_branch, 
+                       old_status_summary, project_state.git_status_summary)
+        else:
+            logger.info("🔍 [TRACE] ❌ No git manager found for session: %s", client_session_id)
         
         # Sync all dependent state (items, watchdog) - no automatic directory detection
+        logger.info("🔍 [TRACE] Syncing all state with monitored folders...")
         await self._sync_all_state_with_monitored_folders(project_state)
         
         # Send update to clients
+        logger.info("🔍 [TRACE] About to send project state update...")
         await self._send_project_state_update(project_state)
     
     async def _detect_and_add_new_directories(self, project_state: ProjectState):
@@ -2101,6 +2155,8 @@ class ProjectStateManager:
     
     async def _send_project_state_update(self, project_state: ProjectState, server_project_id: str = None):
         """Send project state update to the specific client session only."""
+        logger.info("🔍 [TRACE] _send_project_state_update called for session: %s", project_state.client_session_id)
+        
         # Create state signature for change detection
         current_state_signature = {
             "git_branch": project_state.git_branch,
@@ -2112,15 +2168,19 @@ class ProjectStateManager:
             "monitored_folders": tuple((mf.folder_path, mf.is_expanded) for mf in sorted(project_state.monitored_folders, key=lambda x: x.folder_path))
         }
         
+        logger.info("🔍 [TRACE] Current state signature: %s", current_state_signature)
+        
         # Check if state has actually changed
         last_signature = getattr(project_state, '_last_sent_signature', None)
+        logger.info("🔍 [TRACE] Last sent signature: %s", last_signature)
+        
         if last_signature == current_state_signature:
-            logger.debug("Project state unchanged, skipping update for client: %s", project_state.client_session_id)
+            logger.info("🔍 [TRACE] ❌ Project state unchanged, skipping update for client: %s", project_state.client_session_id)
             return
         
         # State has changed, send update
         project_state._last_sent_signature = current_state_signature
-        logger.info("Sending project state update to client: %s", project_state.client_session_id)
+        logger.info("🔍 [TRACE] ✅ State has changed, preparing to send update to client: %s", project_state.client_session_id)
         
         payload = {
             "event": "project_state_update",
@@ -2176,7 +2236,12 @@ class ProjectStateManager:
             logger.warning("Failed to analyze payload size: %s", e)
         
         # Send via control channel with client session targeting
-        await self.control_channel.send(payload)
+        logger.info("🔍 [TRACE] About to send payload via control channel...")
+        try:
+            await self.control_channel.send(payload)
+            logger.info("🔍 [TRACE] ✅ Successfully sent project_state_update to client: %s", project_state.client_session_id)
+        except Exception as e:
+            logger.error("🔍 [TRACE] ❌ Failed to send project_state_update: %s", e)
     
     def cleanup_project(self, client_session_id: str):
         """Clean up project state and resources."""
