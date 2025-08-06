@@ -11,6 +11,7 @@ from datetime import datetime
 from .base_test import BaseTest, TestResult, TestCategory
 from .test_discovery import TestDiscovery
 from .cli_manager import CLIManager
+from .shared_cli_manager import SharedCLIManager, TestCLIProxy
 from .playwright_manager import PlaywrightManager
 
 
@@ -90,14 +91,16 @@ class TestRunner:
         # Add file handler to all loggers
         logging.getLogger().addHandler(file_handler)
         
+        # We'll establish the CLI connection when the first test runs
+        
         try:
             for i, test in enumerate(tests):
                 # Notify progress
                 if self.progress_callback:
                     self.progress_callback('start', test, i + 1, len(tests))
                 
-                # Setup managers for this test
-                cli_manager = CLIManager(test.name, str(run_dir / "cli_logs"))
+                # Setup managers for this test - use shared CLI
+                cli_manager = TestCLIProxy(test.name, str(run_dir / "cli_logs"))
                 playwright_manager = PlaywrightManager(test.name, str(run_dir / "recordings"))
                 
                 test.set_cli_manager(cli_manager)
@@ -125,16 +128,14 @@ class TestRunner:
         return summary
     
     async def _run_single_test(self, test: BaseTest, 
-                             cli_manager: CLIManager, 
+                             cli_manager, 
                              playwright_manager: PlaywrightManager) -> TestResult:
         """Run a single test with full setup and teardown."""
         test_start = time.time()
         
         try:
-            # Step 1: Start CLI connection
-            self.logger.info(f"Starting CLI connection for {test.name}")
+            # Step 1: Ensure CLI connection (will reuse existing if available)
             cli_connected = await cli_manager.connect()
-            
             if not cli_connected:
                 return TestResult(
                     test.name, False, 
@@ -147,7 +148,6 @@ class TestRunner:
             playwright_started = await playwright_manager.start_session()
             
             if not playwright_started:
-                await cli_manager.disconnect()
                 return TestResult(
                     test.name, False,
                     "Failed to start Playwright session", 
@@ -184,7 +184,7 @@ class TestRunner:
             # Cleanup
             try:
                 await playwright_manager.cleanup()
-                await cli_manager.disconnect()
+                await cli_manager.disconnect()  # This won't actually disconnect shared connection
             except Exception as e:
                 self.logger.error(f"Error during cleanup for {test.name}: {e}")
     

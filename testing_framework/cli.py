@@ -62,7 +62,7 @@ async def list_tests(ctx):
     if info['tags']:
         click.echo(f"Tags: {click.style(', '.join(info['tags']), fg='cyan')}")
     
-    click.echo("\\n📝 Available Tests:")
+    click.echo("\n📝 Available Tests:")
     for name, test_info in info['tests'].items():
         click.echo(f"  • {click.style(name, fg='yellow')}")
         click.echo(f"    Category: {click.style(test_info['category'], fg='blue')}")
@@ -77,6 +77,7 @@ async def list_tests(ctx):
 async def run_all(ctx):
     """Run all available tests."""
     click.echo("🚀 Running all tests...")
+    click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_all_tests(_create_progress_callback())
     _print_results(results)
@@ -89,6 +90,7 @@ async def run_category(ctx, category):
     """Run tests in a specific category."""
     cat_enum = TestCategory(category)
     click.echo(f"🎯 Running {category} tests...")
+    click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_category(cat_enum, _create_progress_callback())
     _print_results(results)
@@ -100,6 +102,7 @@ async def run_category(ctx, category):
 async def run_tags(ctx, tags):
     """Run tests with specific tags."""
     click.echo(f"🏷️  Running tests with tags: {', '.join(tags)}...")
+    click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_tags(set(tags), _create_progress_callback())
     _print_results(results)
@@ -111,6 +114,7 @@ async def run_tags(ctx, tags):
 async def run_tests(ctx, names):
     """Run specific tests by name."""
     click.echo(f"📝 Running tests: {', '.join(names)}...")
+    click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_names(list(names), _create_progress_callback())
     _print_results(results)
@@ -122,6 +126,7 @@ async def run_tests(ctx, names):
 async def run_pattern(ctx, pattern):
     """Run tests matching a name pattern."""
     click.echo(f"🔍 Running tests matching pattern: {pattern}...")
+    click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_pattern(pattern, _create_progress_callback())
     _print_results(results)
@@ -129,13 +134,21 @@ async def run_pattern(ctx, pattern):
 
 def _create_progress_callback():
     """Create a progress callback for clean console output."""
+    cli_connected_shown = False
+    
     def progress_callback(event, test, current, total, result=None):
+        nonlocal cli_connected_shown
+        
         if event == 'start':
-            # Clean one-line output for test start
+            # Show CLI connected message only once
+            if not cli_connected_shown:
+                click.echo("\r🔗 Shared CLI connection established ✅")
+                cli_connected_shown = True
+            # Clean one-line output for test start  
             click.echo(f"[{current}/{total}] 🔄 {test.name}", nl=False)
         elif event == 'complete' and result:
             # Clear the line and show result
-            click.echo(f"\\r[{current}/{total}] {'✅' if result.success else '❌'} {test.name} ({result.duration:.1f}s)", nl=True)
+            click.echo(f"\r[{current}/{total}] {'✅' if result.success else '❌'} {test.name} ({result.duration:.1f}s)", nl=True)
             if not result.success and result.message:
                 click.echo(f"    └─ {click.style(result.message, fg='red')}")
     
@@ -151,7 +164,7 @@ def _print_results(results):
     stats = results['statistics']
     duration = results['run_info']['duration']
     
-    click.echo(f"\\n📊 Test Results Summary:")
+    click.echo(f"\n📊 Test Results Summary:")
     click.echo(f"  Total: {stats['total_tests']} | Duration: {duration:.1f}s")
     click.echo(f"  ✅ Passed: {click.style(str(stats['passed']), fg='green')}")
     click.echo(f"  ❌ Failed: {click.style(str(stats['failed']), fg='red')}")
@@ -159,12 +172,12 @@ def _print_results(results):
     success_rate_color = 'green' if stats['success_rate'] > 80 else 'yellow' if stats['success_rate'] > 50 else 'red'
     click.echo(f"  📈 Success Rate: {click.style(success_rate_text, fg=success_rate_color)}")
     
-    click.echo(f"\\n📂 Results: {click.style(results['run_info']['run_directory'], fg='blue', underline=True)}")
+    click.echo(f"\n📂 Results: {click.style(results['run_info']['run_directory'], fg='blue', underline=True)}")
     
     # Show failed tests summary
     failed_tests = [r for r in results['results'] if not r['success']]
     if failed_tests:
-        click.echo(f"\\n❌ Failed Tests ({len(failed_tests)}):")
+        click.echo(f"\n❌ Failed Tests ({len(failed_tests)}):")
         for result in failed_tests:
             click.echo(f"  • {result['test_name']}")
 
