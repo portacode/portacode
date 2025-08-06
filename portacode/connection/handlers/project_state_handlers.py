@@ -95,6 +95,7 @@ class FileItem:
     modified_time: Optional[float] = None
     is_git_tracked: Optional[bool] = None
     git_status: Optional[str] = None
+    is_staged: Optional[Union[bool, str]] = None  # True, False, or "mixed"
     is_hidden: bool = False
     is_ignored: bool = False
     children: Optional[List['FileItem']] = None
@@ -185,18 +186,73 @@ class GitManager:
             logger.debug("Could not get Git branch: %s", e)
             return None
     
+    def _get_staging_status(self, file_path: str, rel_path: str) -> Union[bool, str]:
+        """Get staging status for a file or directory. Returns True, False, or 'mixed'."""
+        try:
+            if os.path.isdir(file_path):
+                # For directories, check all files within the directory
+                try:
+                    # Get all staged files
+                    staged_files = set(self.repo.git.diff('--cached', '--name-only').splitlines())
+                    # Get all files with unstaged changes
+                    unstaged_files = set(self.repo.git.diff('--name-only').splitlines())
+                    
+                    # Find files within this directory
+                    dir_staged_files = [f for f in staged_files if f.startswith(rel_path + '/') or f == rel_path]
+                    dir_unstaged_files = [f for f in unstaged_files if f.startswith(rel_path + '/') or f == rel_path]
+                    
+                    has_staged = len(dir_staged_files) > 0
+                    has_unstaged = len(dir_unstaged_files) > 0
+                    
+                    # Check for mixed staging within individual files in this directory
+                    has_mixed_files = False
+                    for staged_file in dir_staged_files:
+                        if staged_file in dir_unstaged_files:
+                            has_mixed_files = True
+                            break
+                    
+                    if has_mixed_files or (has_staged and has_unstaged):
+                        return "mixed"
+                    elif has_staged:
+                        return True
+                    else:
+                        return False
+                        
+                except Exception:
+                    return False
+            else:
+                # For individual files
+                try:
+                    # Check if file has staged changes
+                    staged_diff = self.repo.git.diff('--cached', '--name-only', rel_path)
+                    has_staged = bool(staged_diff.strip())
+                    
+                    if has_staged:
+                        # Check if also has unstaged changes (mixed scenario)
+                        unstaged_diff = self.repo.git.diff('--name-only', rel_path)
+                        has_unstaged = bool(unstaged_diff.strip())
+                        return "mixed" if has_unstaged else True
+                    return False
+                except Exception:
+                    return False
+        except Exception:
+            return False
+    
     def get_file_status(self, file_path: str) -> Dict[str, Any]:
         """Get Git status for a specific file or directory."""
         if not self.is_git_repo or not self.repo:
-            return {"is_tracked": False, "status": None, "is_ignored": False}
+            return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
         
         try:
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
+            # Get staging status for files and directories
+            is_staged = self._get_staging_status(file_path, rel_path)
+            
             # Check if ignored - GitPython handles path normalization internally
             is_ignored = self.repo.ignored(rel_path)
             if is_ignored:
-                return {"is_tracked": False, "status": "ignored", "is_ignored": True}
+                return {"is_tracked": False, "status": "ignored", "is_ignored": True, "is_staged": False}
             
             # For directories, only report status if they contain tracked or untracked files
             if os.path.isdir(file_path):
@@ -207,41 +263,41 @@ class GitManager:
                     for f in self.repo.untracked_files
                 )
                 if has_untracked:
-                    return {"is_tracked": False, "status": "untracked", "is_ignored": False}
+                    return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
                 
                 # Check if directory is dirty - GitPython handles path normalization
                 if self.repo.is_dirty(path=rel_path):
-                    return {"is_tracked": True, "status": "modified", "is_ignored": False}
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
                 
                 # Check if directory has tracked files - let GitPython handle paths
                 try:
                     tracked_files = self.repo.git.ls_files(rel_path)
                     is_tracked = bool(tracked_files.strip())
                     status = "clean" if is_tracked else None
-                    return {"is_tracked": is_tracked, "status": status, "is_ignored": False}
+                    return {"is_tracked": is_tracked, "status": status, "is_ignored": False, "is_staged": is_staged}
                 except Exception:
-                    return {"is_tracked": False, "status": None, "is_ignored": False}
+                    return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
             
             # For files
             else:
                 # Check if untracked - direct comparison works cross-platform
                 if rel_path in self.repo.untracked_files:
-                    return {"is_tracked": False, "status": "untracked", "is_ignored": False}
+                    return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": False}
                 
                 # Check if tracked and dirty - GitPython handles path normalization
                 if self.repo.is_dirty(path=rel_path):
-                    return {"is_tracked": True, "status": "modified", "is_ignored": False}
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
                 
                 # Check if tracked and clean - GitPython handles paths
                 try:
                     self.repo.git.ls_files(rel_path, error_unmatch=True)
-                    return {"is_tracked": True, "status": "clean", "is_ignored": False}
+                    return {"is_tracked": True, "status": "clean", "is_ignored": False, "is_staged": is_staged}
                 except Exception:
-                    return {"is_tracked": False, "status": None, "is_ignored": False}
+                    return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
                     
         except Exception as e:
             logger.debug("Error getting Git status for %s: %s", file_path, e)
-            return {"is_tracked": False, "status": None, "is_ignored": False}
+            return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
     
     def get_status_summary(self) -> Dict[str, int]:
         """Get summary of Git status."""
@@ -1522,7 +1578,7 @@ class ProjectStateManager:
                         is_hidden = entry.name.startswith('.')
                         
                         # Get Git status if available
-                        git_info = {"is_tracked": False, "status": None, "is_ignored": False}
+                        git_info = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
                         if git_manager:
                             git_info = git_manager.get_file_status(entry.path)
                         
@@ -1539,6 +1595,7 @@ class ProjectStateManager:
                             modified_time=stat_info.st_mtime,
                             is_git_tracked=git_info["is_tracked"],
                             git_status=git_info["status"],
+                            is_staged=git_info["is_staged"],
                             is_hidden=is_hidden,
                             is_ignored=git_info["is_ignored"],
                             is_expanded=is_expanded,
@@ -1620,7 +1677,7 @@ class ProjectStateManager:
                         is_hidden = entry.name.startswith('.')
                         
                         # Get Git status if available
-                        git_info = {"is_tracked": False, "status": None, "is_ignored": False}
+                        git_info = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
                         if git_manager:
                             git_info = git_manager.get_file_status(entry.path)
                         
@@ -1633,6 +1690,7 @@ class ProjectStateManager:
                             modified_time=stat_info.st_mtime,
                             is_git_tracked=git_info["is_tracked"],
                             git_status=git_info["status"],
+                            is_staged=git_info["is_staged"],
                             is_hidden=is_hidden,
                             is_ignored=git_info["is_ignored"],
                             is_expanded=False,
