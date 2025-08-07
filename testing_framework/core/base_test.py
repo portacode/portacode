@@ -278,13 +278,35 @@ class BaseTest(ABC):
             
         current_url = self.playwright_manager.page.url
         
-        # Check if current URL matches start URL (allowing for minor differences)
-        if self.start_url in current_url or current_url.endswith(self.start_url):
-            self.logger.debug(f"Already at correct URL: {current_url}")
-            return
+        # Extract path from current URL and start URL for proper comparison
+        try:
+            from urllib.parse import urlparse
+            current_path = urlparse(current_url).path
+            start_path = urlparse(self.start_url).path if self.start_url.startswith('http') else self.start_url
             
-        self.logger.info(f"Navigating from {current_url} to {self.start_url}")
-        await self.playwright_manager.page.goto(self.start_url)
+            # Normalize paths (remove trailing slashes for comparison)
+            current_path = current_path.rstrip('/')
+            start_path = start_path.rstrip('/')
+            
+            if current_path == start_path:
+                self.logger.debug(f"Already at correct URL: {current_url}")
+                return
+        except Exception as e:
+            self.logger.warning(f"URL comparison failed: {e}, falling back to navigation")
+            
+        # Construct full URL if start_url is a relative path
+        target_url = self.start_url
+        if self.start_url.startswith('/') and hasattr(self.playwright_manager, 'base_url'):
+            # Extract base URL (protocol + host) and combine with relative path
+            base_parts = urlparse(self.playwright_manager.base_url)
+            target_url = f"{base_parts.scheme}://{base_parts.netloc}{self.start_url}"
+        elif self.start_url.startswith('/'):
+            # Fallback: extract base from current URL
+            current_parts = urlparse(current_url)
+            target_url = f"{current_parts.scheme}://{current_parts.netloc}{self.start_url}"
+            
+        self.logger.info(f"Navigating from {current_url} to {target_url}")
+        await self.playwright_manager.page.goto(target_url)
         
         # Wait for page to be ready
         await self.playwright_manager.page.wait_for_load_state('domcontentloaded')

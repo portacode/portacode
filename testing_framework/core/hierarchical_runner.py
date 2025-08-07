@@ -331,16 +331,6 @@ class HierarchicalTestRunner(TestRunner):
             
             error_msg = '\n'.join(error_details)
             
-            # Auto-open trace in browser for failed tests (with delay)
-            try:
-                if hasattr(self, '_shared_playwright_manager'):
-                    # Wait a moment for trace file to be written
-                    import asyncio
-                    await asyncio.sleep(1)
-                    await self._open_trace_on_failure(test.name, self._shared_playwright_manager)
-            except Exception as trace_error:
-                self.logger.warning(f"Could not open trace for {test.name}: {trace_error}")
-            
             return TestResult(
                 test.name, False, error_msg,
                 time.time() - test_start
@@ -363,6 +353,20 @@ class HierarchicalTestRunner(TestRunner):
                 await self._shared_playwright_manager.cleanup()
             except Exception as e:
                 self.logger.error(f"Error cleaning up shared playwright manager: {e}")
+        
+        # Open traces for failed tests after cleanup is complete
+        failed_tests = [result for result in self.results if not result.success and 'Skipped:' not in result.message]
+        if failed_tests and hasattr(self, '_shared_playwright_manager'):
+            self.logger.info(f"Opening traces for {len(failed_tests)} failed tests...")
+            for result in failed_tests:
+                try:
+                    self.logger.info(f"Attempting to open trace for failed test: {result.test_name}")
+                    await self._open_trace_on_failure(result.test_name, self._shared_playwright_manager)
+                    # Only open the first failed test's trace to avoid opening multiple browsers
+                    print(f"\n🔍 Trace viewer opened for failed test: {result.test_name}")
+                    break
+                except Exception as trace_error:
+                    self.logger.warning(f"Could not open trace for {result.test_name}: {trace_error}")
         
         # Cleanup logging
         try:

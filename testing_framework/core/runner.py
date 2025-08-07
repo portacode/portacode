@@ -239,23 +239,36 @@ class TestRunner:
             recording_dir = Path(playwright_manager.recordings_dir)
             self.logger.info(f"Looking for trace in recording directory: {recording_dir}")
             
-            # Look for trace.zip in recordings directory or subdirectories
+            # Retry logic to wait for trace file to be written
             trace_file = None
+            max_retries = 10
+            retry_delay = 0.5
             
-            # First check direct path
-            direct_trace = recording_dir / "trace.zip"
-            self.logger.info(f"Checking direct trace: {direct_trace} (exists: {direct_trace.exists()})")
-            if direct_trace.exists():
-                trace_file = direct_trace
-            else:
+            for attempt in range(max_retries):
+                # First check direct path
+                direct_trace = recording_dir / "trace.zip"
+                self.logger.info(f"Attempt {attempt + 1}: Checking direct trace {direct_trace} (exists: {direct_trace.exists()})")
+                if direct_trace.exists():
+                    trace_file = direct_trace
+                    break
+                    
                 # Look for trace.zip in subdirectories (for shared sessions)
                 for subdir in recording_dir.glob("*/"):
                     potential_trace = subdir / "trace.zip"
-                    self.logger.info(f"Checking subdir trace: {potential_trace} (exists: {potential_trace.exists()})")
+                    self.logger.info(f"Attempt {attempt + 1}: Checking subdir trace {potential_trace} (exists: {potential_trace.exists()})")
                     if potential_trace.exists():
                         trace_file = potential_trace
-                        self.logger.info(f"Found trace file: {trace_file}")
                         break
+                        
+                if trace_file:
+                    break
+                    
+                if attempt < max_retries - 1:
+                    self.logger.info(f"Trace file not found yet (attempt {attempt + 1}/{max_retries}), waiting...")
+                    await asyncio.sleep(retry_delay)
+            
+            if trace_file:
+                self.logger.info(f"Found trace file after {attempt + 1} attempts: {trace_file}")
             
             if trace_file and trace_file.exists():
                 # Open trace viewer in browser
