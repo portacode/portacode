@@ -69,6 +69,8 @@ class PlaywrightManager:
             env_password = os.getenv('TEST_PASSWORD')
             env_browser = os.getenv('TEST_BROWSER', 'chromium')
             env_headless = os.getenv('TEST_HEADLESS', 'false').lower() in ('true', '1', 'yes')
+            env_video_width = int(os.getenv('TEST_VIDEO_WIDTH', '1920'))
+            env_video_height = int(os.getenv('TEST_VIDEO_HEIGHT', '1080'))
             
             # Use provided values or fall back to environment
             self.base_url = url or env_url
@@ -92,25 +94,46 @@ class PlaywrightManager:
             except Exception as e:
                 raise Exception(f"Failed to start Playwright: {e}")
 
-            # Launch browser
+            # Launch browser with optimized settings for video recording
             try:
+                # Common args for better video recording quality
+                launch_args = [
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu' if headless else '--force-gpu-mem-available-mb=2048',
+                    '--no-sandbox',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding'
+                ]
+                
                 if browser_type == "firefox":
-                    self.browser = await self.playwright.firefox.launch(headless=headless)
+                    self.browser = await self.playwright.firefox.launch(
+                        headless=headless,
+                        args=launch_args[:3]  # Firefox doesn't support all Chromium args
+                    )
                 elif browser_type == "webkit":
                     self.browser = await self.playwright.webkit.launch(headless=headless)
                 else:
-                    self.browser = await self.playwright.chromium.launch(headless=headless)
-                self.logger.info(f"Browser ({browser_type}) launched successfully")
+                    self.browser = await self.playwright.chromium.launch(
+                        headless=headless,
+                        args=launch_args
+                    )
+                self.logger.info(f"Browser ({browser_type}) launched successfully with optimized recording settings")
             except Exception as e:
                 raise Exception(f"Failed to launch {browser_type} browser: {e}")
 
-            # Create context with recording enabled
+            # Create context with recording enabled and proper viewport
+            video_size = {"width": env_video_width, "height": env_video_height}
             self.context = await self.browser.new_context(
                 record_video_dir=str(self.test_recordings_dir),
-                record_video_size={"width": 1920, "height": 1080},
+                record_video_size=video_size,
                 record_har_path=str(self.har_path),
-                record_har_omit_content=False
+                record_har_omit_content=False,
+                viewport=video_size
             )
+            
+            self.logger.info(f"Video recording configured: {env_video_width}x{env_video_height}")
 
             # Start tracing
             await self.context.tracing.start(

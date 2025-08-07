@@ -168,6 +168,9 @@ class TestRunner:
             self.logger.info(f"Running setup for {test.name}")
             await test.setup()
             
+            # Step 3.5: Navigate to start URL if needed
+            await test.navigate_to_start_url()
+            
             # Step 4: Run the actual test
             self.logger.info(f"Executing test logic for {test.name}")
             result = await test.run()

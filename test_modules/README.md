@@ -6,10 +6,13 @@ This directory contains test modules for the **simplified** Portacode testing fr
 
 ### ✨ Key Features
 - **Hierarchical Dependencies**: Tests run in correct order automatically
+- **Auto-Navigation**: `start_url` parameter ensures tests start from the right page
 - **Simple Assertions**: Easy-to-use `assert_that()` helper
 - **Debug File Inspection**: Built-in helpers for `client_sessions.json` and `project_state_debug.json`
+- **WebSocket Debugging**: Detailed `websockets.json` logs for communication analysis
 - **WebSocket Testing**: Assert on WebSocket messages easily
 - **Auto Debug Mode**: CLI connects with `--debug` flag automatically
+- **Full HD Recording**: High-quality video recording with proper viewport (1920x1080)
 
 ## 📝 Writing a Test Module
 
@@ -27,7 +30,8 @@ class YourCustomTest(BaseTest):
             tags=["tag1", "tag2", "tag3"],
             depends_on=["login_flow_test"],  # Run after these tests
             requires_login=True,            # Needs login
-            requires_ide=True               # Needs IDE launched
+            requires_ide=True,              # Needs IDE launched
+            start_url="/dashboard/"         # Auto-navigate to this URL before test
         )
     
     async def run(self) -> TestResult:
@@ -84,7 +88,7 @@ if assert_that.has_failures():
     return TestResult(self.name, False, assert_that.get_failure_message())
 ```
 
-## 🔍 Debug File Inspection
+## 🔍 Debug File Inspection & WebSocket Debugging
 
 ### Built-in Inspector Helpers
 
@@ -103,6 +107,23 @@ project_files = inspector.get_project_files()        # List of project files
 # Use in assertions
 assert_that.is_true(len(active_sessions) > 0, "Should have active sessions")
 ```
+
+### WebSocket Debugging
+
+Each test generates `websockets.json` with all WebSocket messages:
+
+```json
+[
+  {
+    "timestamp": "2025-08-07T07:37:46.712124",
+    "type": "message_sent", 
+    "url": "ws://localhost:8001/ws/terminal/channel_123/",
+    "data": {"type": "command", "data": "ls -la"}
+  }
+]
+```
+
+Located in: `test_results/run_TIMESTAMP/recordings/session_NAME/websockets.json`
 
 ## 🔗 Hierarchical Dependencies
 
@@ -133,6 +154,21 @@ The framework automatically:
 - **Skips tests** whose dependencies failed  
 - **Tracks implicit requirements** (login, IDE)
 - **Prevents circular dependencies**
+
+## 🧭 Auto-Navigation with start_url
+
+```python
+class DashboardTest(BaseTest):
+    def __init__(self):
+        super().__init__(
+            name="dashboard_test",
+            start_url="/dashboard/"  # Relative URL - auto-navigate before test runs
+        )
+```
+
+- Use **relative URLs** like `/dashboard/`, `/project/123/`
+- Framework navigates only if current page differs
+- Prevents tests breaking from previous test page states
 
 ## 📂 Test Categories
 

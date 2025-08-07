@@ -234,7 +234,7 @@ class BaseTest(ABC):
     def __init__(self, name: str, category: TestCategory = TestCategory.CUSTOM, 
                  description: str = "", tags: Optional[List[str]] = None,
                  depends_on: Optional[List[str]] = None, requires_login: bool = False,
-                 requires_ide: bool = False):
+                 requires_ide: bool = False, start_url: Optional[str] = None):
         self.name = name
         self.category = category
         self.description = description
@@ -242,6 +242,7 @@ class BaseTest(ABC):
         self.depends_on = depends_on or []
         self.requires_login = requires_login
         self.requires_ide = requires_ide
+        self.start_url = start_url
         self.logger = logging.getLogger(f"test.{self.name}")
         self.cli_manager = None
         self.playwright_manager = None
@@ -269,6 +270,24 @@ class BaseTest(ABC):
     async def setup(self) -> None:
         """Setup method called before test execution."""
         pass
+        
+    async def navigate_to_start_url(self) -> None:
+        """Navigate to the start URL if specified and different from current URL."""
+        if not self.start_url or not self.playwright_manager or not self.playwright_manager.page:
+            return
+            
+        current_url = self.playwright_manager.page.url
+        
+        # Check if current URL matches start URL (allowing for minor differences)
+        if self.start_url in current_url or current_url.endswith(self.start_url):
+            self.logger.debug(f"Already at correct URL: {current_url}")
+            return
+            
+        self.logger.info(f"Navigating from {current_url} to {self.start_url}")
+        await self.playwright_manager.page.goto(self.start_url)
+        
+        # Wait for page to be ready
+        await self.playwright_manager.page.wait_for_load_state('domcontentloaded')
         
     async def teardown(self) -> None:
         """Teardown method called after test execution."""

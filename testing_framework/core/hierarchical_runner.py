@@ -30,35 +30,47 @@ class HierarchicalTestRunner(TestRunner):
         return dict(graph)
     
     def topological_sort(self, tests: List[BaseTest]) -> List[BaseTest]:
-        """Sort tests in dependency order using topological sort."""
-        # Build dependency graph
+        """Sort tests using depth-first traversal that prioritizes children after parents."""
+        test_map = {test.name: test for test in tests}
         graph = self.build_dependency_graph(tests)
         
-        # Calculate in-degrees
-        in_degree = defaultdict(int)
-        test_map = {test.name: test for test in tests}
-        
-        for test in tests:
-            in_degree[test.name] = len(test.depends_on)
-        
-        # Find tests with no dependencies
-        queue = deque([test for test in tests if in_degree[test.name] == 0])
+        visited = set()
+        temp_visited = set()
         result = []
         
-        while queue:
-            current_test = queue.popleft()
-            result.append(current_test)
+        def visit_depth_first(test_name: str):
+            if test_name in temp_visited:
+                raise ValueError(f"Circular dependency detected involving test: {test_name}")
+            if test_name in visited or test_name not in test_map:
+                return
             
-            # Update in-degrees for dependent tests
-            for dependent_name in graph.get(current_test.name, []):
-                in_degree[dependent_name] -= 1
-                if in_degree[dependent_name] == 0:
-                    queue.append(test_map[dependent_name])
+            temp_visited.add(test_name)
+            
+            # Visit all dependencies first
+            for dep_name in test_map[test_name].depends_on:
+                visit_depth_first(dep_name)
+            
+            temp_visited.remove(test_name)
+            visited.add(test_name)
+            result.append(test_map[test_name])
         
-        # Check for circular dependencies
-        if len(result) != len(tests):
-            remaining = set(test.name for test in tests) - set(test.name for test in result)
-            raise ValueError(f"Circular dependency detected among tests: {remaining}")
+        # Custom ordering: prioritize depth-first by visiting tests that have the deepest dependency chains first
+        def get_dependency_depth(test: BaseTest) -> int:
+            """Calculate the maximum depth of dependencies for a test."""
+            if not test.depends_on:
+                return 0
+            max_depth = 0
+            for dep_name in test.depends_on:
+                if dep_name in test_map:
+                    max_depth = max(max_depth, get_dependency_depth(test_map[dep_name]) + 1)
+            return max_depth
+        
+        # Sort all tests by dependency depth (deepest first) then by name for stability
+        sorted_tests = sorted(tests, key=lambda t: (-get_dependency_depth(t), t.name))
+        
+        # Visit tests in the calculated order
+        for test in sorted_tests:
+            visit_depth_first(test.name)
         
         return result
     
@@ -273,6 +285,9 @@ class HierarchicalTestRunner(TestRunner):
             # Run test setup
             self.logger.info(f"Running setup for {test.name}")
             await test.setup()
+            
+            # Navigate to start URL if needed
+            await test.navigate_to_start_url()
             
             # Run the actual test
             self.logger.info(f"Executing test logic for {test.name}")
