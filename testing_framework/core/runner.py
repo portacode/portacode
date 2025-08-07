@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 import json
 import shutil
+import traceback
+import webbrowser
+import os
+import sys
 from datetime import datetime
 
 from .base_test import BaseTest, TestResult, TestCategory
@@ -178,8 +182,39 @@ class TestRunner:
             return result
             
         except Exception as e:
-            error_msg = f"Test execution failed: {str(e)}"
-            self.logger.error(f"Error in test {test.name}: {error_msg}")
+            # Get detailed error information
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            
+            # Extract the most relevant line from traceback (user's test code)
+            tb_lines = traceback.format_tb(exc_traceback)
+            user_code_line = None
+            
+            for line in tb_lines:
+                if 'test_modules/' in line or 'run(self)' in line:
+                    user_code_line = line.strip()
+                    break
+            
+            # Create detailed error message
+            error_details = [f"Test execution failed: {str(e)}"]
+            
+            if user_code_line:
+                error_details.append(f"Location: {user_code_line}")
+            
+            # Add exception type
+            if exc_type:
+                error_details.append(f"Exception type: {exc_type.__name__}")
+            
+            # Add full traceback to logs but keep UI message concise
+            full_traceback = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            self.logger.error(f"Full traceback for {test.name}:\n{full_traceback}")
+            
+            error_msg = '\n'.join(error_details)
+            
+            # Auto-open trace in browser for failed tests
+            try:
+                await self._open_trace_on_failure(test.name, playwright_manager)
+            except Exception as trace_error:
+                self.logger.warning(f"Could not open trace for {test.name}: {trace_error}")
             
             return TestResult(
                 test.name, False, error_msg,
@@ -193,6 +228,74 @@ class TestRunner:
                 await cli_manager.disconnect()  # This won't actually disconnect shared connection
             except Exception as e:
                 self.logger.error(f"Error during cleanup for {test.name}: {e}")
+    
+    async def _open_trace_on_failure(self, test_name: str, playwright_manager) -> None:
+        """Open Playwright trace in browser when test fails."""
+        try:
+            # Get the trace file path from playwright manager
+            recording_dir = Path(playwright_manager.recordings_dir)
+            self.logger.info(f"Looking for trace in recording directory: {recording_dir}")
+            
+            # Look for trace.zip in recordings directory or subdirectories
+            trace_file = None
+            
+            # First check direct path
+            direct_trace = recording_dir / "trace.zip"
+            self.logger.info(f"Checking direct trace: {direct_trace} (exists: {direct_trace.exists()})")
+            if direct_trace.exists():
+                trace_file = direct_trace
+            else:
+                # Look for trace.zip in subdirectories (for shared sessions)
+                for subdir in recording_dir.glob("*/"):
+                    potential_trace = subdir / "trace.zip"
+                    self.logger.info(f"Checking subdir trace: {potential_trace} (exists: {potential_trace.exists()})")
+                    if potential_trace.exists():
+                        trace_file = potential_trace
+                        self.logger.info(f"Found trace file: {trace_file}")
+                        break
+            
+            if trace_file and trace_file.exists():
+                # Open trace viewer in browser
+                self.logger.info(f"Opening trace viewer for failed test: {test_name}")
+                
+                # Use Playwright's trace viewer
+                import subprocess
+                
+                # Try to open with playwright show-trace command with host/port options
+                try:
+                    # Run playwright show-trace with host and port for remote access
+                    subprocess.Popen([
+                        'npx', 'playwright', 'show-trace', 
+                        '--host', '0.0.0.0', 
+                        '--port', '9323',
+                        str(trace_file)
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.logger.info(f"Trace viewer opened for {test_name} at http://0.0.0.0:9323")
+                    print(f"\n🔍 Trace viewer opened at: http://0.0.0.0:9323")
+                    print(f"   Trace file: {trace_file}")
+                except (FileNotFoundError, subprocess.SubprocessError) as e:
+                    # Fallback: try without host/port options
+                    try:
+                        subprocess.Popen([
+                            'npx', 'playwright', 'show-trace', str(trace_file)
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self.logger.info(f"Trace viewer opened for {test_name} (local)")
+                    except (FileNotFoundError, subprocess.SubprocessError):
+                        # Final fallback: open trace directory in file manager
+                        self.logger.warning("Playwright trace viewer not available, opening trace directory")
+                        if os.name == 'nt':  # Windows
+                            os.startfile(str(recording_dir))
+                        elif os.name == 'posix':  # Linux/Mac
+                            subprocess.run(['xdg-open', str(recording_dir)], check=False)
+            else:
+                # Debug: show what we're looking for
+                self.logger.warning(f"No trace file found for {test_name}. Searched in:")
+                self.logger.warning(f"  - Direct path: {recording_dir / 'trace.zip'}")
+                for subdir in recording_dir.glob("*/"):
+                    self.logger.warning(f"  - Subdir path: {subdir / 'trace.zip'} (exists: {(subdir / 'trace.zip').exists()})")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to open trace for {test_name}: {e}")
     
     async def _generate_summary_report(self, run_dir: Path) -> Dict[str, Any]:
         """Generate a comprehensive summary report."""

@@ -291,7 +291,14 @@ def _print_results(results):
         for result in failed_tests:
             click.echo(f"  • {click.style(result['test_name'], fg='red', bold=True)}")
             if result.get('message'):
-                click.echo(f"    └─ {click.style(result['message'], fg='red')}")
+                # Handle multi-line error messages
+                message_lines = result['message'].split('\n')
+                for i, line in enumerate(message_lines):
+                    prefix = "    └─ " if i == 0 else "       "
+                    click.echo(f"{prefix}{click.style(line, fg='red')}")
+                
+                # Add note about trace viewer
+                click.echo(f"       {click.style('🔍 Trace viewer should open automatically for investigation', fg='yellow')}")
     
     # Summary footer
     click.echo("="*60)

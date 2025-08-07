@@ -48,12 +48,14 @@ class PlaywrightManager:
         self.har_path = self.test_recordings_dir / "network.har"
         self.console_log_path = self.test_recordings_dir / "console.log"
         self.actions_log_path = self.test_recordings_dir / "actions.json"
-        
+        self.websocket_log_path = self.test_recordings_dir / "websockets.json"
+
         # Action tracking
         self.actions_log: List[Dict[str, Any]] = []
         self.screenshot_counter = 0
-        
-    async def start_session(self, 
+        self.websocket_logs: List[Dict[str, Any]] = []
+
+    async def start_session(self,
                           url: Optional[str] = None,
                           username: Optional[str] = None,
                           password: Optional[str] = None,
@@ -74,22 +76,22 @@ class PlaywrightManager:
             self.password = password or env_password
             browser_type = browser_type or env_browser
             headless = headless if headless is not None else env_headless
-            
+
             if not self.username or not self.password:
                 self.logger.error("Username and password must be provided via parameters or environment variables")
                 return False
-            
+
             self.logger.info(f"Starting Playwright session for test: {self.test_name}")
             self.logger.info(f"Target URL: {self.base_url}")
             self.logger.info(f"Browser: {browser_type}, Headless: {headless}")
-            
+
             # Start Playwright
             try:
                 self.playwright = await async_playwright().start()
                 self.logger.info("Playwright started successfully")
             except Exception as e:
                 raise Exception(f"Failed to start Playwright: {e}")
-            
+
             # Launch browser
             try:
                 if browser_type == "firefox":
@@ -101,7 +103,7 @@ class PlaywrightManager:
                 self.logger.info(f"Browser ({browser_type}) launched successfully")
             except Exception as e:
                 raise Exception(f"Failed to launch {browser_type} browser: {e}")
-            
+
             # Create context with recording enabled
             self.context = await self.browser.new_context(
                 record_video_dir=str(self.test_recordings_dir),
@@ -109,25 +111,28 @@ class PlaywrightManager:
                 record_har_path=str(self.har_path),
                 record_har_omit_content=False
             )
-            
+
             # Start tracing
             await self.context.tracing.start(
                 screenshots=True,
                 snapshots=True,
                 sources=True
             )
-            
+
             # Create page
             self.page = await self.context.new_page()
-            
+
             # Set up console logging
             self.console_logs = []
             self.page.on("console", self._handle_console_message)
-            
+
+            # Set up WebSocket logging
+            self.page.on("websocket", self._handle_websocket)
+
             # Set up request/response logging
             self.page.on("request", self._handle_request)
             self.page.on("response", self._handle_response)
-            
+
             # Navigate to base URL
             await self.log_action("navigate", {"url": self.base_url})
             await self.page.goto(self.base_url)
@@ -299,7 +304,35 @@ class PlaywrightManager:
                 json.dump(self.console_logs, f, indent=2)
         except:
             pass
-    
+
+    def _handle_websocket(self, websocket):
+        """Handle WebSocket connections."""
+        self.logger.info(f"WebSocket opened: {websocket.url}")
+        websocket.on("framesent", lambda payload: self._log_websocket_message("sent", websocket.url, payload))
+        websocket.on("framereceived", lambda payload: self._log_websocket_message("received", websocket.url, payload))
+        websocket.on("close", lambda: self.logger.info(f"WebSocket closed: {websocket.url}"))
+
+    def _log_websocket_message(self, direction: str, url: str, payload: Any):
+        """Log a WebSocket message."""
+        try:
+            parsed_payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            parsed_payload = payload
+
+        message_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "direction": direction,
+            "url": url,
+            "payload": parsed_payload
+        }
+        self.websocket_logs.append(message_entry)
+
+        try:
+            with open(self.websocket_log_path, 'w') as f:
+                json.dump(self.websocket_logs, f, indent=2)
+        except Exception as e:
+            self.logger.error(f"Failed to write websocket log: {e}")
+
     def _handle_request(self, request):
         """Handle network requests."""
         self.logger.debug(f"Request: {request.method} {request.url}")
@@ -345,13 +378,15 @@ class PlaywrightManager:
                 "total_actions": len(self.actions_log),
                 "total_screenshots": self.screenshot_counter,
                 "total_console_logs": len(getattr(self, 'console_logs', [])),
+                "total_websocket_logs": len(self.websocket_logs),
                 "recordings": {
                     "video": str(self.video_path) if self.video_path.exists() else None,
                     "trace": str(self.trace_path) if self.trace_path.exists() else None,
                     "har": str(self.har_path) if self.har_path.exists() else None,
                     "screenshots_dir": str(self.screenshot_dir),
                     "console_log": str(self.console_log_path),
-                    "actions_log": str(self.actions_log_path)
+                    "actions_log": str(self.actions_log_path),
+                    "websocket_log": str(self.websocket_log_path)
                 }
             }
             
@@ -374,5 +409,6 @@ class PlaywrightManager:
             "har_path": str(self.har_path) if self.har_path.exists() else None,
             "screenshot_count": self.screenshot_counter,
             "actions_count": len(self.actions_log),
-            "console_logs_count": len(getattr(self, 'console_logs', []))
+            "console_logs_count": len(getattr(self, 'console_logs', [])),
+            "websocket_logs_count": len(self.websocket_logs)
         }

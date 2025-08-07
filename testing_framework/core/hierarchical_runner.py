@@ -4,6 +4,8 @@ import asyncio
 from collections import deque, defaultdict
 from typing import List, Dict, Set, Optional, Any
 import logging
+import traceback
+import sys
 
 from .base_test import BaseTest, TestResult
 from .runner import TestRunner
@@ -286,8 +288,43 @@ class HierarchicalTestRunner(TestRunner):
             return result
             
         except Exception as e:
-            error_msg = f"Test execution failed: {str(e)}"
-            self.logger.error(f"Error in test {test.name}: {error_msg}")
+            # Get detailed error information
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            
+            # Extract the most relevant line from traceback (user's test code)
+            tb_lines = traceback.format_tb(exc_traceback)
+            user_code_line = None
+            
+            for line in tb_lines:
+                if 'test_modules/' in line or 'run(self)' in line:
+                    user_code_line = line.strip()
+                    break
+            
+            # Create detailed error message
+            error_details = [f"Test execution failed: {str(e)}"]
+            
+            if user_code_line:
+                error_details.append(f"Location: {user_code_line}")
+            
+            # Add exception type
+            if exc_type:
+                error_details.append(f"Exception type: {exc_type.__name__}")
+            
+            # Add full traceback to logs but keep UI message concise
+            full_traceback = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            self.logger.error(f"Full traceback for {test.name}:\n{full_traceback}")
+            
+            error_msg = '\n'.join(error_details)
+            
+            # Auto-open trace in browser for failed tests (with delay)
+            try:
+                if hasattr(self, '_shared_playwright_manager'):
+                    # Wait a moment for trace file to be written
+                    import asyncio
+                    await asyncio.sleep(1)
+                    await self._open_trace_on_failure(test.name, self._shared_playwright_manager)
+            except Exception as trace_error:
+                self.logger.warning(f"Could not open trace for {test.name}: {trace_error}")
             
             return TestResult(
                 test.name, False, error_msg,

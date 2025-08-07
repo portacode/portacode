@@ -33,8 +33,7 @@ class TerminalInteractionTest(BaseTest):
         
         # Send ls command and measure timing
         stats.start_timer("command_execution")
-        await page.keyboard.type("ls")
-        await page.keyboard.press("Enter")
+        await page.keyboard.type("ls\n")
         
         # Wait for output containing client_sessions.json
         await page.wait_for_function(
