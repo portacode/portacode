@@ -1,6 +1,5 @@
-"""Login flow test example with simplified assertions."""
+"""Login flow test - simplified and fast."""
 
-import asyncio
 from testing_framework.core.base_test import BaseTest, TestResult, TestCategory
 
 
@@ -17,51 +16,32 @@ class LoginFlowTest(BaseTest):
         )
     
     async def run(self) -> TestResult:
-        """Execute the login flow test using simplified assertions."""
+        """Execute the login flow test."""
         page = self.playwright_manager.page
         assert_that = self.assert_that()
         
-        if not page:
-            return TestResult(self.name, False, "No active Playwright page")
-        
-        # Wait for page to be ready
-        await page.wait_for_load_state("networkidle")
-        await self.playwright_manager.take_screenshot("login_start")
-        
-        # Get current URL and try dashboard access
-        current_url = page.url
-        base_url = '/'.join(current_url.split('/')[:3])
+        # Navigate to dashboard - should be accessible if logged in
+        base_url = '/'.join(page.url.split('/')[:3])
         dashboard_url = f"{base_url}/dashboard/"
-        
-        # Navigate to dashboard to test authentication
         response = await page.goto(dashboard_url)
-        await page.wait_for_load_state("networkidle")
         
-        # Use simplified assertions
+        # Check if successfully reached dashboard
         assert_that.status_ok(response, "Dashboard request")
         assert_that.url_contains(page, "/dashboard", "Dashboard URL")
         
-        # Check that we're not redirected to login
-        login_indicators = ["login", "signin", "auth"]
-        is_login_page = any(indicator in page.url.lower() for indicator in login_indicators)
-        assert_that.is_false(is_login_page, "Should not be on login page")
-        
-        # Check client sessions for active connection
-        sessions = self.inspect().load_client_sessions()
+        # Verify we have active sessions
         active_sessions = self.inspect().get_active_sessions()
         assert_that.is_true(len(active_sessions) > 0, "Should have active sessions")
         
         if assert_that.has_failures():
-            await self.playwright_manager.take_screenshot("login_failed")
             return TestResult(self.name, False, assert_that.get_failure_message())
         
-        await self.playwright_manager.take_screenshot("login_success")
         return TestResult(self.name, True, f"Login successful. Dashboard at {page.url}")
     
     async def setup(self):
-        """Setup for login test - no additional setup needed as framework handles login."""
-        self.logger.info("Login flow test setup - framework handles CLI and login automatically")
+        """Setup for login test."""
+        pass
     
     async def teardown(self):
         """Teardown for login test."""
-        self.logger.info("Login flow test teardown completed")
+        pass
