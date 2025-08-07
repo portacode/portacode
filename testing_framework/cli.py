@@ -14,8 +14,11 @@ try:
 except ImportError:
     pass
 
-from .core.runner import TestRunner
+from .core.hierarchical_runner import HierarchicalTestRunner
 from .core.base_test import TestCategory
+
+# Use hierarchical runner as the default
+TestRunner = HierarchicalTestRunner
 
 
 def setup_logging(debug: bool = False):
@@ -75,8 +78,8 @@ async def list_tests(ctx):
 @cli.command()
 @click.pass_context
 async def run_all(ctx):
-    """Run all available tests."""
-    click.echo("🚀 Running all tests...")
+    """Run all available tests with dependency resolution."""
+    click.echo("🚀 Running all tests with dependency resolution...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_all_tests(_create_progress_callback())
@@ -87,9 +90,9 @@ async def run_all(ctx):
 @click.argument('category', type=click.Choice([cat.value for cat in TestCategory]))
 @click.pass_context
 async def run_category(ctx, category):
-    """Run tests in a specific category."""
+    """Run tests in a specific category with dependency resolution."""
     cat_enum = TestCategory(category)
-    click.echo(f"🎯 Running {category} tests...")
+    click.echo(f"🎯 Running {category} tests with dependency resolution...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_category(cat_enum, _create_progress_callback())
@@ -129,6 +132,39 @@ async def run_pattern(ctx, pattern):
     click.echo("🔗 Starting shared CLI connection...", nl=False)
     runner = TestRunner()
     results = await runner.run_tests_by_pattern(pattern, _create_progress_callback())
+    _print_results(results)
+
+
+@cli.command()
+@click.pass_context
+async def run_hierarchical(ctx):
+    """Run all tests with hierarchical dependency resolution."""
+    click.echo("🚀 Running tests with dependency resolution...")
+    click.echo("📋 Analyzing test dependencies...")
+    
+    runner = HierarchicalTestRunner()
+    results = await runner.run_all_tests(_create_progress_callback())
+    _print_results(results)
+    
+    # Show dependency information
+    if results.get('results'):
+        skipped = [r for r in results['results'] if 'Skipped:' in r.get('message', '')]
+        if skipped:
+            click.echo(f"\n⏭️  Skipped Tests ({len(skipped)}):")
+            for result in skipped:
+                click.echo(f"  • {result['test_name']}: {result['message']}")
+
+
+@cli.command() 
+@click.argument('names', nargs=-1, required=True)
+@click.pass_context
+async def run_hierarchical_tests(ctx, names):
+    """Run specific tests with dependency resolution."""
+    click.echo(f"📝 Running tests with dependencies: {', '.join(names)}...")
+    click.echo("📋 Analyzing test dependencies...")
+    
+    runner = HierarchicalTestRunner()
+    results = await runner.run_tests_by_names(list(names), _create_progress_callback())
     _print_results(results)
 
 
@@ -196,6 +232,8 @@ run_category.callback = async_command(run_category.callback)
 run_tags.callback = async_command(run_tags.callback)
 run_tests.callback = async_command(run_tests.callback)
 run_pattern.callback = async_command(run_pattern.callback)
+run_hierarchical.callback = async_command(run_hierarchical.callback)
+run_hierarchical_tests.callback = async_command(run_hierarchical_tests.callback)
 
 
 if __name__ == '__main__':

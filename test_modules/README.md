@@ -1,10 +1,19 @@
 # Test Modules Guide
 
-This directory contains test modules for the Portacode testing framework. Each test module defines specific test cases that can be executed individually or as part of test suites.
+This directory contains test modules for the **simplified** Portacode testing framework. The framework now supports **hierarchical test dependencies** and **easy assertions** for WebSocket messages, debug files, and more.
+
+## 🆕 What's New - Simplified Framework
+
+### ✨ Key Features
+- **Hierarchical Dependencies**: Tests run in correct order automatically
+- **Simple Assertions**: Easy-to-use `assert_that()` helper
+- **Debug File Inspection**: Built-in helpers for `client_sessions.json` and `project_state_debug.json`
+- **WebSocket Testing**: Assert on WebSocket messages easily
+- **Auto Debug Mode**: CLI connects with `--debug` flag automatically
 
 ## 📝 Writing a Test Module
 
-### Basic Structure
+### Basic Structure with Dependencies
 
 ```python
 from testing_framework.core.base_test import BaseTest, TestResult, TestCategory
@@ -13,153 +22,117 @@ class YourCustomTest(BaseTest):
     def __init__(self):
         super().__init__(
             name="your_test_name",
-            category=TestCategory.SMOKE,  # or UI, INTEGRATION, PERFORMANCE, etc.
+            category=TestCategory.SMOKE,
             description="What this test validates",
-            tags=["tag1", "tag2", "tag3"]  # For filtering tests
+            tags=["tag1", "tag2", "tag3"],
+            depends_on=["login_flow_test"],  # Run after these tests
+            requires_login=True,            # Needs login
+            requires_ide=True               # Needs IDE launched
         )
     
     async def run(self) -> TestResult:
-        """Main test logic - MUST return TestResult."""
-        try:
-            # Your test logic here
-            page = self.playwright_manager.page
-            
-            # Perform test actions...
-            
-            # Return success
-            return TestResult(self.name, True, "Test passed!")
-            
-        except Exception as e:
-            # Return failure with error message
-            return TestResult(self.name, False, f"Test failed: {str(e)}")
-    
-    async def setup(self):
-        """Optional: Setup before test runs."""
-        pass
+        """Main test logic with simple assertions."""
+        page = self.playwright_manager.page
+        assert_that = self.assert_that()  # Get assertion helper
         
-    async def teardown(self):
-        """Optional: Cleanup after test runs."""
-        pass
+        # Simple assertions
+        response = await page.goto("/dashboard")
+        assert_that.status_ok(response, "Dashboard request")
+        assert_that.url_contains(page, "/dashboard", "Dashboard URL")
+        
+        # Check debug files
+        assert_that.debug_file_contains("client_sessions.json", "status", "active")
+        
+        # Return result based on assertions
+        if assert_that.has_failures():
+            return TestResult(self.name, False, assert_that.get_failure_message())
+        
+        return TestResult(self.name, True, "Test passed!")
 ```
 
-## 🎭 Playwright Testing
+## 🎯 Easy Assertions
 
-### Available Managers
+### Available Assertion Methods
 
-- **`self.playwright_manager`**: Browser automation
-- **`self.cli_manager`**: CLI connection (shared across tests)
-
-### Common Playwright Patterns
-
-#### Navigation and URL Testing
 ```python
-# Get current URL
-current_url = page.url
+assert_that = self.assert_that()  # Get assertion helper
 
-# Navigate to a page
-response = await page.goto("http://example.com/dashboard")
+# Basic assertions
+assert_that.eq(actual, expected, "Custom message")
+assert_that.contains(container, item, "Should contain item")
+assert_that.is_true(value, "Should be truthy")
+assert_that.is_false(value, "Should be falsy")
 
-# Check response status
-if response.status == 200:
-    # Success
-else:
-    # Handle error
+# HTTP assertions
+assert_that.status_ok(response, "Request should succeed")
+
+# Page assertions  
+assert_that.url_contains(page, "/dashboard", "Should be on dashboard")
+await assert_that.element_visible(page, ".success-message", "Success shown")
+
+# WebSocket assertions
+messages = [...] # Your WebSocket message list
+assert_that.websocket_message(messages, "connection_established")
+assert_that.websocket_message(messages, "file_update", {"file": "test.py"})
+
+# Debug file assertions
+assert_that.debug_file_contains("client_sessions.json", "status", "active")
+assert_that.debug_file_contains("project_state_debug.json", "file_count")
+
+# Check results
+if assert_that.has_failures():
+    return TestResult(self.name, False, assert_that.get_failure_message())
 ```
 
-#### Element Interactions
+## 🔍 Debug File Inspection
+
+### Built-in Inspector Helpers
+
 ```python
-# Click elements
-await page.click("button#submit")
-await page.click("text=Login")
+inspector = self.inspect()  # Get debug inspector
 
-# Fill forms
-await page.fill("input[name='username']", "testuser")
-await page.fill("#password", "password123")
+# Load debug files
+sessions = inspector.load_client_sessions()      # client_sessions.json  
+project_state = inspector.load_project_state()  # project_state_debug.json
 
-# Wait for elements
-await page.wait_for_selector(".dashboard-content")
-await page.wait_for_load_state("networkidle")
+# Get specific data
+active_sessions = inspector.get_active_sessions()     # List of active session IDs
+session_info = inspector.get_session_info("sess_123") # Info for specific session
+project_files = inspector.get_project_files()        # List of project files
+
+# Use in assertions
+assert_that.is_true(len(active_sessions) > 0, "Should have active sessions")
 ```
 
-#### Assertions and Validations
+## 🔗 Hierarchical Dependencies
+
+### Dependency Types
+
 ```python
-# Check if element exists
-if await page.is_visible(".success-message"):
-    # Element is visible
+class MyTest(BaseTest):
+    def __init__(self):
+        super().__init__(
+            # ... other params ...
+            depends_on=["login_flow_test", "ide_launch_test"],  # Explicit dependencies
+            requires_login=True,     # Must run after any login test
+            requires_ide=True        # Must run after any IDE launch test
+        )
     
-# Get text content
-text = await page.text_content(".status")
-if "Success" in text:
-    # Validation passed
-
-# Check URL patterns
-if "/dashboard" in page.url:
-    # On dashboard page
-
-# Multiple elements
-buttons = await page.query_selector_all("button")
-if len(buttons) > 0:
-    # Found buttons
+    async def run(self) -> TestResult:
+        # Access dependency results
+        login_result = self.get_dependency_result("login_flow_test")
+        if login_result and login_result.success:
+            # Login was successful, proceed
+            pass
 ```
 
-#### Screenshots and Logging
-```python
-# Take screenshot
-await self.playwright_manager.take_screenshot("step_name")
+### Dependency Resolution
 
-# Log actions
-await self.playwright_manager.log_action("action_type", {
-    "url": page.url,
-    "status": "success",
-    "data": {"key": "value"}
-})
-```
-
-## 🔍 Proper Test Assertions
-
-### Authentication Testing
-```python
-# Test 1: Check if already authenticated
-if "/dashboard" in page.url:
-    response = await page.goto(page.url)
-    if response and response.status == 200:
-        return TestResult(self.name, True, "Already authenticated")
-
-# Test 2: Try accessing protected page
-dashboard_url = base_url + "/dashboard/"
-response = await page.goto(dashboard_url)
-final_url = page.url
-
-if "/dashboard" in final_url and response.status == 200:
-    return TestResult(self.name, True, "Authentication successful")
-elif "login" in final_url:
-    return TestResult(self.name, False, "Not authenticated - redirected to login")
-```
-
-### HTTP Status Testing
-```python
-# Always check response status
-response = await page.goto(target_url)
-if response:
-    if response.status == 200:
-        # Success
-    elif response.status in [301, 302]:
-        # Redirect - check final URL
-        if page.url != target_url:
-            # Handle redirect
-    else:
-        return TestResult(self.name, False, f"HTTP {response.status}")
-```
-
-### Element Validation
-```python
-# Wait for elements to ensure they exist
-try:
-    await page.wait_for_selector(".dashboard-content", timeout=5000)
-    return TestResult(self.name, True, "Dashboard loaded")
-except:
-    return TestResult(self.name, False, "Dashboard content not found")
-```
+The framework automatically:
+- **Sorts tests** in dependency order (topological sort)
+- **Skips tests** whose dependencies failed  
+- **Tracks implicit requirements** (login, IDE)
+- **Prevents circular dependencies**
 
 ## 📂 Test Categories
 
@@ -256,6 +229,21 @@ async def run(self) -> TestResult:
 
 ## 🚀 Running Tests
 
+### Hierarchical Mode (Recommended)
+
+```bash
+# All tests with dependency resolution
+python -m testing_framework.cli run-hierarchical
+
+# Specific tests with dependencies 
+python -m testing_framework.cli run-hierarchical-tests login_flow_test websocket_test
+
+# All tests with hierarchical option
+python -m testing_framework.cli run-all --hierarchical
+```
+
+### Standard Mode
+
 ```bash
 # Single test
 python -m testing_framework.cli run-tests your_test_name
@@ -266,6 +254,12 @@ python -m testing_framework.cli run-category smoke
 # By tags
 python -m testing_framework.cli run-tags login authentication
 
-# All tests
+# All tests (no dependencies)
 python -m testing_framework.cli run-all
 ```
+
+### CLI Features
+
+- **Auto Debug Mode**: CLI connects with `--debug` flag automatically
+- **Dependency Analysis**: Shows which tests were skipped and why
+- **Shared Connection**: All tests share one CLI connection for efficiency
