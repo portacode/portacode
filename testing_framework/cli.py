@@ -76,73 +76,91 @@ async def list_tests(ctx):
 
 
 @cli.command()
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_all(ctx):
+async def run_all(ctx, clear):
     """Run all available tests with dependency resolution."""
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo("🚀 Running all tests with dependency resolution...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
-    runner = TestRunner()
+    runner = TestRunner(clear_results=clear)
     results = await runner.run_all_tests(_create_progress_callback())
     _print_results(results)
 
 
 @cli.command()
 @click.argument('category', type=click.Choice([cat.value for cat in TestCategory]))
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_category(ctx, category):
+async def run_category(ctx, category, clear):
     """Run tests in a specific category with dependency resolution."""
     cat_enum = TestCategory(category)
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo(f"🎯 Running {category} tests with dependency resolution...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
-    runner = TestRunner()
+    runner = TestRunner(clear_results=clear)
     results = await runner.run_tests_by_category(cat_enum, _create_progress_callback())
     _print_results(results)
 
 
 @cli.command()
 @click.argument('tags', nargs=-1, required=True)
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_tags(ctx, tags):
+async def run_tags(ctx, tags, clear):
     """Run tests with specific tags."""
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo(f"🏷️  Running tests with tags: {', '.join(tags)}...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
-    runner = TestRunner()
+    runner = TestRunner(clear_results=clear)
     results = await runner.run_tests_by_tags(set(tags), _create_progress_callback())
     _print_results(results)
 
 
 @cli.command()
 @click.argument('names', nargs=-1, required=True)
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_tests(ctx, names):
+async def run_tests(ctx, names, clear):
     """Run specific tests by name."""
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo(f"📝 Running tests: {', '.join(names)}...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
-    runner = TestRunner()
+    runner = TestRunner(clear_results=clear)
     results = await runner.run_tests_by_names(list(names), _create_progress_callback())
     _print_results(results)
 
 
 @cli.command()
 @click.argument('pattern')
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_pattern(ctx, pattern):
+async def run_pattern(ctx, pattern, clear):
     """Run tests matching a name pattern."""
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo(f"🔍 Running tests matching pattern: {pattern}...")
     click.echo("🔗 Starting shared CLI connection...", nl=False)
-    runner = TestRunner()
+    runner = TestRunner(clear_results=clear)
     results = await runner.run_tests_by_pattern(pattern, _create_progress_callback())
     _print_results(results)
 
 
 @cli.command()
+@click.option('--clear', is_flag=True, help='Clear test_results directory before running tests')
 @click.pass_context
-async def run_hierarchical(ctx):
+async def run_hierarchical(ctx, clear):
     """Run all tests with hierarchical dependency resolution."""
+    if clear:
+        click.echo("🗑️  Clearing test_results directory...")
     click.echo("🚀 Running tests with dependency resolution...")
     click.echo("📋 Analyzing test dependencies...")
     
-    runner = HierarchicalTestRunner()
+    runner = HierarchicalTestRunner(clear_results=clear)
     results = await runner.run_all_tests(_create_progress_callback())
     _print_results(results)
     
@@ -184,7 +202,7 @@ def _create_progress_callback():
             click.echo(f"[{current}/{total}] 🔄 {test.name}", nl=False)
         elif event == 'complete' and result:
             # Clear the line and show result
-            click.echo(f"\r[{current}/{total}] {'✅' if result.success else '❌'} {test.name} ({result.duration:.1f}s)", nl=True)
+            click.echo(f"\r[{current}/{total}] {'✅' if result.success else '❌'} {test.name} ({result.duration:.2f}s)", nl=True)
             if not result.success and result.message:
                 click.echo(f"    └─ {click.style(result.message, fg='red')}")
     
@@ -192,7 +210,7 @@ def _create_progress_callback():
 
 
 def _print_results(results):
-    """Print test results summary."""
+    """Print test results summary with stylish stats formatting."""
     if not results.get('results'):
         click.echo("❌ No tests were run")
         return
@@ -200,22 +218,83 @@ def _print_results(results):
     stats = results['statistics']
     duration = results['run_info']['duration']
     
-    click.echo(f"\n📊 Test Results Summary:")
-    click.echo(f"  Total: {stats['total_tests']} | Duration: {duration:.1f}s")
-    click.echo(f"  ✅ Passed: {click.style(str(stats['passed']), fg='green')}")
-    click.echo(f"  ❌ Failed: {click.style(str(stats['failed']), fg='red')}")
-    success_rate_text = f"{stats['success_rate']:.1f}%"
+    # Stylish header
+    click.echo("\n" + "="*60)
+    click.echo(f"{'📊 TEST RESULTS SUMMARY':^60}")
+    click.echo("="*60)
+    
+    # Main stats with better formatting
+    click.echo(f"  📋 Total Tests:    {click.style(str(stats['total_tests']), fg='cyan', bold=True)}")
+    click.echo(f"  ⏱️  Total Duration: {click.style(f'{duration:.2f}s', fg='blue', bold=True)}")
+    click.echo(f"  ✅ Passed:        {click.style(str(stats['passed']), fg='green', bold=True)}")
+    click.echo(f"  ❌ Failed:        {click.style(str(stats['failed']), fg='red', bold=True)}")
+    
+    # Success rate with color coding
+    success_rate_text = f"{stats['success_rate']:.2f}%"
     success_rate_color = 'green' if stats['success_rate'] > 80 else 'yellow' if stats['success_rate'] > 50 else 'red'
-    click.echo(f"  📈 Success Rate: {click.style(success_rate_text, fg=success_rate_color)}")
+    click.echo(f"  📈 Success Rate:  {click.style(success_rate_text, fg=success_rate_color, bold=True)}")
     
-    click.echo(f"\n📂 Results: {click.style(results['run_info']['run_directory'], fg='blue', underline=True)}")
+    # Individual test stats with timing
+    click.echo(f"\n{'⚡ PERFORMANCE BREAKDOWN':^60}")
+    click.echo("-"*60)
     
-    # Show failed tests summary
+    # Show timing stats for each test
+    for result in results['results']:
+        status_icon = "✅" if result['success'] else "❌"
+        test_name = result['test_name'].replace('_test', '').replace('_', ' ').title()
+        duration_text = f"{result['duration']:.2f}s"
+        duration_color = 'green' if result['duration'] < 5 else 'yellow' if result['duration'] < 10 else 'red'
+        
+        click.echo(f"  {status_icon} {test_name:<30} {click.style(duration_text, fg=duration_color)}")
+        
+        # Show additional stats if available
+        if result.get('artifacts') and isinstance(result['artifacts'], dict):
+            # Check both direct artifacts and nested timings/stats
+            all_stats = {}
+            
+            # Add direct artifacts
+            for key, value in result['artifacts'].items():
+                if isinstance(value, (int, float)):
+                    all_stats[key] = value
+            
+            # Add nested timings
+            if 'timings' in result['artifacts'] and isinstance(result['artifacts']['timings'], dict):
+                for key, value in result['artifacts']['timings'].items():
+                    if isinstance(value, (int, float)):
+                        all_stats[key] = value
+            
+            # Add nested stats
+            if 'stats' in result['artifacts'] and isinstance(result['artifacts']['stats'], dict):
+                for key, value in result['artifacts']['stats'].items():
+                    if isinstance(value, (int, float)):
+                        all_stats[key] = value
+            
+            # Display all stats
+            for key, value in all_stats.items():
+                # Format based on the value and key name
+                if 'ms' in key.lower() or value > 100:
+                    formatted_value = f"{value:.2f}ms"
+                else:
+                    formatted_value = f"{value:.2f}s"
+                
+                # Clean up key name for display
+                display_key = key.replace('_', ' ').replace('time ms', 'time').title()
+                click.echo(f"    └─ {display_key}: {click.style(formatted_value, fg='blue')}")
+    
+    click.echo(f"\n📂 Results saved to: {click.style(results['run_info']['run_directory'], fg='blue', underline=True)}")
+    
+    # Show failed tests summary if any
     failed_tests = [r for r in results['results'] if not r['success']]
     if failed_tests:
-        click.echo(f"\n❌ Failed Tests ({len(failed_tests)}):")
+        click.echo(f"\n{'❌ FAILED TESTS DETAILS':^60}")
+        click.echo("-"*60)
         for result in failed_tests:
-            click.echo(f"  • {result['test_name']}")
+            click.echo(f"  • {click.style(result['test_name'], fg='red', bold=True)}")
+            if result.get('message'):
+                click.echo(f"    └─ {click.style(result['message'], fg='red')}")
+    
+    # Summary footer
+    click.echo("="*60)
 
 
 # Async command wrapper

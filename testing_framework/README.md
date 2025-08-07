@@ -206,7 +206,7 @@ The framework generates comprehensive HTML reports with:
 | `TEST_HEADLESS` | Headless mode | `false` |
 | `TEST_RESULTS_DIR` | Results directory | `test_results` |
 | `TEST_RECORDINGS_DIR` | Recordings directory | `test_recordings` |
-| `TEST_LOGS_DIR` | Logs directory | `test_logs` |
+| `TEST_LOGS_DIR` | Logs directory | `test_results` |
 
 ### Command Line Options
 

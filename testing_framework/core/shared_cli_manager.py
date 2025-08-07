@@ -29,7 +29,7 @@ class SharedCLIManager:
         if self._initialized:
             return
             
-        self.log_dir = Path("test_logs/shared_cli")
+        self.log_dir = Path("test_results/shared_cli")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         self.connection_thread: Optional[threading.Thread] = None
@@ -194,7 +194,7 @@ class TestCLIProxy:
         
         # Create one actual CLI connection that all tests share
         if not TestCLIProxy._cli_initialized:
-            TestCLIProxy._actual_cli_manager = CLIManager("shared_connection", "test_logs/shared_cli")
+            TestCLIProxy._actual_cli_manager = CLIManager("shared_connection", "test_results/shared_cli")
             connected = await TestCLIProxy._actual_cli_manager.connect(debug, timeout)
             if connected:
                 TestCLIProxy._cli_initialized = True

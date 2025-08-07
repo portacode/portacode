@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 import json
+import shutil
 from datetime import datetime
 
 from .base_test import BaseTest, TestResult, TestCategory
@@ -18,9 +19,14 @@ from .playwright_manager import PlaywrightManager
 class TestRunner:
     """Main test runner that orchestrates test execution."""
     
-    def __init__(self, base_path: str = ".", output_dir: str = "test_results"):
+    def __init__(self, base_path: str = ".", output_dir: str = "test_results", clear_results: bool = False):
         self.base_path = Path(base_path)
         self.output_dir = Path(output_dir)
+        
+        # Clear results directory if requested
+        if clear_results and self.output_dir.exists():
+            shutil.rmtree(self.output_dir)
+            
         self.output_dir.mkdir(exist_ok=True)
         
         self.discovery = TestDiscovery()

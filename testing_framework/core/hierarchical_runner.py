@@ -12,8 +12,8 @@ from .runner import TestRunner
 class HierarchicalTestRunner(TestRunner):
     """Test runner that handles hierarchical dependencies between tests."""
     
-    def __init__(self, base_path: str = ".", output_dir: str = "test_results"):
-        super().__init__(base_path, output_dir)
+    def __init__(self, base_path: str = ".", output_dir: str = "test_results", clear_results: bool = False):
+        super().__init__(base_path, output_dir, clear_results)
         self.dependency_graph: Dict[str, List[str]] = {}
         self.test_states: Dict[str, TestResult] = {}
         

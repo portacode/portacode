@@ -55,5 +55,9 @@ class TerminalInteractionTest(BaseTest):
         pass
     
     async def teardown(self):
-        """Teardown for terminal interaction test.""" 
-        pass
+        """Teardown for terminal interaction test."""
+        try:
+            page = self.playwright_manager.page
+            await page.evaluate('document.querySelector("#termModal")?.querySelector(".btn-close")?.click()')
+        except:
+            pass

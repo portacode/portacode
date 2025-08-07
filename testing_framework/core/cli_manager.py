@@ -14,7 +14,7 @@ import logging
 class CLIManager:
     """Manages CLI connections with background threading and output redirection."""
     
-    def __init__(self, test_name: str, log_dir: str = "test_logs"):
+    def __init__(self, test_name: str, log_dir: str = "test_results"):
         self.test_name = test_name
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
