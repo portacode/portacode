@@ -204,6 +204,358 @@ class FileOperationsTest(BaseTest):
         file_opening_time = stats.end_timer("file_opening")
         stats.record_stat("file_opening_time_ms", file_opening_time)
         
+        # Test typing functionality in the ACE editor
+        stats.start_timer("typing_test")
+        
+        # Focus the ACE editor and type some unique content
+        unique_content = f"# Test file created at {datetime.now().isoformat()}\nprint('Hello from new_file1.py!')\n\n# This is a test of ACE editor functionality"
+        
+        try:
+            # Click to focus the ACE editor
+            ace_editor = page.locator('ace-editor')
+            await ace_editor.first.click()
+            await page.wait_for_timeout(500)
+            
+            # Type the unique content
+            await page.keyboard.type(unique_content)
+            await page.wait_for_timeout(1000)
+            
+            # Verify content was typed by checking if we can find some of it in the editor
+            editor_content_locator = page.locator('.ace_content')
+            content_visible = await editor_content_locator.locator('text=Hello from new_file1.py!').count() > 0
+            stats.record_stat("content_typed_successfully", content_visible)
+            assert_that.is_true(content_visible, "Typed content should be visible in ACE editor")
+            
+        except Exception as e:
+            stats.record_stat("typing_error", str(e))
+            assert_that.is_true(False, f"Failed to type content in ACE editor: {e}")
+        
+        typing_time = stats.end_timer("typing_test")
+        stats.record_stat("typing_time_ms", typing_time)
+        
+        # Test save functionality (Ctrl+S)
+        stats.start_timer("save_test")
+        
+        try:
+            # Take screenshot before saving
+            await self.playwright_manager.take_screenshot("before_save")
+            
+            # Check if the tab shows dirty state (unsaved changes indicator)
+            dirty_tab = page.locator('.editor-tab.dirty:has-text("new_file1.py")')
+            dirty_count_before = await dirty_tab.count()
+            stats.record_stat("dirty_indicator_before_save", dirty_count_before > 0)
+            assert_that.is_true(dirty_count_before > 0, "Tab should show dirty indicator before save")
+            
+            # Ensure ACE editor is properly focused before saving
+            ace_editor = page.locator('ace-editor')
+            await ace_editor.first.click()
+            await page.wait_for_timeout(1000)
+            
+            # Try to focus inside the ACE editor more specifically
+            ace_content = page.locator('.ace_content, .ace_text-input, .ace_editor')
+            ace_content_count = await ace_content.count()
+            if ace_content_count > 0:
+                await ace_content.first.click()
+                await page.wait_for_timeout(500)
+            
+            # Save the file using Ctrl+S - try multiple approaches
+            save_successful = False
+            
+            # Method 1: Try Ctrl+S on the page
+            await page.keyboard.press('Control+s')
+            await page.wait_for_timeout(1000)
+            
+            # Check if save worked
+            dirty_count_method1 = await dirty_tab.count()
+            if dirty_count_method1 == 0:
+                save_successful = True
+                stats.record_stat("save_method", "Control+s_on_page")
+            
+            # Method 2: If first method didn't work, try focusing ACE editor first
+            if not save_successful:
+                await ace_editor.first.focus()
+                await page.wait_for_timeout(500)
+                await page.keyboard.press('Control+s')
+                await page.wait_for_timeout(1000)
+                
+                dirty_count_method2 = await dirty_tab.count()
+                if dirty_count_method2 == 0:
+                    save_successful = True
+                    stats.record_stat("save_method", "Control+s_after_focus")
+            
+            # Method 3: Try using the code editor's save functionality directly (if available)
+            if not save_successful:
+                # Look for save button or menu option as fallback
+                save_button = page.locator('button[title*="save"], button:has-text("Save"), .save-btn')
+                save_button_count = await save_button.count()
+                if save_button_count > 0:
+                    await save_button.first.click()
+                    await page.wait_for_timeout(1000)
+                    
+                    dirty_count_method3 = await dirty_tab.count()
+                    if dirty_count_method3 == 0:
+                        save_successful = True
+                        stats.record_stat("save_method", "save_button")
+            
+            # Take screenshot after saving attempt
+            await self.playwright_manager.take_screenshot("after_save_attempt")
+            
+            # Verify the dirty indicator disappears after save
+            dirty_count_after = await dirty_tab.count()
+            stats.record_stat("dirty_indicator_after_save", dirty_count_after > 0)
+            stats.record_stat("save_successful", save_successful)
+            
+            if not save_successful:
+                # Take screenshot showing save failure
+                await self.playwright_manager.take_screenshot("save_failed")
+            
+            assert_that.is_true(save_successful, f"File should be saved (dirty indicator should disappear). Dirty count before: {dirty_count_before}, after: {dirty_count_after}")
+            
+            # Check if content is still visible after save
+            content_still_visible = await editor_content_locator.locator('text=Hello from new_file1.py!').count() > 0
+            stats.record_stat("content_visible_after_save", content_still_visible)
+            
+        except Exception as e:
+            stats.record_stat("save_error", str(e))
+            assert_that.is_true(False, f"Failed to save file: {e}")
+        
+        save_time = stats.end_timer("save_test")
+        stats.record_stat("save_time_ms", save_time)
+        
+        # Test file persistence: close tab and reopen file to verify content was truly saved
+        stats.start_timer("file_persistence_test")
+        
+        try:
+            # Close the current tab
+            close_tab_button = page.locator('.editor-tab:has-text("new_file1.py") .tab-close')
+            close_button_count = await close_tab_button.count()
+            
+            if close_button_count > 0:
+                await close_tab_button.first.click()
+                await page.wait_for_timeout(1000)
+                stats.record_stat("tab_closed_successfully", True)
+            else:
+                # Alternative: try clicking on the tab and using Ctrl+W
+                tab = page.locator('.editor-tab:has-text("new_file1.py")')
+                await tab.first.click()
+                await page.keyboard.press('Control+w')
+                await page.wait_for_timeout(1000)
+                stats.record_stat("tab_closed_successfully", True)
+            
+            # Verify tab is closed
+            closed_tab_count = await page.locator('.editor-tab:has-text("new_file1.py")').count()
+            assert_that.is_true(closed_tab_count == 0, "Tab should be closed after close operation")
+            
+            # Take screenshot showing no tabs open
+            await self.playwright_manager.take_screenshot("after_tab_closed")
+            
+            # Reopen the file by clicking on it in the file explorer
+            new_file_item = page.locator('.file-item:has(.file-name:text("new_file1.py"))')
+            await new_file_item.first.click()
+            await page.wait_for_timeout(3000)  # Wait for file to load
+            
+            # Verify the tab opened again
+            reopened_tab_count = await page.locator('.editor-tab:has-text("new_file1.py")').count()
+            assert_that.is_true(reopened_tab_count > 0, "Tab should reopen when clicking file in explorer")
+            
+            # Verify the saved content is still there
+            await page.wait_for_timeout(2000)  # Wait for content to load
+            persistent_content_visible = await page.locator('.ace_content').locator('text=Hello from new_file1.py!').count() > 0
+            stats.record_stat("content_persisted_after_reopen", persistent_content_visible)
+            
+            # Take screenshot showing reopened file with content
+            await self.playwright_manager.take_screenshot("after_file_reopened")
+            
+            assert_that.is_true(persistent_content_visible, "Content should persist after closing and reopening file (proves file was truly saved)")
+            
+            # Check that the reopened tab is NOT dirty (no unsaved changes)
+            reopened_dirty_tab = page.locator('.editor-tab.dirty:has-text("new_file1.py")')
+            reopened_dirty_count = await reopened_dirty_tab.count()
+            stats.record_stat("reopened_tab_is_clean", reopened_dirty_count == 0)
+            assert_that.is_true(reopened_dirty_count == 0, "Reopened tab should not have dirty indicator (file was properly saved)")
+            
+        except Exception as e:
+            stats.record_stat("file_persistence_error", str(e))
+            assert_that.is_true(False, f"Failed file persistence test: {e}")
+        
+        persistence_time = stats.end_timer("file_persistence_test")
+        stats.record_stat("file_persistence_time_ms", persistence_time)
+        
+        # Test Git staging functionality
+        stats.start_timer("git_stage_test")
+        
+        try:
+            # Right-click on the file in the explorer to open context menu
+            new_file_item = page.locator('.file-item:has(.file-name:text("new_file1.py"))')
+            await new_file_item.first.click(button='right')
+            await page.wait_for_timeout(1000)  # Wait for context menu to appear
+            
+            # Take screenshot of context menu
+            await self.playwright_manager.take_screenshot("context_menu_opened")
+            
+            # Look for "Stage" or "Add to Stage" option in context menu
+            stage_options = [
+                '[role="menuitem"]:has-text("Stage")',
+                '[role="menuitem"]:has-text("Add")', 
+                '.context-menu-item:has-text("Stage")',
+                '.context-menu-item:has-text("Add")',
+                'button:has-text("Stage")',
+                'li:has-text("Stage")',
+                'li:has-text("Add")'
+            ]
+            
+            stage_successful = False
+            stage_option_found = None
+            
+            for stage_selector in stage_options:
+                stage_option = page.locator(stage_selector)
+                stage_count = await stage_option.count()
+                
+                if stage_count > 0:
+                    await stage_option.first.click()
+                    await page.wait_for_timeout(1500)  # Wait for staging operation
+                    stage_successful = True
+                    stage_option_found = stage_selector
+                    stats.record_stat("stage_option_used", stage_selector)
+                    break
+            
+            if not stage_successful:
+                # Try keyboard shortcut as fallback (common Git shortcut)
+                await page.keyboard.press('Escape')  # Close any open menu
+                await page.wait_for_timeout(500)
+                await new_file_item.first.click()  # Select file
+                await page.keyboard.press('Control+Shift+A')  # Common Git stage shortcut
+                await page.wait_for_timeout(1000)
+                
+                # Check if file appears staged (look for git status changes)
+                staged_file = page.locator('.file-item:has(.file-name:text("new_file1.py")) .git-status-indicator')
+                staged_count = await staged_file.count()
+                if staged_count > 0:
+                    stage_successful = True
+                    stats.record_stat("stage_option_used", "keyboard_shortcut")
+            
+            stats.record_stat("stage_successful", stage_successful)
+            
+            if stage_successful:
+                # Take screenshot showing staged file
+                await self.playwright_manager.take_screenshot("after_git_stage")
+                
+                # Verify the file shows as staged (look for git status indicators)
+                git_status_indicator = page.locator('.file-item:has(.file-name:text("new_file1.py")) .git-status-indicator')
+                git_indicator_count = await git_status_indicator.count()
+                stats.record_stat("git_status_indicator_visible", git_indicator_count > 0)
+                
+                if git_indicator_count > 0:
+                    # Try to get the git status text/class
+                    git_status_text = await git_status_indicator.first.inner_text()
+                    git_status_class = await git_status_indicator.first.get_attribute('class')
+                    stats.record_stat("git_status_text", git_status_text)
+                    stats.record_stat("git_status_class", git_status_class)
+            else:
+                await self.playwright_manager.take_screenshot("stage_failed")
+                print("⚠️ Could not find stage option in context menu")
+            
+        except Exception as e:
+            stats.record_stat("git_stage_error", str(e))
+            await self.playwright_manager.take_screenshot("stage_error")
+            print(f"⚠️ Git staging failed: {e}")
+            # Don't fail the test for Git staging issues, just record the failure
+            stage_successful = False
+        
+        git_stage_time = stats.end_timer("git_stage_test")
+        stats.record_stat("git_stage_time_ms", git_stage_time)
+        
+        # Add additional editing after staging
+        stats.start_timer("post_stage_edit_test")
+        
+        try:
+            # Ensure the file tab is still active and click on editor
+            file_tab = page.locator('.editor-tab:has-text("new_file1.py")')
+            tab_count = await file_tab.count()
+            
+            if tab_count > 0:
+                await file_tab.first.click()
+                await page.wait_for_timeout(500)
+                
+                # Click in the ACE editor to focus
+                ace_editor = page.locator('ace-editor')
+                await ace_editor.first.click()
+                await page.wait_for_timeout(500)
+                
+                # Add more content after staging
+                additional_content = f"\n\n# Additional content added after git staging\n# Added at {datetime.now().strftime('%H:%M:%S')}\nprint('This was added after staging!')"
+                
+                # Position cursor at end of file
+                await page.keyboard.press('Control+End')
+                await page.wait_for_timeout(200)
+                
+                # Type additional content
+                await page.keyboard.type(additional_content)
+                await page.wait_for_timeout(1000)
+                
+                # Verify the new content is visible
+                new_content_visible = await page.locator('.ace_content').locator('text=This was added after staging!').count() > 0
+                stats.record_stat("additional_content_typed", new_content_visible)
+                
+                # Take screenshot showing additional content and dirty tab
+                await self.playwright_manager.take_screenshot("after_additional_editing")
+                
+                # Verify tab shows dirty indicator again
+                post_edit_dirty_tab = page.locator('.editor-tab.dirty:has-text("new_file1.py")')
+                post_edit_dirty_count = await post_edit_dirty_tab.count()
+                stats.record_stat("tab_dirty_after_additional_edit", post_edit_dirty_count > 0)
+                
+                assert_that.is_true(new_content_visible, "Additional content should be visible after typing")
+                assert_that.is_true(post_edit_dirty_count > 0, "Tab should show dirty indicator after additional edits")
+                
+                # Save the additional changes
+                stats.start_timer("second_save_test")
+                
+                # Use the same multi-method save approach
+                second_save_successful = False
+                
+                # Method 1: Try Ctrl+S
+                await page.keyboard.press('Control+s')
+                await page.wait_for_timeout(1000)
+                
+                # Check if save worked
+                second_dirty_count_after = await post_edit_dirty_tab.count()
+                if second_dirty_count_after == 0:
+                    second_save_successful = True
+                    stats.record_stat("second_save_method", "Control+s")
+                
+                # Method 2: Try with explicit focus if needed
+                if not second_save_successful:
+                    await ace_editor.first.focus()
+                    await page.wait_for_timeout(500)
+                    await page.keyboard.press('Control+s')
+                    await page.wait_for_timeout(1000)
+                    
+                    second_dirty_count_after2 = await post_edit_dirty_tab.count()
+                    if second_dirty_count_after2 == 0:
+                        second_save_successful = True
+                        stats.record_stat("second_save_method", "Control+s_with_focus")
+                
+                stats.record_stat("second_save_successful", second_save_successful)
+                
+                # Take screenshot showing final saved state
+                await self.playwright_manager.take_screenshot("after_second_save")
+                
+                assert_that.is_true(second_save_successful, "Second save operation should succeed")
+                
+                second_save_time = stats.end_timer("second_save_test")
+                stats.record_stat("second_save_time_ms", second_save_time)
+                
+            else:
+                stats.record_stat("post_stage_edit_error", "No file tab found")
+                
+        except Exception as e:
+            stats.record_stat("post_stage_edit_error", str(e))
+            assert_that.is_true(False, f"Post-stage editing failed: {e}")
+        
+        post_stage_edit_time = stats.end_timer("post_stage_edit_test")
+        stats.record_stat("post_stage_edit_time_ms", post_stage_edit_time)
+        
         # Take a screenshot using the playwright manager's proper method
         stats.start_timer("screenshot")
         screenshot_path = await self.playwright_manager.take_screenshot("ace_editor_with_file")
@@ -225,8 +577,77 @@ class FileOperationsTest(BaseTest):
     
     async def setup(self):
         """Setup for file operations test."""
-        pass
+        # Register this test with the parent navigate_testing_folder_test
+        # In a real system, this would be handled by the test framework
+        # For now, we'll try to find the parent test instance
+        try:
+            from test_modules.test_navigate_testing_folder import NavigateTestingFolderTest
+            # This is a simple approach - in practice, the test runner would handle this
+            # print("📋 Registering file_operations_test as child of navigate_testing_folder_test")
+        except:
+            pass
     
     async def teardown(self):
-        """Teardown for file operations test."""
-        pass
+        """Teardown for file operations test - cleanup project since this is the final test."""
+        # print("📢 file_operations_test completed - performing final cleanup")
+        
+        # Clean up UI state first
+        try:
+            page = self.playwright_manager.page
+            
+            # Close any open tabs to clean up UI state
+            close_tab_button = page.locator('.editor-tab .tab-close')
+            close_button_count = await close_tab_button.count()
+            
+            if close_button_count > 0:
+                await close_tab_button.first.click()
+                await page.wait_for_timeout(500)
+                # print("🗂️ Closed editor tab for clean UI state")
+                
+        except Exception as e:
+            print(f"⚠️ Minor UI cleanup warning: {e}")
+        
+        # Perform final project cleanup since this is the last test in the dependency chain
+        await self._cleanup_testing_folder()
+    
+    async def _cleanup_testing_folder(self):
+        """Clean up the testing folder as the final step."""
+        import os
+        import shutil
+        
+        TESTING_FOLDER_PATH = "/home/menas/testing_folder"
+        print(f"🧹 Final cleanup of test project at {TESTING_FOLDER_PATH}")
+        
+        try:
+            if os.path.exists(TESTING_FOLDER_PATH):
+                # Change to the testing folder
+                original_cwd = os.getcwd()
+                os.chdir(TESTING_FOLDER_PATH)
+                
+                try:
+                    # Clean up all content but preserve the folder itself
+                    # print("🗑️ Removing all files and folders...")
+                    
+                    # Get all items in the directory
+                    items = os.listdir('.')
+                    
+                    for item in items:
+                        item_path = os.path.join('.', item)
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+                            # print(f"   🗑️ Removed file: {item}")
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                            # print(f"   🗑️ Removed directory: {item}")
+                    
+                    print("✅ Final test project cleanup completed")
+                    
+                finally:
+                    # Always return to original directory
+                    os.chdir(original_cwd)
+            else:
+                print(f"ℹ️ Test project folder {TESTING_FOLDER_PATH} doesn't exist - nothing to clean up")
+                
+        except Exception as e:
+            print(f"⚠️ Final cleanup warning: {e}")
+            # Don't fail the test just because cleanup had issues
