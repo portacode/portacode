@@ -122,6 +122,40 @@ class FileOperationsTest(BaseTest):
         # Wait for the file to open in the editor
         await page.wait_for_timeout(3000)
         
+        # First, verify the tab opened properly 
+        try:
+            file_tab = page.locator('[role="tab"]:has-text("new_file1.py"), .tab:has-text("new_file1.py"), .editor-tab:has-text("new_file1.py")')
+            await file_tab.first.wait_for(timeout=5000)
+            tab_count = await file_tab.count()
+            stats.record_stat("file_tab_found", tab_count > 0)
+            assert_that.is_true(tab_count > 0, "File tab should be visible")
+        except:
+            stats.record_stat("file_tab_found", False)
+            assert_that.is_true(False, "File tab should be visible after clicking file")
+        
+        # Verify we're not stuck in loading state
+        loading_placeholder = page.locator('.loading-placeholder:has-text("Loading new_file1.py")')
+        loading_error_placeholder = page.locator('.error-placeholder')
+        
+        # Wait for loading to finish (max 15 seconds)
+        loading_timeout = False
+        try:
+            # Wait for loading placeholder to disappear or timeout
+            await loading_placeholder.wait_for(state='hidden', timeout=15000)
+        except:
+            loading_count = await loading_placeholder.count()
+            error_count = await loading_error_placeholder.count()
+            if loading_count > 0:
+                loading_timeout = True
+                stats.record_stat("loading_timeout", True)
+                # Take screenshot of stuck loading state
+                await self.playwright_manager.take_screenshot("stuck_loading_state")
+            elif error_count > 0:
+                error_text = await loading_error_placeholder.inner_text()
+                assert_that.is_true(False, f"Error loading file: {error_text}")
+        
+        assert_that.is_true(not loading_timeout, "File should finish loading within 15 seconds (not stuck in loading state)")
+        
         # Wait for the ACE editor to load using the correct LitElement selectors
         editor_selectors = [
             'ace-editor',                    # The custom element
@@ -134,7 +168,7 @@ class FileOperationsTest(BaseTest):
         for selector in editor_selectors:
             try:
                 editor_element = page.locator(selector)
-                await editor_element.first.wait_for(timeout=3000)
+                await editor_element.first.wait_for(timeout=5000)
                 editor_count = await editor_element.count()
                 if editor_count > 0:
                     stats.record_stat("editor_selector_used", selector)
@@ -143,20 +177,29 @@ class FileOperationsTest(BaseTest):
             except:
                 continue
         
-        assert_that.is_true(editor_found, "Code editor should be visible after clicking file")
+        assert_that.is_true(editor_found, "ACE editor should be visible and loaded after file opens")
         
-        # Also verify that we can see a tab or indication that the file is open
-        try:
-            # Look for editor tabs or active file indicators
-            file_tab = page.locator('[role="tab"]:has-text("new_file1.py"), .tab:has-text("new_file1.py"), .editor-tab:has-text("new_file1.py")')
-            await file_tab.first.wait_for(timeout=5000)
-            tab_count = await file_tab.count()
-            stats.record_stat("file_tab_found", tab_count > 0)
-        except:
-            stats.record_stat("file_tab_found", False)
+        # Verify the ACE editor is interactive (not just visible but actually functional)
+        if editor_found:
+            try:
+                # Try to focus the ACE editor and verify it's interactive
+                ace_editor = page.locator('ace-editor')
+                await ace_editor.first.click()
+                
+                # Check if ACE editor cursor is visible (indicates it's loaded and ready)
+                ace_cursor = page.locator('.ace_cursor')
+                await ace_cursor.first.wait_for(timeout=3000)
+                cursor_count = await ace_cursor.count()
+                stats.record_stat("ace_cursor_found", cursor_count > 0)
+                assert_that.is_true(cursor_count > 0, "ACE editor cursor should be visible (indicating editor is fully loaded and interactive)")
+                
+            except Exception as e:
+                stats.record_stat("ace_cursor_found", False)
+                stats.record_stat("ace_cursor_error", str(e))
+                assert_that.is_true(False, f"ACE editor should be interactive but failed: {e}")
         
-        # Wait a bit more for the editor to fully load
-        await page.wait_for_timeout(2000)
+        # Wait a bit more for the editor to fully stabilize
+        await page.wait_for_timeout(1000)
         
         file_opening_time = stats.end_timer("file_opening")
         stats.record_stat("file_opening_time_ms", file_opening_time)
