@@ -213,11 +213,7 @@ class TestRunner:
             
             error_msg = '\n'.join(error_details)
             
-            # Auto-open trace in browser for failed tests
-            try:
-                await self._open_trace_on_failure(test.name, playwright_manager)
-            except Exception as trace_error:
-                self.logger.warning(f"Could not open trace for {test.name}: {trace_error}")
+            # Don't open trace here - let hierarchical runner handle it at the end
             
             return TestResult(
                 test.name, False, error_msg,

@@ -9,7 +9,9 @@
       "Bash(touch:*)",
       "Bash(npm run lint)",
       "Bash(node:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(./test.sh)",
+      "Bash(./test.sh:*)"
     ],
     "deny": []
   }

@@ -13,7 +13,6 @@ class TerminalStartTest(BaseTest):
             description="Verify new terminal can be started and measure timing",
             tags=["terminal", "device", "timing"],
             depends_on=["device_online_test"],
-            requires_login=True,
             start_url="/dashboard/"
         )
     

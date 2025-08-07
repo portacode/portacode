@@ -12,7 +12,6 @@ class LoginFlowTest(BaseTest):
             category=TestCategory.SMOKE,
             description="Verify that users can successfully log in to the application",
             tags=["login", "authentication", "smoke"],
-            requires_login=False  # This test establishes login
         )
     
     async def run(self) -> TestResult:

@@ -29,8 +29,6 @@ class YourCustomTest(BaseTest):
             description="What this test validates",
             tags=["tag1", "tag2", "tag3"],
             depends_on=["login_flow_test"],  # Run after these tests
-            requires_login=True,            # Needs login
-            requires_ide=True,              # Needs IDE launched
             start_url="/dashboard/"         # Auto-navigate to this URL before test
         )
     
@@ -134,9 +132,7 @@ class MyTest(BaseTest):
     def __init__(self):
         super().__init__(
             # ... other params ...
-            depends_on=["login_flow_test", "ide_launch_test"],  # Explicit dependencies
-            requires_login=True,     # Must run after any login test
-            requires_ide=True        # Must run after any IDE launch test
+            depends_on=["login_flow_test", "ide_launch_test"]  # Explicit dependencies
         )
     
     async def run(self) -> TestResult:
@@ -152,7 +148,6 @@ class MyTest(BaseTest):
 The framework automatically:
 - **Sorts tests** in dependency order (topological sort)
 - **Skips tests** whose dependencies failed  
-- **Tracks implicit requirements** (login, IDE)
 - **Prevents circular dependencies**
 
 ## 🧭 Auto-Navigation with start_url

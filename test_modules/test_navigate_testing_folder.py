@@ -15,7 +15,6 @@ class NavigateTestingFolderTest(BaseTest):
             description="Navigate to 'testing_folder' project via Editor button and wait for file explorer with git details",
             tags=["navigation", "editor", "project", "testing_folder"],
             depends_on=["device_online_test"],
-            requires_login=True,
             start_url="/dashboard/"
         )
     

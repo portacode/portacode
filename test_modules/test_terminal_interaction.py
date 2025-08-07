@@ -13,7 +13,6 @@ class TerminalInteractionTest(BaseTest):
             description="Test terminal interaction - click terminal chip, run ls command, measure timing",
             tags=["terminal", "interaction", "command", "timing"],
             depends_on=["terminal_start_test"],
-            requires_login=True,
             start_url="/dashboard/"
         )
     

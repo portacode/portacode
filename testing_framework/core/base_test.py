@@ -233,15 +233,12 @@ class BaseTest(ABC):
     
     def __init__(self, name: str, category: TestCategory = TestCategory.CUSTOM, 
                  description: str = "", tags: Optional[List[str]] = None,
-                 depends_on: Optional[List[str]] = None, requires_login: bool = False,
-                 requires_ide: bool = False, start_url: Optional[str] = None):
+                 depends_on: Optional[List[str]] = None, start_url: Optional[str] = None):
         self.name = name
         self.category = category
         self.description = description
         self.tags = tags or []
         self.depends_on = depends_on or []
-        self.requires_login = requires_login
-        self.requires_ide = requires_ide
         self.start_url = start_url
         self.logger = logging.getLogger(f"test.{self.name}")
         self.cli_manager = None

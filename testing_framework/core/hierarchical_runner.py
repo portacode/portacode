@@ -6,6 +6,7 @@ from typing import List, Dict, Set, Optional, Any
 import logging
 import traceback
 import sys
+from pathlib import Path
 
 from .base_test import BaseTest, TestResult
 from .runner import TestRunner
@@ -114,27 +115,17 @@ class HierarchicalTestRunner(TestRunner):
         
         return await self.run_tests(tests_with_deps, progress_callback)
     
-    def check_login_requirement(self, test: BaseTest, completed_tests: Set[str]) -> bool:
-        """Check if login requirement is satisfied."""
-        if not test.requires_login:
-            return True
+    async def run_all_tests(self, progress_callback=None) -> Dict[str, Any]:
+        """Run all discovered tests with full dependency resolution."""
+        # Get all available tests
+        all_tests = self.discovery.discover_tests(str(self.base_path))
+        tests_list = list(all_tests.values())
         
-        # Look for any completed test that handles login
-        for completed_name in completed_tests:
-            if "login" in completed_name.lower() or "auth" in completed_name.lower():
-                return True
-        return False
-    
-    def check_ide_requirement(self, test: BaseTest, completed_tests: Set[str]) -> bool:
-        """Check if IDE requirement is satisfied."""  
-        if not test.requires_ide:
-            return True
-            
-        # Look for any completed test that launches IDE
-        for completed_name in completed_tests:
-            if "ide" in completed_name.lower() or "launch" in completed_name.lower():
-                return True
-        return False
+        # Use full dependency resolution for all tests
+        # This ensures if test A depends on B, B will be included even if not explicitly requested
+        tests_with_deps = self.resolve_dependencies(tests_list)
+        
+        return await self.run_tests(tests_with_deps, progress_callback)
     
     async def run_tests(self, tests: List[BaseTest], progress_callback=None) -> Dict[str, Any]:
         """Run tests with dependency resolution."""
@@ -173,12 +164,6 @@ class HierarchicalTestRunner(TestRunner):
                     skip_reason = f"Dependency '{dep_name}' not completed"
                     break
             
-            # Check implicit requirements
-            if not skip_reason and not self.check_login_requirement(test, completed_tests):
-                skip_reason = "Login requirement not satisfied"
-            
-            if not skip_reason and not self.check_ide_requirement(test, completed_tests):
-                skip_reason = "IDE requirement not satisfied"
             
             if skip_reason:
                 # Skip this test
@@ -212,6 +197,16 @@ class HierarchicalTestRunner(TestRunner):
             else:
                 failed_tests.add(test.name)
                 self.logger.error(f"✗ Test '{test.name}' failed: {result.message}")
+                # Ensure trace is saved immediately for failed tests
+                if hasattr(self, '_shared_playwright_manager'):
+                    try:
+                        trace_saved = await self._shared_playwright_manager.ensure_trace_saved()
+                        if trace_saved:
+                            self.logger.info(f"Trace saved for failed test: {test.name}")
+                        else:
+                            self.logger.warning(f"Failed to save trace for failed test: {test.name}")
+                    except Exception as e:
+                        self.logger.error(f"Error saving trace for failed test {test.name}: {e}")
             
             if progress_callback:
                 progress_callback('complete', test, i + 1, len(ordered_tests), result)
@@ -346,27 +341,45 @@ class HierarchicalTestRunner(TestRunner):
     async def _finalize_test_run(self) -> Dict[str, Any]:
         """Finalize test run and generate reports."""
         import time
+        from pathlib import Path
         
-        # Cleanup shared playwright manager
+        # Get recordings directory path and cleanup playwright
+        recordings_dir = None
         if hasattr(self, '_shared_playwright_manager'):
             try:
+                # Save the recordings directory path before cleanup
+                recordings_dir = Path(self._shared_playwright_manager.recordings_dir)
+                
+                # Now cleanup which will save the trace
                 await self._shared_playwright_manager.cleanup()
             except Exception as e:
                 self.logger.error(f"Error cleaning up shared playwright manager: {e}")
         
-        # Open traces for failed tests after cleanup is complete
-        failed_tests = [result for result in self.results if not result.success and 'Skipped:' not in result.message]
-        if failed_tests and hasattr(self, '_shared_playwright_manager'):
-            self.logger.info(f"Opening traces for {len(failed_tests)} failed tests...")
-            for result in failed_tests:
-                try:
-                    self.logger.info(f"Attempting to open trace for failed test: {result.test_name}")
-                    await self._open_trace_on_failure(result.test_name, self._shared_playwright_manager)
-                    # Only open the first failed test's trace to avoid opening multiple browsers
-                    print(f"\n🔍 Trace viewer opened for failed test: {result.test_name}")
-                    break
-                except Exception as trace_error:
-                    self.logger.warning(f"Could not open trace for {result.test_name}: {trace_error}")
+        # Find trace path after cleanup
+        trace_path = None
+        if recordings_dir and recordings_dir.exists():
+            # Look for trace.zip in the recordings directory or its subdirectories
+            for trace_file in recordings_dir.rglob("trace.zip"):
+                trace_path = trace_file
+                break
+        
+        # Open trace viewer if any tests failed (including skipped tests for debugging)
+        failed_tests = [result for result in self.results if not result.success]
+        
+        if failed_tests and trace_path and trace_path.exists():
+            try:
+                self.logger.info(f"Opening trace viewer for {len(failed_tests)} failed tests...")
+                import subprocess
+                subprocess.Popen([
+                    'npx', 'playwright', 'show-trace', 
+                    '--host', '0.0.0.0', 
+                    '--port', '9323',
+                    str(trace_path)
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"\n🔍 Trace viewer opened at: http://0.0.0.0:9323")
+                print(f"   Trace file: {trace_path}")
+            except Exception as trace_error:
+                self.logger.warning(f"Could not open trace viewer: {trace_error}")
         
         # Cleanup logging
         try:
@@ -382,3 +395,111 @@ class HierarchicalTestRunner(TestRunner):
         
         self.logger.info(f"Hierarchical test run completed. Results saved to: {self.run_dir}")
         return summary
+    
+    async def _wait_for_trace_file(self, recording_dir: Path, timeout: float = 30.0) -> Optional[Path]:
+        """Wait for trace.zip file to be available with proper timeout."""
+        import time
+        
+        start_time = time.time()
+        check_interval = 0.1  # Check every 100ms for responsiveness
+        last_log_time = start_time
+        
+        while time.time() - start_time < timeout:
+            # First check direct path
+            direct_trace = recording_dir / "trace.zip"
+            if direct_trace.exists() and direct_trace.stat().st_size > 0:
+                self.logger.info(f"Found trace file at direct path: {direct_trace}")
+                return direct_trace
+                
+            # Look for trace.zip in subdirectories (for shared sessions)
+            for subdir in recording_dir.glob("*/"):
+                potential_trace = subdir / "trace.zip"
+                if potential_trace.exists() and potential_trace.stat().st_size > 0:
+                    self.logger.info(f"Found trace file in subdirectory: {potential_trace}")
+                    return potential_trace
+            
+            # Log progress every 5 seconds to avoid spam
+            if time.time() - last_log_time >= 5.0:
+                elapsed = time.time() - start_time
+                self.logger.info(f"Still waiting for trace file... ({elapsed:.1f}s elapsed)")
+                last_log_time = time.time()
+                
+            await asyncio.sleep(check_interval)
+        
+        return None
+    
+    async def _open_trace_on_failure(self, test_name: str, playwright_manager) -> None:
+        """Open Playwright trace in browser when test fails."""
+        try:
+            # Get the trace file path from playwright manager
+            recording_dir = Path(playwright_manager.recordings_dir)
+            self.logger.info(f"Looking for trace in recording directory: {recording_dir}")
+            
+            # Wait for trace file to be available with proper timeout
+            trace_file = await self._wait_for_trace_file(recording_dir, timeout=30.0)
+            
+            if trace_file and trace_file.exists():
+                # Verify the file is not empty and not currently being written
+                file_size = trace_file.stat().st_size
+                if file_size == 0:
+                    self.logger.warning(f"Trace file {trace_file} exists but is empty")
+                    return
+                
+                # Wait a moment to ensure file writing is complete
+                await asyncio.sleep(0.5)
+                
+                # Open trace viewer in browser
+                self.logger.info(f"Opening trace viewer for failed test: {test_name}")
+                self.logger.info(f"Trace file size: {file_size} bytes")
+                
+                # Use Playwright's trace viewer
+                import subprocess
+                
+                # Try to open with playwright show-trace command with host/port options
+                try:
+                    # Run playwright show-trace with host and port for remote access
+                    subprocess.Popen([
+                        'npx', 'playwright', 'show-trace', 
+                        '--host', '0.0.0.0', 
+                        '--port', '9323',
+                        str(trace_file)
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.logger.info(f"Trace viewer opened for {test_name} at http://0.0.0.0:9323")
+                    print(f"\n🔍 Trace viewer opened at: http://0.0.0.0:9323")
+                    print(f"   Trace file: {trace_file} ({file_size} bytes)")
+                except (FileNotFoundError, subprocess.SubprocessError) as e:
+                    self.logger.warning(f"Failed to open trace viewer with network access: {e}")
+                    # Fallback: try without host/port options
+                    try:
+                        subprocess.Popen([
+                            'npx', 'playwright', 'show-trace', str(trace_file)
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self.logger.info(f"Trace viewer opened for {test_name} (local)")
+                        print(f"\n🔍 Trace viewer opened locally")
+                        print(f"   Trace file: {trace_file} ({file_size} bytes)")
+                    except (FileNotFoundError, subprocess.SubprocessError):
+                        # Final fallback: open trace directory in file manager
+                        self.logger.warning("Playwright trace viewer not available, opening trace directory")
+                        import os
+                        if os.name == 'nt':  # Windows
+                            os.startfile(str(recording_dir))
+                        elif os.name == 'posix':  # Linux/Mac
+                            subprocess.run(['xdg-open', str(recording_dir)], check=False)
+            else:
+                # Debug: show what we're looking for
+                self.logger.error(f"No trace file found for {test_name} after 30 second timeout.")
+                self.logger.error(f"Searched in recording directory: {recording_dir}")
+                if recording_dir.exists():
+                    self.logger.error(f"Directory contents:")
+                    for item in recording_dir.rglob("*"):
+                        if item.is_file():
+                            self.logger.error(f"  - {item} ({item.stat().st_size} bytes)")
+                        else:
+                            self.logger.error(f"  - {item}/ (directory)")
+                else:
+                    self.logger.error(f"Recording directory does not exist: {recording_dir}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to open trace for {test_name}: {e}")
+            import traceback
+            self.logger.error(f"Full traceback: {traceback.format_exc()}")

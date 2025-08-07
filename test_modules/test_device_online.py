@@ -13,7 +13,6 @@ class DeviceOnlineTest(BaseTest):
             description="Verify device shows as online in dashboard after login",
             tags=["device", "online", "dashboard"],
             depends_on=["login_flow_test"],
-            requires_login=True,
             start_url="/dashboard/"
         )
     
