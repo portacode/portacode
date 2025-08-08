@@ -175,6 +175,13 @@ class GitManager:
         except (InvalidGitRepositoryError, Exception) as e:
             logger.debug("Not a Git repository or Git error: %s", e)
     
+    def reinitialize(self):
+        """Reinitialize git repo detection (useful when .git directory is created after initialization)."""
+        logger.info("Reinitializing git repo detection for: %s", self.project_path)
+        self.repo = None
+        self.is_git_repo = False
+        self._initialize_repo()
+    
     def get_branch_name(self) -> Optional[str]:
         """Get current Git branch name."""
         if not self.is_git_repo or not self.repo:
@@ -2115,6 +2122,21 @@ class ProjectStateManager:
         project_state = self.projects[client_session_id]
         git_manager = self.git_managers[client_session_id]
         logger.info("🔍 [TRACE] Found project state and git manager for session: %s", client_session_id)
+        
+        # Check if git repo was just created - reinitialize git manager if needed
+        git_dir_path = os.path.join(project_state.project_folder_path, '.git')
+        if not git_manager.is_git_repo and os.path.exists(git_dir_path):
+            logger.info("🔍 [TRACE] Git repo detected, reinitializing git manager for session: %s", client_session_id)
+            # Reinitialize git manager
+            git_manager.reinitialize()
+            
+            # Update project state git repo flag
+            project_state.is_git_repo = git_manager.is_git_repo
+            
+            # Start watching .git directory for git status changes
+            if git_manager.is_git_repo:
+                logger.info("🔍 [TRACE] Starting to watch .git directory: %s", git_dir_path)
+                self.file_watcher.start_watching_git_directory(git_dir_path)
         
         # Update Git status
         if git_manager:
