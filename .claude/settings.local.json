@@ -12,7 +12,9 @@
       "Bash(grep:*)",
       "Bash(./test.sh)",
       "Bash(./test.sh:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(./connect.sh)",
+      "Bash(git -C /home/menas/testing_folder status --porcelain)"
     ],
     "deny": []
   }

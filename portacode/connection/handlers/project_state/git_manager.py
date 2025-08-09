@@ -187,7 +187,24 @@ class GitManager:
             else:
                 # Check if untracked - direct comparison works cross-platform
                 if rel_path in self.repo.untracked_files:
-                    return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": False}
+                    return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
+                
+                # If file is staged, we need to determine its original status
+                if is_staged:
+                    # Check if this was originally an untracked file that got staged
+                    # We need to check if the file existed in HEAD, not just in the index
+                    try:
+                        # Try to see if file existed in HEAD (was tracked before staging)
+                        self.repo.git.show(f"HEAD:{rel_path}")
+                        # If we get here, file existed in HEAD, so it was modified and staged
+                        is_tracked = True
+                        original_status = "modified"
+                    except Exception:
+                        # File didn't exist in HEAD, so it was untracked when staged (new file)
+                        is_tracked = False
+                        original_status = "added"
+                    
+                    return {"is_tracked": is_tracked, "status": original_status, "is_ignored": False, "is_staged": is_staged}
                 
                 # Check if tracked and dirty - GitPython handles path normalization
                 if self.repo.is_dirty(path=rel_path):
@@ -214,15 +231,16 @@ class GitManager:
             if not status:
                 return {"clean": 0}
             
-            summary = {"modified": 0, "added": 0, "deleted": 0, "untracked": 0}
+            summary = {"modified": 0, "deleted": 0, "untracked": 0}
             
             for line in status.split('\n'):
                 if len(line) >= 2:
                     index_status = line[0]
                     worktree_status = line[1]
                     
+                    # Count A (added) as untracked since they represent originally untracked files
                     if index_status == 'A' or worktree_status == 'A':
-                        summary["added"] += 1
+                        summary["untracked"] += 1
                     elif index_status == 'M' or worktree_status == 'M':
                         summary["modified"] += 1
                     elif index_status == 'D' or worktree_status == 'D':
@@ -851,6 +869,7 @@ class GitManager:
             logger.debug("Error getting HEAD commit hash: %s", e)
             return None
     
+    
     def get_detailed_status(self) -> GitDetailedStatus:
         """Get detailed Git status with file hashes using GitPython APIs."""
         if not self.is_git_repo or not self.repo:
@@ -862,19 +881,91 @@ class GitManager:
             
             # Get all changed files using GitPython's index diff
             # Get staged changes (index vs HEAD)
-            staged_files = self.repo.index.diff("HEAD")
+            # Handle case where repository has no commits (no HEAD)
+            try:
+                staged_files = self.repo.index.diff("HEAD")
+            except Exception as e:
+                logger.debug("🔍 [TRACE] No HEAD found (likely no commits), using staged-only detection: %s", e)
+                # When no HEAD exists, we need to get staged files differently
+                staged_file_names = []
+                try:
+                    staged_output = self.repo.git.diff('--cached', '--name-only')
+                    staged_file_names = staged_output.splitlines() if staged_output.strip() else []
+                except Exception:
+                    staged_file_names = []
+                logger.debug("🔍 [TRACE] Found %d staged files in no-HEAD repo: %s", len(staged_file_names), staged_file_names)
+                
+                # Create staged file changes manually for no-HEAD repos
+                for file_repo_path in staged_file_names:
+                    file_abs_path = os.path.join(self.project_path, file_repo_path)
+                    file_name = os.path.basename(file_repo_path)
+                    content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
+                    
+                    # For staged files in no-HEAD repo, they are all "added" (new files)
+                    diff_details = None
+                    if content_hash and os.path.exists(file_abs_path):
+                        try:
+                            with open(file_abs_path, 'r', encoding='utf-8') as f:
+                                working_content = f.read()
+                            # Compare empty content vs staged content (new file)
+                            diff_details = self._compute_diff_details("", working_content)
+                        except (OSError, UnicodeDecodeError):
+                            diff_details = None
+                    
+                    change = GitFileChange(
+                        file_repo_path=file_repo_path,
+                        file_name=file_name,
+                        file_abs_path=file_abs_path,
+                        change_type='added',
+                        content_hash=content_hash,
+                        is_staged=True,
+                        diff_details=diff_details
+                    )
+                    logger.debug("🔍 [TRACE] Created staged change for no-HEAD repo: %s (added)", file_name)
+                    detailed_status.staged_changes.append(change)
+                
+                # Skip the normal staged files loop since we handled it above
+                staged_files = []
+            # Get git status --porcelain for accurate change types (GitPython diff can be buggy)
+            try:
+                porcelain_status = self.repo.git.status(porcelain=True).strip()
+                porcelain_map = {}
+                if porcelain_status:
+                    for line in porcelain_status.split('\n'):
+                        if len(line) >= 3:
+                            index_status = line[0]
+                            file_path = line[3:]
+                            porcelain_map[file_path] = index_status
+            except Exception:
+                porcelain_map = {}
+            
             for diff_item in staged_files:
                 file_repo_path = diff_item.a_path or diff_item.b_path
                 file_abs_path = os.path.join(self.project_path, file_repo_path)
                 file_name = os.path.basename(file_repo_path)
                 
-                # Determine change type - stick to git's native types
-                if diff_item.deleted_file:
+                # Determine change type - use porcelain status for accuracy, fall back to GitPython
+                porcelain_status = porcelain_map.get(file_repo_path, '')
+                if porcelain_status == 'A':
+                    change_type = 'untracked'
+                elif porcelain_status == 'M':
+                    change_type = 'modified'
+                elif porcelain_status == 'D':
                     change_type = 'deleted'
+                else:
+                    # Fall back to GitPython detection
+                    if diff_item.deleted_file:
+                        change_type = 'deleted'
+                    elif diff_item.new_file:
+                        change_type = 'untracked'
+                    else:
+                        change_type = 'modified'
+                
+                # Set content hash and diff details based on change type
+                if change_type == 'deleted':
                     content_hash = None
                     diff_details = None  # No diff for deleted files
-                elif diff_item.new_file:
-                    change_type = 'added'
+                elif change_type == 'untracked':
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # For new files, compare empty content vs current staged content
                     if content_hash:
@@ -882,9 +973,7 @@ class GitManager:
                         diff_details = self._compute_diff_details("", staged_content)
                     else:
                         diff_details = None
-                else:
-                    # For modified files (including renames that git detected)
-                    change_type = 'modified'
+                else:  # modified
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # Compare HEAD content vs staged content
                     head_content = self.get_file_content_at_commit(file_abs_path) or ""
@@ -904,7 +993,11 @@ class GitManager:
                 detailed_status.staged_changes.append(change)
             
             # Get unstaged changes (working tree vs index)
-            unstaged_files = self.repo.index.diff(None)
+            try:
+                unstaged_files = self.repo.index.diff(None)
+            except Exception as e:
+                logger.debug("🔍 [TRACE] Error getting unstaged files: %s", e)
+                unstaged_files = []
             for diff_item in unstaged_files:
                 file_repo_path = diff_item.a_path or diff_item.b_path
                 file_abs_path = os.path.join(self.project_path, file_repo_path)
@@ -956,7 +1049,12 @@ class GitManager:
                 detailed_status.unstaged_changes.append(change)
             
             # Get untracked files
-            untracked_files = self.repo.untracked_files
+            try:
+                untracked_files = self.repo.untracked_files
+                logger.debug("🔍 [TRACE] Processing %d untracked files: %s", len(untracked_files), untracked_files)
+            except Exception as e:
+                logger.debug("🔍 [TRACE] Error getting untracked files: %s", e)
+                untracked_files = []
             for file_repo_path in untracked_files:
                 file_abs_path = os.path.join(self.project_path, file_repo_path)
                 file_name = os.path.basename(file_repo_path)
@@ -981,9 +1079,13 @@ class GitManager:
                     is_staged=False,
                     diff_details=diff_details
                 )
-                logger.debug("Created untracked change for: %s", file_name)
+                logger.debug("🔍 [TRACE] Created untracked change for: %s", file_name)
                 detailed_status.untracked_files.append(change)
             
+            logger.debug("🔍 [TRACE] Returning detailed_status with %d staged, %d unstaged, %d untracked", 
+                        len(detailed_status.staged_changes), 
+                        len(detailed_status.unstaged_changes), 
+                        len(detailed_status.untracked_files))
             return detailed_status
             
         except Exception as e:

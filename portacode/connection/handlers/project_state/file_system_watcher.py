@@ -37,17 +37,17 @@ class FileSystemWatcher:
         # Store reference to the event loop for thread-safe async task creation
         try:
             self.event_loop = asyncio.get_running_loop()
-            logger.info("🔍 [TRACE] ✅ Captured event loop reference for file system watcher: %s", self.event_loop)
+            logger.debug("🔍 [TRACE] ✅ Captured event loop reference for file system watcher: %s", self.event_loop)
         except RuntimeError:
             self.event_loop = None
-            logger.error("🔍 [TRACE] ❌ No running event loop found - file system events may not work correctly")
+            logger.debug("🔍 [TRACE] ❌ No running event loop found - file system events may not work correctly")
         
-        logger.info("🔍 [TRACE] WATCHDOG_AVAILABLE: %s", WATCHDOG_AVAILABLE)
+        logger.debug("🔍 [TRACE] WATCHDOG_AVAILABLE: %s", WATCHDOG_AVAILABLE)
         if WATCHDOG_AVAILABLE:
-            logger.info("🔍 [TRACE] Initializing file system watcher...")
+            logger.debug("🔍 [TRACE] Initializing file system watcher...")
             self._initialize_watcher()
         else:
-            logger.error("🔍 [TRACE] ❌ Watchdog not available - file monitoring disabled")
+            logger.debug("🔍 [TRACE] ❌ Watchdog not available - file monitoring disabled")
     
     def _initialize_watcher(self):
         """Initialize file system watcher."""
@@ -62,51 +62,53 @@ class FileSystemWatcher:
                 super().__init__()
             
             def on_any_event(self, event):
-                logger.info("🔍 [TRACE] FileSystemWatcher detected event: %s on path: %s", event.event_type, event.src_path)
+                logger.debug("🔍 [TRACE] FileSystemWatcher detected event: %s on path: %s", event.event_type, event.src_path)
                 
                 # Skip debug files to avoid feedback loops
                 if event.src_path.endswith('project_state_debug.json'):
-                    logger.info("🔍 [TRACE] Skipping debug file: %s", event.src_path)
+                    logger.debug("🔍 [TRACE] Skipping debug file: %s", event.src_path)
                     return
                 
                 # Only process events that represent actual content changes
                 # Skip opened/closed events that don't indicate file modifications
                 if event.event_type in ('opened', 'closed'):
-                    logger.info("🔍 [TRACE] Skipping opened/closed event: %s", event.event_type)
+                    logger.debug("🔍 [TRACE] Skipping opened/closed event: %s", event.event_type)
                     return
                 
                 # Handle .git folder events separately for git status monitoring
                 path_parts = Path(event.src_path).parts
                 if '.git' in path_parts:
-                    logger.info("🔍 [TRACE] Processing .git folder event: %s", event.src_path)
+                    logger.debug("🔍 [TRACE] Processing .git folder event: %s", event.src_path)
                     # Get the relative path within .git directory
                     try:
                         git_index = path_parts.index('.git')
                         git_relative_path = '/'.join(path_parts[git_index + 1:])
                         git_file = Path(event.src_path).name
                         
-                        logger.info("🔍 [TRACE] Git file details - relative_path: %s, file: %s", git_relative_path, git_file)
+                        logger.debug("🔍 [TRACE] Git file details - relative_path: %s, file: %s", git_relative_path, git_file)
                         
                         # Monitor git files that indicate repository state changes
                         should_monitor_git_file = (
                             git_file == 'index' or  # Staging area changes
+                            git_file == 'index.lock' or  # Staging operations in progress
                             git_file == 'HEAD' or   # Branch switches
                             git_relative_path.startswith('refs/heads/') or  # Branch updates
                             git_relative_path.startswith('refs/remotes/') or  # Remote tracking branches
                             git_relative_path.startswith('logs/refs/heads/') or  # Branch history
-                            git_relative_path.startswith('logs/HEAD')  # HEAD history
+                            git_relative_path.startswith('logs/HEAD') or  # HEAD history
+                            git_relative_path.startswith('objects/') and event.event_type in ('created', 'modified')  # New objects (commits, blobs)
                         )
                         
                         if should_monitor_git_file:
-                            logger.info("🔍 [TRACE] ✅ Git file matches monitoring criteria: %s", event.src_path)
+                            logger.debug("🔍 [TRACE] ✅ Git file matches monitoring criteria: %s", event.src_path)
                         else:
-                            logger.info("🔍 [TRACE] ❌ Git file does NOT match monitoring criteria - SKIPPING: %s", event.src_path)
+                            logger.debug("🔍 [TRACE] ❌ Git file does NOT match monitoring criteria - SKIPPING: %s", event.src_path)
                             return  # Skip other .git files
                     except (ValueError, IndexError):
-                        logger.info("🔍 [TRACE] ❌ Could not parse .git path - SKIPPING: %s", event.src_path)
+                        logger.debug("🔍 [TRACE] ❌ Could not parse .git path - SKIPPING: %s", event.src_path)
                         return  # Skip if can't parse .git path
                 else:
-                    logger.info("🔍 [TRACE] Processing non-git file event: %s", event.src_path)
+                    logger.debug("🔍 [TRACE] Processing non-git file event: %s", event.src_path)
                     # Only log significant file changes, not every single event
                     if event.event_type in ['created', 'deleted'] or event.src_path.endswith(('.py', '.js', '.html', '.css', '.json', '.md')):
                         logger.debug("File system event: %s - %s", event.event_type, os.path.basename(event.src_path))
@@ -114,7 +116,7 @@ class FileSystemWatcher:
                         logger.debug("File event: %s", os.path.basename(event.src_path))
                 
                 # Schedule async task in the main event loop from this watchdog thread
-                logger.info("🔍 [TRACE] About to schedule async handler - event_loop exists: %s, closed: %s", 
+                logger.debug("🔍 [TRACE] About to schedule async handler - event_loop exists: %s, closed: %s", 
                            self.watcher.event_loop is not None, 
                            self.watcher.event_loop.is_closed() if self.watcher.event_loop else "N/A")
                 
@@ -124,11 +126,11 @@ class FileSystemWatcher:
                             self.manager._handle_file_change(event), 
                             self.watcher.event_loop
                         )
-                        logger.info("🔍 [TRACE] ✅ Successfully scheduled file change handler for: %s", event.src_path)
+                        logger.debug("🔍 [TRACE] ✅ Successfully scheduled file change handler for: %s", event.src_path)
                     except Exception as e:
-                        logger.error("🔍 [TRACE] ❌ Failed to schedule file change handler: %s", e)
+                        logger.debug("🔍 [TRACE] ❌ Failed to schedule file change handler: %s", e)
                 else:
-                    logger.error("🔍 [TRACE] ❌ No event loop available to handle file change: %s", event.src_path)
+                    logger.debug("🔍 [TRACE] ❌ No event loop available to handle file change: %s", event.src_path)
         
         self.event_handler = ProjectEventHandler(self.project_manager, self)
         self.observer = Observer()

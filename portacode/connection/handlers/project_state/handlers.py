@@ -391,11 +391,8 @@ class ProjectStateGitStageHandler(AsyncHandler):
         success = git_manager.stage_file(file_path)
         
         if success:
-            # Update git status and send updated state
-            project_state = manager.projects[source_client_session]
-            project_state.git_status_summary = git_manager.get_status_summary()
-            project_state.git_detailed_status = git_manager.get_detailed_status()
-            await manager._send_project_state_update(project_state, server_project_id)
+            # Refresh entire project state to ensure consistency
+            await manager._refresh_project_state(source_client_session)
         
         return {
             "event": "project_state_git_stage_response",
@@ -440,11 +437,8 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
         success = git_manager.unstage_file(file_path)
         
         if success:
-            # Update git status and send updated state
-            project_state = manager.projects[source_client_session]
-            project_state.git_status_summary = git_manager.get_status_summary()
-            project_state.git_detailed_status = git_manager.get_detailed_status()
-            await manager._send_project_state_update(project_state, server_project_id)
+            # Refresh entire project state to ensure consistency
+            await manager._refresh_project_state(source_client_session)
         
         return {
             "event": "project_state_git_unstage_response",
@@ -489,11 +483,8 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         success = git_manager.revert_file(file_path)
         
         if success:
-            # Update git status and send updated state
-            project_state = manager.projects[source_client_session]
-            project_state.git_status_summary = git_manager.get_status_summary()
-            project_state.git_detailed_status = git_manager.get_detailed_status()
-            await manager._send_project_state_update(project_state, server_project_id)
+            # Refresh entire project state to ensure consistency
+            await manager._refresh_project_state(source_client_session)
         
         return {
             "event": "project_state_git_revert_response",

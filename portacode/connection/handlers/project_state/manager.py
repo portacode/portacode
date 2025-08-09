@@ -181,15 +181,15 @@ class ProjectStateManager:
         # For git repositories, also watch the .git directory for git status changes
         if project_state.is_git_repo:
             git_dir_path = os.path.join(project_state.project_folder_path, '.git')
-            logger.info("🔍 [TRACE] Project is git repo, checking .git directory: %s", git_dir_path)
+            logger.debug("🔍 [TRACE] Project is git repo, checking .git directory: %s", git_dir_path)
             if os.path.exists(git_dir_path):
-                logger.info("🔍 [TRACE] ✅ Starting to watch .git directory: %s", git_dir_path)
+                logger.debug("🔍 [TRACE] ✅ Starting to watch .git directory: %s", git_dir_path)
                 self.file_watcher.start_watching_git_directory(git_dir_path)
-                logger.info("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", git_dir_path)
+                logger.debug("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", git_dir_path)
             else:
                 logger.error("🔍 [TRACE] ❌ .git directory does not exist: %s", git_dir_path)
         else:
-            logger.info("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring")
+            logger.debug("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring")
         
         # Watchdog synchronized
     
@@ -703,127 +703,145 @@ class ProjectStateManager:
     
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
-        logger.info("🔍 [TRACE] _handle_file_change called: %s - %s", event.event_type, event.src_path)
+        logger.debug("🔍 [TRACE] _handle_file_change called: %s - %s", event.event_type, event.src_path)
         
         self._pending_changes.add(event.src_path)
-        logger.info("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", event.src_path, len(self._pending_changes))
+        logger.debug("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", event.src_path, len(self._pending_changes))
         
         # Cancel existing timer
         if self._change_debounce_timer and not self._change_debounce_timer.done():
-            logger.info("🔍 [TRACE] Cancelling existing debounce timer")
+            logger.debug("🔍 [TRACE] Cancelling existing debounce timer")
             self._change_debounce_timer.cancel()
         
         # Set new timer with proper exception handling
         async def debounced_process():
             try:
-                logger.info("🔍 [TRACE] Starting debounce delay (0.5s)...")
+                logger.debug("🔍 [TRACE] Starting debounce delay (0.5s)...")
                 await asyncio.sleep(0.5)  # Debounce delay
-                logger.info("🔍 [TRACE] Debounce delay complete, processing pending changes...")
+                logger.debug("🔍 [TRACE] Debounce delay complete, processing pending changes...")
                 await self._process_pending_changes()
             except asyncio.CancelledError:
-                logger.info("🔍 [TRACE] Debounce timer cancelled")
+                logger.debug("🔍 [TRACE] Debounce timer cancelled")
             except Exception as e:
                 logger.error("🔍 [TRACE] ❌ Error in debounced file processing: %s", e)
         
-        logger.info("🔍 [TRACE] Creating new debounce timer task...")
+        logger.debug("🔍 [TRACE] Creating new debounce timer task...")
         self._change_debounce_timer = asyncio.create_task(debounced_process())
     
     async def _process_pending_changes(self):
         """Process pending file changes."""
-        logger.info("🔍 [TRACE] _process_pending_changes called")
+        logger.debug("🔍 [TRACE] _process_pending_changes called")
         
         if not self._pending_changes:
-            logger.info("🔍 [TRACE] No pending changes to process")
+            logger.debug("🔍 [TRACE] No pending changes to process")
             return
         
-        logger.info("🔍 [TRACE] Processing %d pending file changes: %s", len(self._pending_changes), list(self._pending_changes))
+        logger.debug("🔍 [TRACE] Processing %d pending file changes: %s", len(self._pending_changes), list(self._pending_changes))
         
         # Process changes for each affected project
         affected_projects = set()
-        logger.info("🔍 [TRACE] Checking %d active projects for affected paths", len(self.projects))
+        logger.debug("🔍 [TRACE] Checking %d active projects for affected paths", len(self.projects))
         
         for change_path in self._pending_changes:
-            logger.info("🔍 [TRACE] Checking change path: %s", change_path)
+            logger.debug("🔍 [TRACE] Checking change path: %s", change_path)
             for client_session_id, project_state in self.projects.items():
-                logger.info("🔍 [TRACE] Comparing with project path: %s (session: %s)", 
+                logger.debug("🔍 [TRACE] Comparing with project path: %s (session: %s)", 
                            project_state.project_folder_path, client_session_id)
                 if change_path.startswith(project_state.project_folder_path):
-                    logger.info("🔍 [TRACE] ✅ Change affects project session: %s", client_session_id)
+                    logger.debug("🔍 [TRACE] ✅ Change affects project session: %s", client_session_id)
                     affected_projects.add(client_session_id)
                 else:
-                    logger.info("🔍 [TRACE] ❌ Change does NOT affect project session: %s", client_session_id)
+                    logger.debug("🔍 [TRACE] ❌ Change does NOT affect project session: %s", client_session_id)
         
         if affected_projects:
-            logger.info("🔍 [TRACE] Found %d affected projects: %s", len(affected_projects), list(affected_projects))
+            logger.debug("🔍 [TRACE] Found %d affected projects: %s", len(affected_projects), list(affected_projects))
         else:
-            logger.info("🔍 [TRACE] ❌ No affected projects to refresh")
+            logger.debug("🔍 [TRACE] ❌ No affected projects to refresh")
         
         # Refresh affected projects
         for client_session_id in affected_projects:
-            logger.info("🔍 [TRACE] About to refresh project state for session: %s", client_session_id)
+            logger.debug("🔍 [TRACE] About to refresh project state for session: %s", client_session_id)
             await self._refresh_project_state(client_session_id)
         
         self._pending_changes.clear()
-        logger.info("🔍 [TRACE] ✅ Finished processing file changes")
+        logger.debug("🔍 [TRACE] ✅ Finished processing file changes")
     
     async def _refresh_project_state(self, client_session_id: str):
         """Refresh project state after file changes."""
-        logger.info("🔍 [TRACE] _refresh_project_state called for session: %s", client_session_id)
+        logger.debug("🔍 [TRACE] _refresh_project_state called for session: %s", client_session_id)
         
         if client_session_id not in self.projects:
-            logger.info("🔍 [TRACE] ❌ Session not found in projects: %s", client_session_id)
+            logger.debug("🔍 [TRACE] ❌ Session not found in projects: %s", client_session_id)
             return
         
         project_state = self.projects[client_session_id]
         git_manager = self.git_managers[client_session_id]
-        logger.info("🔍 [TRACE] Found project state and git manager for session: %s", client_session_id)
+        logger.debug("🔍 [TRACE] Found project state and git manager for session: %s", client_session_id)
         
-        # Check if git repo was just created - reinitialize git manager if needed
+        # Check if git repo status changed (created or deleted)
         git_dir_path = os.path.join(project_state.project_folder_path, '.git')
-        if not git_manager.is_git_repo and os.path.exists(git_dir_path):
-            logger.info("🔍 [TRACE] Git repo detected, reinitializing git manager for session: %s", client_session_id)
-            # Reinitialize git manager
+        git_dir_exists = os.path.exists(git_dir_path)
+        
+        if not git_manager.is_git_repo and git_dir_exists:
+            # Git repo was created
+            logger.debug("🔍 [TRACE] Git repo detected, reinitializing git manager for session: %s", client_session_id)
             git_manager.reinitialize()
-            
-            # Update project state git repo flag
-            project_state.is_git_repo = git_manager.is_git_repo
             
             # Start watching .git directory for git status changes
             if git_manager.is_git_repo:
-                logger.info("🔍 [TRACE] Starting to watch .git directory: %s", git_dir_path)
+                logger.debug("🔍 [TRACE] Starting to watch .git directory: %s", git_dir_path)
                 self.file_watcher.start_watching_git_directory(git_dir_path)
+        elif git_manager.is_git_repo and not git_dir_exists:
+            # Git repo was deleted
+            logger.debug("🔍 [TRACE] Git repo removed, updating git manager for session: %s", client_session_id)
+            git_manager.repo = None
+            git_manager.is_git_repo = False
+            
+            # Stop watching .git directory
+            self.file_watcher.stop_watching(git_dir_path)
         
         # Update Git status
         if git_manager:
-            logger.info("🔍 [TRACE] Updating git status for session: %s", client_session_id)
+            logger.debug("🔍 [TRACE] Updating git status for session: %s", client_session_id)
             old_branch = project_state.git_branch
             old_status_summary = project_state.git_status_summary
+            old_is_git_repo = project_state.is_git_repo
             
+            # Update all git state atomically - single source of truth
+            project_state.is_git_repo = git_manager.is_git_repo
             project_state.git_branch = git_manager.get_branch_name()
             project_state.git_status_summary = git_manager.get_status_summary()
             project_state.git_detailed_status = git_manager.get_detailed_status()
             
-            logger.info("🔍 [TRACE] Git status updated - branch: %s->%s, summary: %s->%s", 
+            logger.debug("🔍 [TRACE] Git status updated - is_git_repo: %s->%s, branch: %s->%s, summary: %s->%s", 
+                       old_is_git_repo, project_state.is_git_repo,
                        old_branch, project_state.git_branch, 
                        old_status_summary, project_state.git_status_summary)
         else:
-            logger.info("🔍 [TRACE] ❌ No git manager found for session: %s", client_session_id)
+            logger.debug("🔍 [TRACE] ❌ No git manager found for session: %s", client_session_id)
         
-        # Sync all dependent state (items, watchdog) - no automatic directory detection
-        logger.info("🔍 [TRACE] Syncing all state with monitored folders...")
+        # Detect and add new directories in expanded folders before syncing
+        logger.debug("🔍 [TRACE] Detecting and adding new directories...")
+        await self._detect_and_add_new_directories(project_state)
+        
+        # Sync all dependent state (items, watchdog) with updated monitored folders
+        logger.debug("🔍 [TRACE] Syncing all state with monitored folders...")
         await self._sync_all_state_with_monitored_folders(project_state)
         
         # Send update to clients
-        logger.info("🔍 [TRACE] About to send project state update...")
+        logger.debug("🔍 [TRACE] About to send project state update...")
         await self._send_project_state_update(project_state)
     
     async def _detect_and_add_new_directories(self, project_state: ProjectState):
-        """Detect new directories in monitored folders and add them to monitoring."""
-        # For each currently monitored folder, check if new subdirectories appeared
-        monitored_folder_paths = [mf.folder_path for mf in project_state.monitored_folders]
+        """Detect new directories in EXPANDED monitored folders and add them to monitoring."""
+        # For each currently expanded monitored folder, check if new subdirectories appeared
+        expanded_folder_paths = [mf.folder_path for mf in project_state.monitored_folders if mf.is_expanded]
+        logger.debug("🔍 [TRACE] Checking %d expanded folders for new subdirectories: %s", 
+                   len(expanded_folder_paths), expanded_folder_paths)
         
-        for folder_path in monitored_folder_paths:
+        for folder_path in expanded_folder_paths:
             if os.path.exists(folder_path) and os.path.isdir(folder_path):
+                logger.debug("🔍 [TRACE] Checking expanded folder for new subdirectories: %s", folder_path)
                 await self._add_subdirectories_to_monitored(project_state, folder_path)
     
     async def _reload_visible_structures(self, project_state: ProjectState):
@@ -832,7 +850,7 @@ class ProjectStateManager:
     
     async def _send_project_state_update(self, project_state: ProjectState, server_project_id: str = None):
         """Send project state update to the specific client session only."""
-        logger.info("🔍 [TRACE] _send_project_state_update called for session: %s", project_state.client_session_id)
+        logger.debug("🔍 [TRACE] _send_project_state_update called for session: %s", project_state.client_session_id)
         
         # Create state signature for change detection
         current_state_signature = {
@@ -845,19 +863,19 @@ class ProjectStateManager:
             "monitored_folders": tuple((mf.folder_path, mf.is_expanded) for mf in sorted(project_state.monitored_folders, key=lambda x: x.folder_path))
         }
         
-        logger.info("🔍 [TRACE] Current state signature: %s", current_state_signature)
+        logger.debug("🔍 [TRACE] Current state signature: %s", current_state_signature)
         
         # Check if state has actually changed
         last_signature = getattr(project_state, '_last_sent_signature', None)
-        logger.info("🔍 [TRACE] Last sent signature: %s", last_signature)
+        logger.debug("🔍 [TRACE] Last sent signature: %s", last_signature)
         
         if last_signature == current_state_signature:
-            logger.info("🔍 [TRACE] ❌ Project state unchanged, skipping update for client: %s", project_state.client_session_id)
+            logger.debug("🔍 [TRACE] ❌ Project state unchanged, skipping update for client: %s", project_state.client_session_id)
             return
         
         # State has changed, send update
         project_state._last_sent_signature = current_state_signature
-        logger.info("🔍 [TRACE] ✅ State has changed, preparing to send update to client: %s", project_state.client_session_id)
+        logger.debug("🔍 [TRACE] ✅ State has changed, preparing to send update to client: %s", project_state.client_session_id)
         
         payload = {
             "event": "project_state_update",
@@ -913,10 +931,10 @@ class ProjectStateManager:
             logger.warning("Failed to analyze payload size: %s", e)
         
         # Send via control channel with client session targeting
-        logger.info("🔍 [TRACE] About to send payload via control channel...")
+        logger.debug("🔍 [TRACE] About to send payload via control channel...")
         try:
             await self.control_channel.send(payload)
-            logger.info("🔍 [TRACE] ✅ Successfully sent project_state_update to client: %s", project_state.client_session_id)
+            logger.debug("🔍 [TRACE] ✅ Successfully sent project_state_update to client: %s", project_state.client_session_id)
         except Exception as e:
             logger.error("🔍 [TRACE] ❌ Failed to send project_state_update: %s", e)
     
