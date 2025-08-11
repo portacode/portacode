@@ -30,19 +30,40 @@ def cli() -> None:
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--detach", "detach", "-d", is_flag=True, help="Run connection in background")
 @click.option("--debug", "debug", is_flag=True, help="Enable debug logging")
+@click.option("--log-categories", "log_categories", help="Comma-separated list of log categories to show (e.g., 'connection,auth,git'). Use 'list' to see available categories.")
 @click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
               help="Skip interactive prompts (used by background service)")
-def connect(gateway: str | None, detach: bool, debug: bool, non_interactive: bool) -> None:  # noqa: D401 – Click callback
+def connect(gateway: str | None, detach: bool, debug: bool, log_categories: str | None, non_interactive: bool) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
     # Set up debug logging if requested
     if debug:
         import logging
+        from .logging_categories import configure_logging_categories, parse_category_string, list_available_categories
+        
+        # Handle log categories
+        if log_categories == "list":
+            click.echo(click.style("Available log categories:", fg="cyan"))
+            for cat in list_available_categories():
+                click.echo(f"  • {cat}")
+            return
+        
+        enabled_categories = set()
+        if log_categories:
+            try:
+                enabled_categories = parse_category_string(log_categories)
+                configure_logging_categories(enabled_categories)
+                click.echo(click.style(f"🔍 Debug logging enabled for categories: {', '.join(sorted(enabled_categories))}", fg="yellow"))
+            except ValueError as e:
+                click.echo(click.style(f"Error: {e}", fg="red"))
+                return
+        else:
+            click.echo(click.style("🔍 Debug logging enabled (all categories)", fg="yellow"))
+        
         logging.basicConfig(
             level=logging.DEBUG,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        click.echo(click.style("🔍 Debug logging enabled", fg="yellow"))
 
     # 1. Ensure only a single connection per user
     pid_file = get_pid_file()

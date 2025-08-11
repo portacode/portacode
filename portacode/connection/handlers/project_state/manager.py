@@ -17,8 +17,9 @@ from typing import Any, Dict, List, Optional, Set
 from .models import ProjectState, MonitoredFolder, FileItem, TabInfo
 from .git_manager import GitManager
 from .file_system_watcher import FileSystemWatcher
+from ....logging_categories import get_categorized_logger, LogCategory
 
-logger = logging.getLogger(__name__)
+logger = get_categorized_logger(__name__)
 
 # Global singleton instance
 _global_project_state_manager: Optional['ProjectStateManager'] = None
@@ -181,15 +182,15 @@ class ProjectStateManager:
         # For git repositories, also watch the .git directory for git status changes
         if project_state.is_git_repo:
             git_dir_path = os.path.join(project_state.project_folder_path, '.git')
-            logger.debug("🔍 [TRACE] Project is git repo, checking .git directory: %s", git_dir_path)
+            logger.debug("🔍 [TRACE] Project is git repo, checking .git directory: %s", LogCategory.GIT, git_dir_path)
             if os.path.exists(git_dir_path):
-                logger.debug("🔍 [TRACE] ✅ Starting to watch .git directory: %s", git_dir_path)
+                logger.debug("🔍 [TRACE] ✅ Starting to watch .git directory: %s", LogCategory.GIT, git_dir_path)
                 self.file_watcher.start_watching_git_directory(git_dir_path)
-                logger.debug("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", git_dir_path)
+                logger.debug("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", LogCategory.GIT, git_dir_path)
             else:
-                logger.error("🔍 [TRACE] ❌ .git directory does not exist: %s", git_dir_path)
+                logger.error("🔍 [TRACE] ❌ .git directory does not exist: %s", LogCategory.GIT, git_dir_path)
         else:
-            logger.debug("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring")
+            logger.debug("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring", LogCategory.GIT)
         
         # Watchdog synchronized
     
@@ -212,10 +213,10 @@ class ProjectStateManager:
     
     async def _add_subdirectories_to_monitored(self, project_state: ProjectState, parent_folder_path: str):
         """Add all subdirectories of a folder to monitored_folders if not already present, and remove deleted ones."""
-        logger.info("_add_subdirectories_to_monitored called for: %s", parent_folder_path)
+        # logger.info("_add_subdirectories_to_monitored called for: %s", parent_folder_path)
         try:
             existing_paths = {mf.folder_path for mf in project_state.monitored_folders}
-            logger.info("Existing monitored paths: %s", existing_paths)
+            # logger.info("Existing monitored paths: %s", existing_paths)
             added_any = False
             removed_any = False
             
@@ -236,16 +237,17 @@ class ProjectStateManager:
             with os.scandir(parent_folder_path) as entries:
                 for entry in entries:
                     if entry.is_dir() and entry.name != '.git':  # Only exclude .git, allow other dot folders
-                        logger.info("Found subdirectory: %s", entry.path)
+                        # logger.info("Found subdirectory: %s", entry.path)
                         if entry.path not in existing_paths:
                             logger.info("Adding new monitored folder: %s", entry.path)
                             new_monitored = MonitoredFolder(folder_path=entry.path, is_expanded=False)
                             project_state.monitored_folders.append(new_monitored)
                             added_any = True
                         else:
-                            logger.info("Subdirectory already monitored: %s", entry.path)
+                            # logger.info("Subdirectory already monitored: %s", entry.path)
+                            pass
             
-            logger.info("Added any new folders: %s, Removed any deleted folders: %s", added_any, removed_any)
+            # logger.info("Added any new folders: %s, Removed any deleted folders: %s", added_any, removed_any)
             # Note: sync will be handled by the caller, no need to sync here
                 
         except (OSError, PermissionError) as e:
@@ -718,10 +720,10 @@ class ProjectStateManager:
     
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
-        logger.debug("🔍 [TRACE] _handle_file_change called: %s - %s", event.event_type, event.src_path)
+        logger.debug("🔍 [TRACE] _handle_file_change called: %s - %s", LogCategory.FILE_SYSTEM, event.event_type, event.src_path)
         
         self._pending_changes.add(event.src_path)
-        logger.debug("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", event.src_path, len(self._pending_changes))
+        logger.debug("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", LogCategory.FILE_SYSTEM, event.src_path, len(self._pending_changes))
         
         # Cancel existing timer
         if self._change_debounce_timer and not self._change_debounce_timer.done():

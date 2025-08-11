@@ -14,8 +14,9 @@ from websockets import WebSocketClientProtocol
 
 from ..keypair import KeyPair
 from .multiplex import Multiplexer
+from ..logging_categories import get_categorized_logger, LogCategory
 
-logger = logging.getLogger(__name__)
+logger = get_categorized_logger(__name__)
 
 
 class ConnectionManager:
@@ -67,9 +68,9 @@ class ConnectionManager:
             try:
                 if attempt:
                     delay = min(self.reconnect_delay * 2 ** (attempt - 1), 30)
-                    logger.warning("Reconnecting in %.1f s (attempt %d)…", delay, attempt)
+                    logger.warning("Reconnecting in %.1f s (attempt %d)…", LogCategory.CONNECTION, delay, attempt)
                     await asyncio.sleep(delay)
-                logger.info("Connecting to gateway at %s", self.gateway_url)
+                logger.info("Connecting to gateway at %s", LogCategory.CONNECTION, self.gateway_url)
                 async with websockets.connect(self.gateway_url) as ws:
                     # Reset attempt counter after successful connection
                     attempt = 0
@@ -90,19 +91,19 @@ class ConnectionManager:
                         else:
                             self._terminal_manager = TerminalManager(self.mux, debug=self.debug)  # noqa: pylint=attribute-defined-outside-init
                     except Exception as exc:
-                        logger.warning("TerminalManager unavailable: %s", exc)
+                        logger.warning("TerminalManager unavailable: %s", LogCategory.TERMINAL, exc)
 
                     # Start main receive loop until closed or stop requested
                     await self._listen()
             except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as exc:
                 attempt += 1
-                logger.warning("Connection error: %s", exc)
+                logger.warning("Connection error: %s", LogCategory.CONNECTION, exc)
                 # Remove the max_retries limit - keep trying indefinitely
                 # The service manager (systemd) will handle any necessary restarts
             except Exception as exc:
                 # For truly fatal errors (like authentication failures), 
                 # log and exit cleanly so systemd can restart the service
-                logger.exception("Fatal error in connection manager: %s", exc)
+                logger.exception("Fatal error in connection manager: %s", LogCategory.CONNECTION, exc)
                 # Exit cleanly to allow systemd restart
                 sys.exit(1)
 
