@@ -1199,8 +1199,20 @@ class GitManager:
             # Convert to relative path from repo root
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
-            # Reset the file from HEAD (unstage)
-            self.repo.git.restore('--staged', rel_path)
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if has_head:
+                # Reset the file from HEAD (unstage) - for repos with commits
+                self.repo.git.restore('--staged', rel_path)
+            else:
+                # For repositories with no commits, use git rm --cached to unstage
+                self.repo.git.rm('--cached', rel_path)
+            
             logger.info("Successfully unstaged file: %s", rel_path)
             return True
             
@@ -1217,9 +1229,26 @@ class GitManager:
             # Convert to relative path from repo root
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
-            # Restore the file from HEAD
-            self.repo.git.restore(rel_path)
-            logger.info("Successfully reverted file: %s", rel_path)
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if has_head:
+                # Restore the file from HEAD - for repos with commits
+                self.repo.git.restore(rel_path)
+                logger.info("Successfully reverted file: %s", rel_path)
+            else:
+                # For repositories with no commits, we can't revert to HEAD
+                # Instead, just remove the file to "revert" it to non-existence
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info("Successfully removed file (no HEAD to revert to): %s", rel_path)
+                else:
+                    logger.info("File already does not exist (no HEAD to revert to): %s", rel_path)
+            
             return True
             
         except Exception as e:
