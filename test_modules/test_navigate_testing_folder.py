@@ -194,8 +194,6 @@ class NavigateTestingFolderTest(BaseTest):
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(2000)  # Wait for staging to complete
 
-        # Temporarily skipping steps 8, 9, and 10
-        """
         # Step 8: Verify staged files show up with staged indicator
         staged_indicators = page.locator("i[title='Staged']")
         staged_count = await staged_indicators.count()
@@ -222,8 +220,7 @@ class NavigateTestingFolderTest(BaseTest):
         final_git_count = await final_git_indicators.count()
         assert_that.is_true(final_git_count > 0, "Git branch/status should be visible after git operations")
         stats.record_stat("final_git_indicators_count", final_git_count)
-        
-        """
+
         # Verify we're in a project page by checking URL pattern
         current_url = page.url
         assert_that.contains(current_url.lower(), "project/", "URL should contain project path indicating successful navigation")

@@ -211,13 +211,28 @@ class ProjectStateManager:
         logger.debug("_sync_all_state_with_monitored_folders completed")
     
     async def _add_subdirectories_to_monitored(self, project_state: ProjectState, parent_folder_path: str):
-        """Add all subdirectories of a folder to monitored_folders if not already present."""
+        """Add all subdirectories of a folder to monitored_folders if not already present, and remove deleted ones."""
         logger.info("_add_subdirectories_to_monitored called for: %s", parent_folder_path)
         try:
             existing_paths = {mf.folder_path for mf in project_state.monitored_folders}
             logger.info("Existing monitored paths: %s", existing_paths)
             added_any = False
+            removed_any = False
             
+            # First, clean up any monitored folders that no longer exist
+            to_remove = []
+            for monitored_folder in project_state.monitored_folders:
+                # Don't remove the root project folder, only subdirectories
+                if monitored_folder.folder_path != project_state.project_folder_path:
+                    if not os.path.exists(monitored_folder.folder_path):
+                        logger.info("Removing deleted monitored folder: %s", monitored_folder.folder_path)
+                        to_remove.append(monitored_folder)
+                        removed_any = True
+            
+            for folder_to_remove in to_remove:
+                project_state.monitored_folders.remove(folder_to_remove)
+            
+            # Then, add new subdirectories
             with os.scandir(parent_folder_path) as entries:
                 for entry in entries:
                     if entry.is_dir() and entry.name != '.git':  # Only exclude .git, allow other dot folders
@@ -230,7 +245,7 @@ class ProjectStateManager:
                         else:
                             logger.info("Subdirectory already monitored: %s", entry.path)
             
-            logger.info("Added any new folders: %s", added_any)
+            logger.info("Added any new folders: %s, Removed any deleted folders: %s", added_any, removed_any)
             # Note: sync will be handled by the caller, no need to sync here
                 
         except (OSError, PermissionError) as e:
