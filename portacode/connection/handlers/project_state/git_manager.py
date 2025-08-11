@@ -5,12 +5,13 @@ including status checking, diff generation, file content retrieval, and Git comm
 like staging, unstaging, and reverting files.
 """
 
+import asyncio
 import hashlib
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .models import GitDetailedStatus, GitFileChange
 
@@ -54,11 +55,24 @@ except ImportError:
 class GitManager:
     """Manages Git operations for project state."""
     
-    def __init__(self, project_path: str):
+    def __init__(self, project_path: str, change_callback: Optional[Callable] = None):
         self.project_path = project_path
         self.repo: Optional[Repo] = None
         self.is_git_repo = False
+        self._change_callback = change_callback
+        
+        # Periodic monitoring attributes
+        self._monitoring_task: Optional[asyncio.Task] = None
+        self._cached_status_summary: Optional[Dict[str, int]] = None
+        self._cached_detailed_status: Optional[GitDetailedStatus] = None
+        self._cached_branch: Optional[str] = None
+        self._monitoring_enabled = False
+        
         self._initialize_repo()
+        
+        # Start monitoring if this is a git repo
+        if self.is_git_repo and change_callback:
+            self.start_periodic_monitoring()
     
     def _initialize_repo(self):
         """Initialize Git repository if available."""
@@ -76,9 +90,17 @@ class GitManager:
     def reinitialize(self):
         """Reinitialize git repo detection (useful when .git directory is created after initialization)."""
         logger.info("Reinitializing git repo detection for: %s", self.project_path)
+        
+        # Stop existing monitoring
+        self.stop_periodic_monitoring()
+        
         self.repo = None
         self.is_git_repo = False
         self._initialize_repo()
+        
+        # Restart monitoring if this is now a git repo and we have a callback
+        if self.is_git_repo and self._change_callback:
+            self.start_periodic_monitoring()
     
     def get_branch_name(self) -> Optional[str]:
         """Get current Git branch name."""
@@ -1203,3 +1225,137 @@ class GitManager:
         except Exception as e:
             logger.error("Error reverting file %s: %s", file_path, e)
             raise RuntimeError(f"Failed to revert file: {e}")
+    
+    def start_periodic_monitoring(self):
+        """Start periodic monitoring of git status changes."""
+        if not self.is_git_repo or not self._change_callback:
+            return
+        
+        if self._monitoring_task and not self._monitoring_task.done():
+            logger.debug("Git monitoring already running for %s", self.project_path)
+            return
+        
+        logger.info("Starting periodic git monitoring for %s", self.project_path)
+        self._monitoring_enabled = True
+        
+        # Initialize cached status
+        self._update_cached_status()
+        
+        # Start the monitoring task
+        self._monitoring_task = asyncio.create_task(self._monitor_git_changes())
+    
+    def stop_periodic_monitoring(self):
+        """Stop periodic monitoring of git status changes."""
+        self._monitoring_enabled = False
+        
+        if self._monitoring_task and not self._monitoring_task.done():
+            logger.info("Stopping periodic git monitoring for %s", self.project_path)
+            self._monitoring_task.cancel()
+            self._monitoring_task = None
+    
+    def _update_cached_status(self):
+        """Update cached git status for comparison."""
+        if not self.is_git_repo:
+            return
+        
+        try:
+            self._cached_status_summary = self.get_status_summary()
+            self._cached_detailed_status = self.get_detailed_status()
+            self._cached_branch = self.get_branch_name()
+            logger.debug("Updated cached git status for %s", self.project_path)
+        except Exception as e:
+            logger.error("Error updating cached git status: %s", e)
+    
+    async def _monitor_git_changes(self):
+        """Monitor git changes periodically and trigger callback when changes are detected."""
+        try:
+            while self._monitoring_enabled:
+                await asyncio.sleep(1.0)  # Check every 1000ms
+                
+                if not self._monitoring_enabled or not self.is_git_repo:
+                    break
+                
+                try:
+                    # Get current status
+                    current_status_summary = self.get_status_summary()
+                    current_detailed_status = self.get_detailed_status()
+                    current_branch = self.get_branch_name()
+                    
+                    # Compare with cached status
+                    status_changed = (
+                        current_status_summary != self._cached_status_summary or
+                        current_branch != self._cached_branch or
+                        self._detailed_status_changed(current_detailed_status, self._cached_detailed_status)
+                    )
+                    
+                    if status_changed:
+                        logger.info("Git status change detected for %s", self.project_path)
+                        logger.debug("Status summary: %s -> %s", self._cached_status_summary, current_status_summary)
+                        logger.debug("Branch: %s -> %s", self._cached_branch, current_branch)
+                        
+                        # Update cached status
+                        self._cached_status_summary = current_status_summary
+                        self._cached_detailed_status = current_detailed_status
+                        self._cached_branch = current_branch
+                        
+                        # Trigger callback
+                        if self._change_callback:
+                            try:
+                                if asyncio.iscoroutinefunction(self._change_callback):
+                                    await self._change_callback()
+                                else:
+                                    self._change_callback()
+                            except Exception as e:
+                                logger.error("Error in git change callback: %s", e)
+                    
+                except Exception as e:
+                    logger.error("Error during git status monitoring: %s", e)
+                    # Continue monitoring despite errors
+                    
+        except asyncio.CancelledError:
+            logger.debug("Git monitoring cancelled for %s", self.project_path)
+        except Exception as e:
+            logger.error("Fatal error in git monitoring: %s", e)
+        finally:
+            logger.debug("Git monitoring stopped for %s", self.project_path)
+    
+    def _detailed_status_changed(self, current: Optional[GitDetailedStatus], cached: Optional[GitDetailedStatus]) -> bool:
+        """Compare detailed status objects for changes."""
+        if current is None and cached is None:
+            return False
+        if current is None or cached is None:
+            return True
+        
+        # Compare key attributes
+        if (
+            current.head_commit_hash != cached.head_commit_hash or
+            len(current.staged_changes) != len(cached.staged_changes) or
+            len(current.unstaged_changes) != len(cached.unstaged_changes) or
+            len(current.untracked_files) != len(cached.untracked_files)
+        ):
+            return True
+        
+        # Compare staged changes content hashes
+        current_staged_hashes = {c.file_repo_path: c.content_hash for c in current.staged_changes}
+        cached_staged_hashes = {c.file_repo_path: c.content_hash for c in cached.staged_changes}
+        if current_staged_hashes != cached_staged_hashes:
+            return True
+        
+        # Compare unstaged changes content hashes
+        current_unstaged_hashes = {c.file_repo_path: c.content_hash for c in current.unstaged_changes}
+        cached_unstaged_hashes = {c.file_repo_path: c.content_hash for c in cached.unstaged_changes}
+        if current_unstaged_hashes != cached_unstaged_hashes:
+            return True
+        
+        # Compare untracked files content hashes
+        current_untracked_hashes = {c.file_repo_path: c.content_hash for c in current.untracked_files}
+        cached_untracked_hashes = {c.file_repo_path: c.content_hash for c in cached.untracked_files}
+        if current_untracked_hashes != cached_untracked_hashes:
+            return True
+        
+        return False
+    
+    def cleanup(self):
+        """Cleanup resources when GitManager is being destroyed."""
+        logger.info("Cleaning up GitManager for %s", self.project_path)
+        self.stop_periodic_monitoring()

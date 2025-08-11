@@ -458,7 +458,7 @@ class FileOperationsTest(BaseTest):
         except Exception as e:
             stats.record_stat("git_stage_error", str(e))
             await self.playwright_manager.take_screenshot("stage_error")
-            print(f"⚠️ Git staging failed: {e}")
+            # print(f"⚠️ Git staging failed: {e}")
             # Don't fail the test for Git staging issues, just record the failure
             stage_successful = False
         
@@ -616,7 +616,7 @@ class FileOperationsTest(BaseTest):
         import shutil
         
         TESTING_FOLDER_PATH = "/home/menas/testing_folder"
-        print(f"🧹 Final cleanup of test project at {TESTING_FOLDER_PATH}")
+        # print(f"🧹 Final cleanup of test project at {TESTING_FOLDER_PATH}")
         
         try:
             if os.path.exists(TESTING_FOLDER_PATH):
@@ -640,7 +640,7 @@ class FileOperationsTest(BaseTest):
                             shutil.rmtree(item_path)
                             # print(f"   🗑️ Removed directory: {item}")
                     
-                    print("✅ Final test project cleanup completed")
+                    # print("✅ Final test project cleanup completed")
                     
                 finally:
                     # Always return to original directory

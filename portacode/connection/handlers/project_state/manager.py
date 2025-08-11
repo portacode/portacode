@@ -124,8 +124,13 @@ class ProjectStateManager:
         
         logger.info("Initializing project state for client session: %s, folder: %s", client_session_id, project_folder_path)
         
-        # Initialize Git manager
-        git_manager = GitManager(project_folder_path)
+        # Initialize Git manager with change callback
+        async def git_change_callback():
+            """Callback when git status changes are detected."""
+            logger.debug("Git change detected, refreshing project state for %s", client_session_id)
+            await self._refresh_project_state(client_session_id)
+        
+        git_manager = GitManager(project_folder_path, change_callback=git_change_callback)
         self.git_managers[client_session_id] = git_manager
         
         # Create project state
@@ -970,6 +975,9 @@ class ProjectStateManager:
                 self.file_watcher.stop_watching(git_dir_path)
             
             # Clean up managers
+            git_manager = self.git_managers.get(client_session_id)
+            if git_manager:
+                git_manager.cleanup()
             self.git_managers.pop(client_session_id, None)
             self.projects.pop(client_session_id, None)
             
