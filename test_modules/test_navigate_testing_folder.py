@@ -120,59 +120,50 @@ class NavigateTestingFolderTest(BaseTest):
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(500)
         
-        await page.keyboard.type("cat > example_file.py << 'EOF'")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("#!/usr/bin/env python3")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("print('Hello from testing_folder!')")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("EOF")
+        await page.keyboard.type("cat > example_file.py << 'EOF'\n#!/usr/bin/env python3\nprint('Hello from testing_folder!')\nEOF")
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(500)
         
-        await page.keyboard.type("cat > example_folder/nested_file.txt << 'EOF'")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("This is a nested file for testing purposes.")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("EOF")
+        await page.keyboard.type("cat > example_folder/nested_file.txt << 'EOF'\nThis is a nested file for testing purposes.\nEOF")
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(500)
         
-        await page.keyboard.type("cat > some_file.txt << 'EOF'")
+        await page.keyboard.type("cat > some_file.txt << 'EOF'\n# Testing Folder\nThis file is created via terminal during test.\nEOF")
         await page.keyboard.press("Enter")
-        await page.keyboard.type("# Testing Folder")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("This folder is created via terminal during test.")
-        await page.keyboard.press("Enter")
-        await page.keyboard.type("EOF")
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(500)
         
         terminal_setup_time = stats.end_timer("terminal_setup")
         stats.record_stat("terminal_setup_time_ms", terminal_setup_time)
         
         # Step 4: Verify files appear in file explorer (before git init)
-        await page.wait_for_timeout(2000)  # Wait for file system to update
-        files_present = page.locator(".file-item, .file-entry, .tree-item, [class*='file']").count()
-        files_count_before_git = await files_present
+        await page.wait_for_timeout(500)  # Wait for file system to update
+        files_present = page.locator(".file-item, .file-entry, .tree-item, [class*='file']")
+        try:
+            await files_present.first.wait_for(timeout=2000)
+            files_count_before_git = await files_present.count()
+        except:
+            files_count_before_git = 0
         assert_that.is_true(files_count_before_git > 0, "Files should be visible in explorer after creation")
         stats.record_stat("files_count_before_git", files_count_before_git)
         
         # Step 5: Initialize git repository
         stats.start_timer("git_init")
-        await page.keyboard.type("git init")
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(2000)  # Wait for git init to complete
+        await page.keyboard.type("git init\n")
+        await page.wait_for_timeout(500)  # Wait for git init to complete
         
         git_init_time = stats.end_timer("git_init")
         stats.record_stat("git_init_time_ms", git_init_time)
         
         # Step 6: Verify file explorer shows git indicators after git init
-        await page.wait_for_timeout(3000)  # Wait for project state to update
+        await page.wait_for_timeout(200)  # Wait for project state to update
         
-        # Look for git branch info or git indicators in the UI
+        # Look for git branch info or git indicators in the UI (with short timeout)
         git_indicators = page.locator(".git-branch, .git-info, .branch-name, [class*='git'], [class*='branch']")
-        git_indicators_count = await git_indicators.count()
+        try:
+            await git_indicators.first.wait_for(timeout=1000)
+            git_indicators_count = await git_indicators.count()
+        except:
+            git_indicators_count = 0
         
         if git_indicators_count > 0:
             stats.record_stat("git_indicators_detected", True)
@@ -180,44 +171,41 @@ class NavigateTestingFolderTest(BaseTest):
             stats.record_stat("git_indicators_detected", False)
             # This might be the bug we need to fix
         
-        # Step 7: Configure git user and test git add
-        stats.start_timer("git_operations")
-        await page.keyboard.type("git config user.name 'Test User'")
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(500)
-        
-        await page.keyboard.type("git config user.email 'test@example.com'")
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(500)
-        
-        await page.keyboard.type("git add .")
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(2000)  # Wait for staging to complete
+        await page.keyboard.type("git add .\n")
+        await page.wait_for_timeout(1000)  # Wait for staging to complete
 
-        # Step 8: Verify staged files show up with staged indicator
+        # Step 7: Verify staged files show up with staged indicator
         staged_indicators = page.locator("i[title='Staged']")
-        staged_count = await staged_indicators.count()
+        try:
+            await staged_indicators.first.wait_for(timeout=3000)
+            staged_count = await staged_indicators.count()
+        except:
+            staged_count = 0
         assert_that.is_true(staged_count > 0, "Staged files should show 'Staged' indicator")
         stats.record_stat("staged_indicators_count", staged_count)
         
-        # Step 9: Commit the changes
+        # Step 8: Commit the changes
         await page.keyboard.type("git commit -m 'Initial commit with test files'")
         await page.keyboard.press("Enter")
-        await page.wait_for_timeout(2000)  # Wait for commit to complete
+        await page.wait_for_timeout(100)  # Wait for commit to complete
         
         git_operations_time = stats.end_timer("git_operations")
         stats.record_stat("git_operations_time_ms", git_operations_time)
         
-        # Step 10: Verify committed files no longer show staged indicator
-        await page.wait_for_timeout(2000)  # Wait for status to update
+        # Step 9: Verify committed files no longer show staged indicator
+        await page.wait_for_timeout(500)  # Wait for status to update
         staged_indicators_after_commit = page.locator("i[title='Staged']")
         staged_after_commit_count = await staged_indicators_after_commit.count()
         assert_that.is_true(staged_after_commit_count == 0, "Files should not show 'Staged' indicator after commit")
         stats.record_stat("staged_after_commit_count", staged_after_commit_count)
         
-        # Final verification: Check that git branch/status is now visible
+        # Final verification: Check that git branch/status is now visible (with short timeout)
         final_git_indicators = page.locator(".git-branch, .git-info, .branch-name, [class*='git'], [class*='branch']")
-        final_git_count = await final_git_indicators.count()
+        try:
+            await final_git_indicators.first.wait_for(timeout=1000)
+            final_git_count = await final_git_indicators.count()
+        except:
+            final_git_count = 0
         assert_that.is_true(final_git_count > 0, "Git branch/status should be visible after git operations")
         stats.record_stat("final_git_indicators_count", final_git_count)
 
