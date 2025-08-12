@@ -20,7 +20,7 @@ TERMINAL_DATA_MAX_WAIT_MS = 1000   # Maximum time to wait before sending accumul
 TERMINAL_DATA_INITIAL_WAIT_MS = 10  # Time to wait for additional data even on first event (milliseconds)
 
 # Terminal buffer size limit configuration
-TERMINAL_BUFFER_SIZE_LIMIT_BYTES = 10 * 1024  # Maximum buffer size in bytes (10KB)
+TERMINAL_BUFFER_SIZE_LIMIT_BYTES = 30 * 1024  # Maximum buffer size in bytes (30KB)
 
 logger = logging.getLogger(__name__)
 
@@ -195,8 +195,19 @@ class TerminalSession:
         current_time = time.time()
         time_since_last_send = (current_time - self._last_send_time) * 1000  # Convert to milliseconds
         
-        # Add new data to pending buffer
+        # Add new data to pending buffer with simple size limiting
+        # Always add the new data first
         self._pending_data += data
+        
+        # Simple size limiting - only trim if we exceed the 30KB limit significantly
+        pending_size = len(self._pending_data.encode('utf-8'))
+        if pending_size > TERMINAL_BUFFER_SIZE_LIMIT_BYTES:
+            # Only do minimal ANSI-safe trimming from the beginning
+            excess_bytes = pending_size - TERMINAL_BUFFER_SIZE_LIMIT_BYTES
+            trim_pos = self._find_minimal_safe_trim_position(excess_bytes)
+            
+            if trim_pos > 0:
+                self._pending_data = self._pending_data[trim_pos:]
         
         # Cancel existing debounce task if any
         if self._debounce_task and not self._debounce_task.done():
@@ -221,6 +232,38 @@ class TerminalSession:
                 pass
         
         self._debounce_task = asyncio.create_task(_debounce_timer())
+
+    def _find_minimal_safe_trim_position(self, excess_bytes: int) -> int:
+        """Find a minimal safe position to trim that only avoids breaking ANSI sequences."""
+        import re
+        
+        # Find the basic character-safe position
+        trim_pos = 0
+        current_bytes = 0
+        for i, char in enumerate(self._pending_data):
+            char_bytes = len(char.encode('utf-8'))
+            if current_bytes + char_bytes > excess_bytes:
+                trim_pos = i
+                break
+            current_bytes += char_bytes
+        
+        # Only adjust if we're breaking an ANSI sequence
+        search_start = max(0, trim_pos - 20)  # Much smaller search area
+        text_before_trim = self._pending_data[search_start:trim_pos]
+        
+        # Check if we're in the middle of an incomplete ANSI sequence
+        incomplete_pattern = r'\x1b\[[0-9;]*$'
+        if re.search(incomplete_pattern, text_before_trim):
+            # Find the start of this sequence and trim before it
+            last_esc = text_before_trim.rfind('\x1b[')
+            if last_esc >= 0:
+                return search_start + last_esc
+        
+        # Check if we're cutting right after an ESC character
+        if trim_pos > 0 and self._pending_data[trim_pos - 1] == '\x1b':
+            return trim_pos - 1
+        
+        return trim_pos
 
     def _add_to_buffer(self, data: str) -> None:
         """Add data to buffer while maintaining size limit."""
