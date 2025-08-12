@@ -46,6 +46,7 @@ from .handlers import (
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
 )
+from .handlers.project_aware_file_handlers import ProjectAwareFileWriteHandler
 from .handlers.session import SessionManager
 
 logger = logging.getLogger(__name__)
