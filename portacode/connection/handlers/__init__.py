@@ -34,6 +34,7 @@ from .project_state_handlers import (
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
+    ProjectStateGitCommitHandler,
 )
 
 __all__ = [
@@ -65,4 +66,5 @@ __all__ = [
     "ProjectStateGitStageHandler",
     "ProjectStateGitUnstageHandler",
     "ProjectStateGitRevertHandler",
+    "ProjectStateGitCommitHandler",
 ] 

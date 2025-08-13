@@ -1255,6 +1255,48 @@ class GitManager:
             logger.error("Error reverting file %s: %s", file_path, e)
             raise RuntimeError(f"Failed to revert file: {e}")
     
+    def commit_changes(self, message: str) -> bool:
+        """Commit staged changes with the given message."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        if not message or not message.strip():
+            raise ValueError("Commit message cannot be empty")
+        
+        try:
+            # Handle repositories with no previous commits (first commit)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if not has_head:
+                # For the first commit, check if anything is staged
+                try:
+                    staged_output = self.repo.git.diff('--cached', '--name-only')
+                    has_staged = bool(staged_output.strip())
+                except Exception:
+                    has_staged = False
+            else:
+                # Check if there are staged changes to commit
+                staged_changes = self.repo.index.diff("HEAD")
+                has_staged = len(staged_changes) > 0
+            
+            if not has_staged:
+                raise RuntimeError("No staged changes to commit")
+            
+            # Perform the commit
+            commit = self.repo.index.commit(message.strip())
+            logger.info("Successfully committed changes with hash: %s", commit.hexsha)
+            logger.info("Commit message: %s", message.strip())
+            
+            return True
+            
+        except Exception as e:
+            logger.error("Error committing changes: %s", e)
+            raise RuntimeError(f"Failed to commit changes: {e}")
+    
     def start_periodic_monitoring(self):
         """Start periodic monitoring of git status changes."""
         if not self.is_git_repo or not self._change_callback:

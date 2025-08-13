@@ -609,7 +609,7 @@ class FileOperationsTest(BaseTest):
             # But there may be additional edge cases with other project state operations
             if not current_content_before_ops:
                 stats.record_stat("content_reverted_by_other_operations", True)
-                print("⚠️ Content was reverted by other project state operations (not save-related)")
+                # print("⚠️ Content was reverted by other project state operations (not save-related)")
                 # Don't fail the test - this is a known edge case. The main save bug is fixed.
                 # Just skip the rest of this test section
             else:

@@ -26,6 +26,7 @@ from .project_state.handlers import (
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
+    ProjectStateGitCommitHandler,
     handle_client_session_cleanup
 )
 

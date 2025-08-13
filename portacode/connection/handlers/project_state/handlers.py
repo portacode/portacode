@@ -494,6 +494,64 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         }
 
 
+class ProjectStateGitCommitHandler(AsyncHandler):
+    """Handler for committing staged changes in git for a project."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_git_commit"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Commit staged changes with the given commit message."""
+        server_project_id = message.get("project_id")
+        commit_message = message.get("commit_message")
+        source_client_session = message.get("source_client_session")
+        
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not commit_message:
+            raise ValueError("commit_message is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        logger.info("Committing changes for project %s (client session: %s) with message: %s", 
+                   server_project_id, source_client_session, commit_message[:50] + "..." if len(commit_message) > 50 else commit_message)
+        
+        # Get the project state manager
+        manager = get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Get git manager for the client session
+        git_manager = manager.git_managers.get(source_client_session)
+        if not git_manager:
+            raise ValueError("No git repository found for this project")
+        
+        # Commit the staged changes
+        success = False
+        error_message = None
+        commit_hash = None
+        
+        try:
+            success = git_manager.commit_changes(commit_message)
+            if success:
+                # Get the commit hash of the new commit
+                commit_hash = git_manager.get_head_commit_hash()
+                
+                # Refresh entire project state to ensure consistency
+                await manager._refresh_project_state(source_client_session)
+        except Exception as e:
+            error_message = str(e)
+            logger.error("Error during commit: %s", error_message)
+        
+        return {
+            "event": "project_state_git_commit_response",
+            "project_id": server_project_id,
+            "commit_message": commit_message,
+            "success": success,
+            "error": error_message,
+            "commit_hash": commit_hash
+        }
+
+
 # Handler for explicit client session cleanup
 async def handle_client_session_cleanup(handler, payload: Dict[str, Any], source_client_session: str) -> Dict[str, Any]:
     """Handle explicit cleanup of a client session when server notifies of permanent disconnection."""

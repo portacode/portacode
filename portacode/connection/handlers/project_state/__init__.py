@@ -49,6 +49,7 @@ from .handlers import (
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
+    ProjectStateGitCommitHandler,
     handle_client_session_cleanup
 )
 
@@ -83,6 +84,7 @@ __all__ = [
     'ProjectStateGitStageHandler',
     'ProjectStateGitUnstageHandler',
     'ProjectStateGitRevertHandler',
+    'ProjectStateGitCommitHandler',
     'handle_client_session_cleanup',
     
     # Utils

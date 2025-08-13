@@ -45,6 +45,7 @@ from .handlers import (
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
+    ProjectStateGitCommitHandler,
 )
 from .handlers.project_aware_file_handlers import ProjectAwareFileWriteHandler
 from .handlers.session import SessionManager
@@ -443,6 +444,7 @@ class TerminalManager:
         self._command_registry.register(ProjectStateGitStageHandler)
         self._command_registry.register(ProjectStateGitUnstageHandler)
         self._command_registry.register(ProjectStateGitRevertHandler)
+        self._command_registry.register(ProjectStateGitCommitHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway

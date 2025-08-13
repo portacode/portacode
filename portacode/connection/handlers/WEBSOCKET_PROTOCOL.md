@@ -32,6 +32,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_git_stage`](#project_state_git_stage)
     - [`project_state_git_unstage`](#project_state_git_unstage)
     - [`project_state_git_revert`](#project_state_git_revert)
+    - [`project_state_git_commit`](#project_state_git_commit)
   - [Client Session Management](#client-session-management)
     - [`client_sessions_update`](#client_sessions_update)
 - [Events](#events)
@@ -68,6 +69,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_git_stage_response`](#project_state_git_stage_response)
     - [`project_state_git_unstage_response`](#project_state_git_unstage_response)
     - [`project_state_git_revert_response`](#project_state_git_revert_response)
+    - [`project_state_git_commit_response`](#project_state_git_commit_response)
   - [Client Session Events](#client-session-events)
     - [`request_client_sessions`](#request_client_sessions)
   - [Terminal Data](#terminal-data)
@@ -446,6 +448,20 @@ Reverts a file to its HEAD version, discarding local changes in the project's gi
 **Responses:**
 
 *   On success, the device will respond with a [`project_state_git_revert_response`](#project_state_git_revert_response) event, followed by a [`project_state_update`](#project_state_update) event with updated git status.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_git_commit`
+
+Commits staged changes with a commit message in the project's git repository. Handled by [`project_state_git_commit`](./project_state_handlers.py).
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `commit_message` (string, mandatory): The commit message for the changes being committed.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_git_commit_response`](#project_state_git_commit_response) event, followed by a [`project_state_update`](#project_state_update) event with updated git status.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### Client Session Management
@@ -887,6 +903,18 @@ Confirms the result of a git revert operation.
 *   `file_path` (string, mandatory): The path to the file that was reverted.
 *   `success` (boolean, mandatory): Whether the revert operation was successful.
 *   `error` (string, optional): Error message if the operation failed.
+
+### <a name="project_state_git_commit_response"></a>`project_state_git_commit_response`
+
+Confirms the result of a git commit operation.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `commit_message` (string, mandatory): The commit message that was used.
+*   `success` (boolean, mandatory): Whether the commit operation was successful.
+*   `error` (string, optional): Error message if the operation failed.
+*   `commit_hash` (string, optional): The SHA hash of the new commit if successful.
 
 ### Client Session Events
 
