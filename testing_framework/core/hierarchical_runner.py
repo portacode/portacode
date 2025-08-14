@@ -19,15 +19,20 @@ class HierarchicalTestRunner(TestRunner):
         super().__init__(base_path, output_dir, clear_results)
         self.dependency_graph: Dict[str, List[str]] = {}
         self.test_states: Dict[str, TestResult] = {}
+        self.pending_teardowns: Dict[str, BaseTest] = {}  # Tests waiting for teardown
+        self.dependents_map: Dict[str, Set[str]] = {}  # Map test_name -> set of dependent test names
         
     def build_dependency_graph(self, tests: List[BaseTest]) -> Dict[str, List[str]]:
         """Build dependency graph from tests."""
         graph = defaultdict(list)
+        dependents_map = defaultdict(set)
         
         for test in tests:
             for dependency in test.depends_on:
                 graph[dependency].append(test.name)
-                
+                dependents_map[dependency].add(test.name)
+        
+        self.dependents_map = dict(dependents_map)        
         return dict(graph)
     
     def topological_sort(self, tests: List[BaseTest]) -> List[BaseTest]:
@@ -100,6 +105,51 @@ class HierarchicalTestRunner(TestRunner):
         # Return tests in dependency order
         return [test_map[name] for name in needed_tests if name in test_map]
     
+    def get_all_dependents(self, test_name: str) -> Set[str]:
+        """Get all direct and indirect dependents of a test."""
+        all_dependents = set()
+        to_check = [test_name]
+        
+        while to_check:
+            current = to_check.pop(0)
+            if current in self.dependents_map:
+                for dependent in self.dependents_map[current]:
+                    if dependent not in all_dependents:
+                        all_dependents.add(dependent)
+                        to_check.append(dependent)
+        
+        return all_dependents
+    
+    def all_dependents_completed(self, test_name: str, completed_tests: Set[str], failed_tests: Set[str]) -> bool:
+        """Check if all dependents of a test have completed (passed or failed)."""
+        all_dependents = self.get_all_dependents(test_name)
+        if not all_dependents:
+            return True  # No dependents, can teardown immediately
+            
+        # Check if all dependents have completed
+        for dependent in all_dependents:
+            if dependent not in completed_tests and dependent not in failed_tests:
+                return False
+        return True
+    
+    async def run_pending_teardowns(self, completed_tests: Set[str], failed_tests: Set[str]):
+        """Execute teardowns for tests whose dependents have all completed."""
+        tests_to_teardown = []
+        
+        # Find tests ready for teardown
+        for test_name, test_instance in list(self.pending_teardowns.items()):
+            if self.all_dependents_completed(test_name, completed_tests, failed_tests):
+                tests_to_teardown.append((test_name, test_instance))
+        
+        # Execute teardowns
+        for test_name, test_instance in tests_to_teardown:
+            try:
+                self.logger.info(f"Running delayed teardown for {test_name}")
+                await test_instance.teardown()
+                del self.pending_teardowns[test_name]
+            except Exception as e:
+                self.logger.error(f"Error during delayed teardown for {test_name}: {e}")
+    
     async def run_tests_by_names(self, test_names: List[str], progress_callback=None) -> Dict[str, Any]:
         """Run specific tests by name, automatically including dependencies."""
         all_tests = self.discovery.discover_tests(str(self.base_path))
@@ -132,9 +182,10 @@ class HierarchicalTestRunner(TestRunner):
         if not tests:
             return {"success": False, "message": "No tests found", "results": []}
         
-        # Sort tests by dependencies
+        # Sort tests by dependencies and build dependency maps
         try:
             ordered_tests = self.topological_sort(tests)
+            self.dependency_graph = self.build_dependency_graph(tests)
         except ValueError as e:
             return {"success": False, "message": str(e), "results": []}
         
@@ -144,6 +195,7 @@ class HierarchicalTestRunner(TestRunner):
         completed_tests: Set[str] = set()
         failed_tests: Set[str] = set()
         self.test_states = {}
+        self.pending_teardowns = {}
         
         # Use the parent class setup
         await self._setup_test_run(ordered_tests, progress_callback)
@@ -208,8 +260,22 @@ class HierarchicalTestRunner(TestRunner):
                     except Exception as e:
                         self.logger.error(f"Error saving trace for failed test {test.name}: {e}")
             
+            # Run any pending teardowns that are now ready
+            await self.run_pending_teardowns(completed_tests, failed_tests)
+            
             if progress_callback:
                 progress_callback('complete', test, i + 1, len(ordered_tests), result)
+        
+        # Run any remaining pending teardowns
+        if self.pending_teardowns:
+            self.logger.info(f"Running final teardowns for {len(self.pending_teardowns)} remaining tests")
+            for test_name, test_instance in self.pending_teardowns.items():
+                try:
+                    self.logger.info(f"Running final teardown for {test_name}")
+                    await test_instance.teardown()
+                except Exception as e:
+                    self.logger.error(f"Error during final teardown for {test_name}: {e}")
+            self.pending_teardowns.clear()
         
         # Generate final report
         return await self._finalize_test_run()
@@ -291,9 +357,15 @@ class HierarchicalTestRunner(TestRunner):
             # Update duration
             result.duration = time.time() - test_start
             
-            # Run test teardown (but don't cleanup shared playwright)
-            self.logger.info(f"Running teardown for {test.name}")
-            await test.teardown()
+            # Check if this test has dependents that are still running
+            if test.name in self.dependents_map and self.dependents_map[test.name]:
+                # This test has dependents, delay teardown until all dependents complete
+                self.logger.info(f"Test {test.name} has dependents {self.dependents_map[test.name]}, delaying teardown")
+                self.pending_teardowns[test.name] = test
+            else:
+                # No dependents or dependents already completed, run teardown immediately
+                self.logger.info(f"Running immediate teardown for {test.name}")
+                await test.teardown()
             
             return result
             
