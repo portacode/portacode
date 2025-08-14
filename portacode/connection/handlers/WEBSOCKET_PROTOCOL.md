@@ -721,6 +721,7 @@ Confirms that project state has been successfully initialized for a client sessi
 
 **Event Fields:**
 
+*   `project_id` (string, mandatory): The project ID for the initialized project state.
 *   `project_folder_path` (string, mandatory): The absolute path to the project folder.
 *   `is_git_repo` (boolean, mandatory): Whether the project folder is a Git repository.
 *   `git_branch` (string, optional): The current Git branch name if available.

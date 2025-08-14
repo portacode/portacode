@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import asdict
 from typing import Any, Dict, Optional, List
 
 from .multiplex import Multiplexer, Channel
@@ -631,11 +632,13 @@ class TerminalManager:
                     # Send initial project state to the client
                     initial_state_payload = {
                         "event": "project_state_initialized",
+                        "project_id": project_state.client_session_id,  # Add missing project_id field
                         "project_folder_path": project_state.project_folder_path,
                         "is_git_repo": project_state.is_git_repo,
                         "git_branch": project_state.git_branch,
                         "git_status_summary": project_state.git_status_summary,
-                        "open_tabs": [manager._serialize_tab_info(tab) for tab in project_state.open_tabs],
+                        "git_detailed_status": asdict(project_state.git_detailed_status) if project_state.git_detailed_status and hasattr(project_state.git_detailed_status, '__dataclass_fields__') else None,  # Add missing git_detailed_status field
+                        "open_tabs": [manager._serialize_tab_info(tab) for tab in project_state.open_tabs.values()],  # Fix to use .values() for dict
                         "active_tab": manager._serialize_tab_info(project_state.active_tab) if project_state.active_tab else None,
                         "items": [manager._serialize_file_item(item) for item in project_state.items],
                         "timestamp": time.time(),
