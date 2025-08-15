@@ -192,10 +192,18 @@ class TestRunner:
             tb_lines = traceback.format_tb(exc_traceback)
             user_code_line = None
             
-            for line in tb_lines:
-                if 'test_modules/' in line or 'run(self)' in line:
+            # Look for the LAST occurrence in user test code (most specific failure point)
+            for line in reversed(tb_lines):
+                if 'test_modules/' in line and '.py' in line:
                     user_code_line = line.strip()
                     break
+            
+            # If no test_modules line found, look for any line with async context
+            if not user_code_line:
+                for line in reversed(tb_lines):
+                    if 'await' in line or 'async' in line:
+                        user_code_line = line.strip()
+                        break
             
             # Create detailed error message
             error_details = [f"Test execution failed: {str(e)}"]

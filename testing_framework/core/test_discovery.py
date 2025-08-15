@@ -16,7 +16,7 @@ class TestDiscovery:
     def __init__(self, test_directories: Optional[List[str]] = None):
         self.test_directories = test_directories or ["tests", "test_modules"]
         self.logger = logging.getLogger("test_discovery")
-        self.logger.setLevel(logging.WARNING)  # Only show warnings and errors
+        self.logger.setLevel(logging.ERROR)  # Show errors during discovery
         self.discovered_tests: Dict[str, BaseTest] = {}
         
     def discover_tests(self, base_path: str = ".") -> Dict[str, BaseTest]:
@@ -60,10 +60,14 @@ class TestDiscovery:
                             self.discovered_tests[test_instance.name] = test_instance
                             self.logger.debug(f"Discovered test: {test_instance.name}")
                         except Exception as e:
-                            self.logger.error(f"Failed to instantiate test {name}: {e}")
+                            error_msg = f"Failed to instantiate test {name} in {file_path}: {e}"
+                            self.logger.error(error_msg)
+                            print(f"❌ {error_msg}")  # Also print to console for immediate visibility
                             
         except Exception as e:
-            self.logger.error(f"Failed to load test file {file_path}: {e}")
+            error_msg = f"Failed to load test file {file_path}: {e}"
+            self.logger.error(error_msg)
+            print(f"❌ {error_msg}")  # Also print to console for immediate visibility
     
     def get_tests_by_category(self, category: TestCategory) -> List[BaseTest]:
         """Get all tests belonging to a specific category."""

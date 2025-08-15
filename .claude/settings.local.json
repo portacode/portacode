@@ -16,6 +16,7 @@
       "Bash(./connect.sh)",
       "Bash(git -C /home/menas/testing_folder status --porcelain)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits"
   }
 }

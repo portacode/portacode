@@ -312,6 +312,29 @@ class PlaywrightManager:
         except Exception as e:
             self.logger.error(f"Failed to write actions log: {e}")
     
+    async def log_timeline_marker(self, phase: str, description: str = ""):
+        """Log a timeline marker for better test debugging and trace correlation."""
+        timestamp = datetime.now().isoformat()
+        marker_details = {
+            "phase": phase,
+            "description": description,
+            "timestamp": timestamp
+        }
+        
+        # Log to actions for timeline tracking
+        await self.log_action("TIMELINE_MARKER", marker_details)
+        
+        # Also log to console for visibility in trace viewer
+        if self.page:
+            try:
+                # Inject a console log into the page that will show up in traces
+                script = f"""
+                console.log('🧪 TEST PHASE: {phase}' + ({repr(description)} ? ' - ' + {repr(description)} : ''));
+                """
+                asyncio.create_task(self.page.evaluate(script))
+            except Exception as e:
+                self.logger.warning(f"Could not inject timeline marker into page: {e}")
+    
     def _handle_console_message(self, msg):
         """Handle console messages from the page."""
         console_entry = {
