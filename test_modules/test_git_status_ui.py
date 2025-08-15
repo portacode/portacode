@@ -21,7 +21,7 @@ class GitStatusUITest(BaseTest):
             description="Test git status expandable section in file explorer UI",
             tags=["git", "ui", "file-explorer", "expandable"],
             depends_on=["file_operations_test"],
-            start_url="/dashboard/"
+            start_url="/project/1d98e739-de00-4d65-a13b-c6c82173683f/"
         )
         
     
@@ -31,71 +31,6 @@ class GitStatusUITest(BaseTest):
         assert_that = self.assert_that()
         stats = self.stats()
         
-        # Navigate to testing_folder project (self-contained navigation)
-        # The navigate_testing_folder_test dependency ensures the git repo exists,
-        # but we need to navigate to it ourselves since tests don't share UI state
-        device_card = page.locator(".device-card.online").filter(has_text="portacode streamer")
-        await device_card.wait_for()
-        
-        editor_button = device_card.get_by_text("Editor")
-        await editor_button.wait_for()
-        await editor_button.click()
-        
-        # Wait for the project selector modal and select testing_folder
-        await page.wait_for_selector("#projectSelectorModal.show", timeout=10000)
-        await self.playwright_manager.take_screenshot("project_modal_opened")
-        
-        await page.wait_for_selector(".item-list .section-header", timeout=10000)
-        await self.playwright_manager.take_screenshot("project_list_loaded")
-        
-        # Try to find the testing_folder project specifically
-        testing_folder_item = page.locator('.item.project').filter(has_text="testing_folder")
-        testing_folder_count = await testing_folder_item.count()
-        
-        # List all available projects for debugging
-        all_project_items = page.locator('.item.project')
-        all_project_count = await all_project_items.count()
-        stats.record_stat("total_projects_available", all_project_count)
-        
-        if testing_folder_count > 0:
-            await testing_folder_item.first.click()
-            await self.playwright_manager.take_screenshot("testing_folder_selected")
-            stats.record_stat("found_testing_folder", True)
-        else:
-            # Take screenshot of available projects for debugging
-            await self.playwright_manager.take_screenshot("available_projects_debug")
-            
-            # Fallback approach: find any project that might contain git files
-            if all_project_count > 0:
-                await all_project_items.first.click()
-                await self.playwright_manager.take_screenshot("fallback_project_selected")
-                stats.record_stat("found_testing_folder", False)
-                stats.record_stat("used_fallback_project", True)
-            else:
-                await self.playwright_manager.take_screenshot("no_projects_found")
-                assert_that.is_true(False, "No projects found in modal - navigate_testing_folder_test may have failed to create the testing_folder")
-                return TestResult(self.name, False, "No projects available")
-        
-        # Wait for modal to close and project to load
-        await page.wait_for_selector("#projectSelectorModal.show", state="hidden", timeout=10000)
-        await self.playwright_manager.take_screenshot("project_modal_closed")
-        
-        # Wait longer for file explorer to load properly and show project files
-        await page.wait_for_timeout(8000)  # Increased wait time
-        await self.playwright_manager.take_screenshot("after_longer_wait")
-        
-        # Try to wait for specific elements that indicate the project loaded
-        try:
-            # Wait for file items to appear (this indicates project loaded successfully)
-            await page.wait_for_selector(".file-item", timeout=10000)
-            await self.playwright_manager.take_screenshot("files_appeared")
-        except:
-            # If no files appear, continue anyway - maybe it's an empty project
-            await self.playwright_manager.take_screenshot("no_files_appeared")
-            pass
-        
-        # Take initial screenshot to see the state
-        await self.playwright_manager.take_screenshot("initial_file_explorer")
         
         # Check if project loaded properly - look for files in explorer
         file_items = page.locator(".file-item")
@@ -121,6 +56,29 @@ class GitStatusUITest(BaseTest):
         
         # Continue even if file explorer appears empty - the git section might still work
         # The title bar shows "testing_folder" which suggests project is loaded
+
+        # PHASE 0: Test git diff viewer from file explorer
+        diff_options = [
+            '.context-menu-item:has-text("View Staged Changes")',
+            '.context-menu-item:has-text("View Unstaged Changes")',
+            '.context-menu-item:has-text("View All Changes")',
+        ]
+        new_file_item = page.locator('.file-item:has(.file-name:text("new_file1.py"))')
+        for option in diff_options:
+            await new_file_item.first.click(button='right')
+            await page.locator(option).hover()
+            await page.wait_for_timeout(500)  # Wait for context menu to appear
+            await self.playwright_manager.take_screenshot(f"before_clicking_diff_option_{option.split(':')[1]}")
+            await page.locator(option).click()
+            await page.wait_for_timeout(1000)
+
+        staged_diff_tab = page.locator('.editor-tab:has-text("(head → staged)")')
+        unstaged_diff_tab = page.locator('.editor-tab:has-text("(staged → working)")')
+        all_diff_tab = page.locator('.editor-tab:has-text("(head → working)")')
+
+        assert_that.is_true(await staged_diff_tab.is_visible(), "Staged diff tab should be visible")
+        assert_that.is_true(await unstaged_diff_tab.is_visible(), "Unstaged diff tab should be visible")
+        assert_that.is_true(await all_diff_tab.is_visible(), "All changes diff tab should be visible")
         
         # PHASE 1: Test git status section expansion/collapse
         stats.start_timer("git_section_detection")
