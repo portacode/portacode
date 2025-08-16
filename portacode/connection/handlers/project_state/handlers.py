@@ -580,3 +580,183 @@ async def handle_client_session_cleanup(handler, payload: Dict[str, Any], source
         "client_session_id": client_session_id,
         "success": True
     }
+
+
+class ProjectStateDiffContentHandler(AsyncHandler):
+    """Handler for requesting specific diff content for diff tabs."""
+    
+    @property
+    def command_name(self) -> str:
+        return "project_state_diff_content_request"
+    
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Request specific content for a diff tab (original, modified, or html_diff)."""
+        server_project_id = message.get("project_id")
+        file_path = message.get("file_path")
+        from_ref = message.get("from_ref")
+        to_ref = message.get("to_ref")
+        from_hash = message.get("from_hash")
+        to_hash = message.get("to_hash")
+        content_type = message.get("content_type")  # 'original', 'modified', 'html_diff'
+        request_id = message.get("request_id")
+        source_client_session = message.get("source_client_session")
+        
+        # Validate required fields
+        if not server_project_id:
+            raise ValueError("project_id is required")
+        if not file_path:
+            raise ValueError("file_path is required")
+        if not from_ref:
+            raise ValueError("from_ref is required")
+        if not to_ref:
+            raise ValueError("to_ref is required")
+        if not content_type:
+            raise ValueError("content_type is required")
+        if not request_id:
+            raise ValueError("request_id is required")
+        if not source_client_session:
+            raise ValueError("source_client_session is required")
+        
+        # Validate content_type
+        valid_content_types = ["original", "modified", "html_diff", "all"]
+        if content_type not in valid_content_types:
+            raise ValueError(f"content_type must be one of: {valid_content_types}")
+        
+        # Get the project state manager
+        manager = get_or_create_project_state_manager(self.context, self.control_channel)
+        
+        # Get the project state for this client session
+        if source_client_session not in manager.projects:
+            raise ValueError(f"No project state found for client session: {source_client_session}")
+        
+        project_state = manager.projects[source_client_session]
+        
+        try:
+            # Find the diff tab with matching parameters
+            matching_tab = None
+            for tab in project_state.open_tabs.values():
+                if tab.tab_type == "diff" and tab.file_path == file_path:
+                    # Get diff parameters from metadata
+                    tab_metadata = getattr(tab, 'metadata', {}) or {}
+                    tab_from_ref = tab_metadata.get('from_ref')
+                    tab_to_ref = tab_metadata.get('to_ref')
+                    tab_from_hash = tab_metadata.get('from_hash')
+                    tab_to_hash = tab_metadata.get('to_hash')
+                    
+                    if (tab_from_ref == from_ref and 
+                        tab_to_ref == to_ref and
+                        tab_from_hash == from_hash and
+                        tab_to_hash == to_hash):
+                        matching_tab = tab
+                        break
+            
+            if not matching_tab:
+                # Debug information
+                logger.error(f"No diff tab found for file_path={file_path}, from_ref={from_ref}, to_ref={to_ref}")
+                logger.error(f"Available diff tabs: {[(tab.file_path, getattr(tab, 'metadata', {})) for tab in project_state.open_tabs.values() if tab.tab_type == 'diff']}")
+                raise ValueError(f"No diff tab found matching the specified parameters: file_path={file_path}, from_ref={from_ref}, to_ref={to_ref}")
+            
+            # Get the requested content based on type
+            content = None
+            if content_type == "original":
+                content = matching_tab.original_content
+            elif content_type == "modified":
+                content = matching_tab.modified_content
+            elif content_type == "html_diff":
+                # For html_diff, we need to get the HTML diff versions from metadata
+                html_diff_versions = getattr(matching_tab, 'metadata', {}).get('html_diff_versions')
+                if html_diff_versions:
+                    import json
+                    content = json.dumps(html_diff_versions)
+            elif content_type == "all":
+                # Return all content types as a JSON object
+                html_diff_versions = getattr(matching_tab, 'metadata', {}).get('html_diff_versions')
+                import json
+                content = json.dumps({
+                    "original_content": matching_tab.original_content,
+                    "modified_content": matching_tab.modified_content,
+                    "html_diff_versions": html_diff_versions
+                })
+            
+            # If content is None or incomplete for "all", regenerate if needed
+            if content is None or (content_type == "all" and not all([matching_tab.original_content, matching_tab.modified_content])):
+                if content_type in ["original", "modified", "all"]:
+                    # Re-generate the diff content if needed
+                    await manager.create_diff_tab(
+                        source_client_session, 
+                        file_path, 
+                        from_ref, 
+                        to_ref, 
+                        from_hash, 
+                        to_hash,
+                        activate=False  # Don't activate, just ensure content is loaded
+                    )
+                    
+                    # Try to get content again after regeneration (use same matching logic)
+                    updated_tab = None
+                    for tab in project_state.open_tabs.values():
+                        if tab.tab_type == "diff" and tab.file_path == file_path:
+                            tab_metadata = getattr(tab, 'metadata', {}) or {}
+                            if (tab_metadata.get('from_ref') == from_ref and 
+                                tab_metadata.get('to_ref') == to_ref and
+                                tab_metadata.get('from_hash') == from_hash and
+                                tab_metadata.get('to_hash') == to_hash):
+                                updated_tab = tab
+                                break
+                    
+                    if updated_tab:
+                        if content_type == "original":
+                            content = updated_tab.original_content
+                        elif content_type == "modified":
+                            content = updated_tab.modified_content
+                        elif content_type == "html_diff":
+                            html_diff_versions = getattr(updated_tab, 'metadata', {}).get('html_diff_versions')
+                            if html_diff_versions:
+                                import json
+                                content = json.dumps(html_diff_versions)
+                        elif content_type == "all":
+                            html_diff_versions = getattr(updated_tab, 'metadata', {}).get('html_diff_versions')
+                            import json
+                            content = json.dumps({
+                                "original_content": updated_tab.original_content,
+                                "modified_content": updated_tab.modified_content,
+                                "html_diff_versions": html_diff_versions
+                            })
+            
+            success = content is not None
+            response = {
+                "event": "project_state_diff_content_response",
+                "project_id": server_project_id,
+                "file_path": file_path,
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "content_type": content_type,
+                "request_id": request_id,
+                "success": success
+            }
+            
+            if from_hash:
+                response["from_hash"] = from_hash
+            if to_hash:
+                response["to_hash"] = to_hash
+            
+            if success:
+                response["content"] = content
+            else:
+                response["error"] = f"Failed to load {content_type} content for diff"
+            
+            return response
+            
+        except Exception as e:
+            logger.error("Error processing diff content request: %s", e)
+            return {
+                "event": "project_state_diff_content_response",
+                "project_id": server_project_id,
+                "file_path": file_path,
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "content_type": content_type,
+                "request_id": request_id,
+                "success": False,
+                "error": str(e)
+            }

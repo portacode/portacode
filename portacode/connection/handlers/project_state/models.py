@@ -19,6 +19,13 @@ class TabInfo:
     content: Optional[str] = None  # Text content or base64 for media
     original_content: Optional[str] = None  # For diff view
     modified_content: Optional[str] = None  # For diff view
+    
+    # Content hash fields for caching optimization
+    content_hash: Optional[str] = None  # SHA-256 hash of content
+    original_content_hash: Optional[str] = None  # SHA-256 hash of original_content for diffs
+    modified_content_hash: Optional[str] = None  # SHA-256 hash of modified_content for diffs
+    html_diff_hash: Optional[str] = None  # SHA-256 hash of html_diff_versions JSON
+    
     is_dirty: bool = False  # Has unsaved changes
     mime_type: Optional[str] = None  # For media files
     encoding: Optional[str] = None  # Content encoding (base64, utf-8, etc.)

@@ -9,6 +9,9 @@ from .base import AsyncHandler, SyncHandler
 
 logger = logging.getLogger(__name__)
 
+# Global content cache: hash -> content
+_content_cache = {}
+
 
 class FileReadHandler(SyncHandler):
     """Handler for reading file contents."""
@@ -366,3 +369,53 @@ class FileRenameHandler(SyncHandler):
             raise RuntimeError(f"Permission denied: {old_path}")
         except OSError as e:
             raise RuntimeError(f"Failed to rename: {e}")
+
+
+class ContentRequestHandler(SyncHandler):
+    """Handler for requesting content by hash for caching optimization."""
+    
+    @property
+    def command_name(self) -> str:
+        return "content_request"
+    
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Return content by hash if available."""
+        content_hash = message.get("content_hash")
+        request_id = message.get("request_id")
+        
+        if not content_hash:
+            raise ValueError("content_hash parameter is required")
+        if not request_id:
+            raise ValueError("request_id parameter is required")
+        
+        # Check if content is in cache
+        content = _content_cache.get(content_hash)
+        
+        if content is not None:
+            return {
+                "event": "content_response",
+                "request_id": request_id,
+                "content_hash": content_hash,
+                "content": content,
+                "success": True,
+            }
+        else:
+            # Content not found in cache
+            return {
+                "event": "content_response",
+                "request_id": request_id,
+                "content_hash": content_hash,
+                "content": None,
+                "success": False,
+                "error": "Content not found in cache",
+            }
+
+
+def cache_content(content_hash: str, content: str) -> None:
+    """Cache content by hash for future retrieval."""
+    _content_cache[content_hash] = content
+
+
+def get_cached_content(content_hash: str) -> str:
+    """Get cached content by hash."""
+    return _content_cache.get(content_hash)

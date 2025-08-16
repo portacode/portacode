@@ -22,6 +22,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`file_create`](#file_create)
     - [`folder_create`](#folder_create)
     - [`file_rename`](#file_rename)
+    - [`content_request`](#content_request)
   - [Project State Actions](#project-state-actions)
     - [`project_state_folder_expand`](#project_state_folder_expand)
     - [`project_state_folder_collapse`](#project_state_folder_collapse)
@@ -29,6 +30,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_tab_close`](#project_state_tab_close)
     - [`project_state_set_active_tab`](#project_state_set_active_tab)
     - [`project_state_diff_open`](#project_state_diff_open)
+    - [`project_state_diff_content_request`](#project_state_diff_content_request)
     - [`project_state_git_stage`](#project_state_git_stage)
     - [`project_state_git_unstage`](#project_state_git_unstage)
     - [`project_state_git_revert`](#project_state_git_revert)
@@ -57,6 +59,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`file_create_response`](#file_create_response)
     - [`folder_create_response`](#folder_create_response)
     - [`file_rename_response`](#file_rename_response)
+    - [`content_response`](#content_response)
   - [Project State Events](#project-state-events)
     - [`project_state_initialized`](#project_state_initialized)
     - [`project_state_update`](#project_state_update)
@@ -66,6 +69,7 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`project_state_tab_close_response`](#project_state_tab_close_response)
     - [`project_state_set_active_tab_response`](#project_state_set_active_tab_response)
     - [`project_state_diff_open_response`](#project_state_diff_open_response)
+    - [`project_state_diff_content_response`](#project_state_diff_content_response)
     - [`project_state_git_stage_response`](#project_state_git_stage_response)
     - [`project_state_git_unstage_response`](#project_state_git_unstage_response)
     - [`project_state_git_revert_response`](#project_state_git_revert_response)
@@ -298,6 +302,20 @@ Renames a file or folder. Handled by [`file_rename`](./file_handlers.py).
 *   On success, the device will respond with a [`file_rename_response`](#file_rename_response) event.
 *   On error, a generic [`error`](#error) event is sent.
 
+### `content_request`
+
+Requests cached content by SHA-256 hash. This action is used to implement content caching for performance optimization, allowing clients to request large content (such as file content, HTML diffs, etc.) by hash instead of receiving it in every WebSocket message. Handled by [`content_request`](./file_handlers.py).
+
+**Payload Fields:**
+
+*   `content_hash` (string, mandatory): The SHA-256 hash of the content to retrieve (with "sha256:" prefix).
+*   `request_id` (string, mandatory): A unique identifier for this request, used to match with the response.
+
+**Responses:**
+
+*   On success, the device will respond with a [`content_response`](#content_response) event containing the cached content.
+*   On error (content not found), a [`content_response`](#content_response) event with `success: false` is sent.
+
 ## Project State Actions
 
 Project state actions manage the state of project folders, including file structures, Git metadata, open files, and folder expansion states. These actions provide real-time synchronization between the client and server for project management functionality.
@@ -406,6 +424,36 @@ Opens a diff tab for comparing file versions at different points in the git time
 **Responses:**
 
 *   On success, the device will respond with a [`project_state_diff_open_response`](#project_state_diff_open_response) event, followed by a [`project_state_update`](#project_state_update) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `project_state_diff_content_request`
+
+Requests the content for a specific diff tab identified by its diff parameters. This action is used to load the actual file content (original and modified) as well as HTML diff data for diff tabs after they have been created by [`project_state_diff_open`](#project_state_diff_open).
+
+**Content Types:** This action can request content for a diff:
+- `original`: The original (from) content of the diff
+- `modified`: The modified (to) content of the diff  
+- `html_diff`: The HTML diff versions for rich visual display
+- `all`: All content types returned as a single JSON object (recommended for efficiency)
+
+**Payload Fields:**
+
+*   `project_id` (string, mandatory): The project ID from the initialized project state.
+*   `file_path` (string, mandatory): The absolute path to the file the diff is for.
+*   `from_ref` (string, mandatory): The source reference point used in the diff. Must match the diff tab parameters.
+*   `to_ref` (string, mandatory): The target reference point used in the diff. Must match the diff tab parameters.
+*   `from_hash` (string, optional): The commit hash for `from_ref` if it was `"commit"`. Must match the diff tab parameters.
+*   `to_hash` (string, optional): The commit hash for `to_ref` if it was `"commit"`. Must match the diff tab parameters.
+*   `content_type` (string, mandatory): The type of content to request. Must be one of:
+    - `"original"`: Request the original (from) content
+    - `"modified"`: Request the modified (to) content
+    - `"html_diff"`: Request the HTML diff versions for visual display
+    - `"all"`: Request all content types as a single JSON object
+*   `request_id` (string, mandatory): Unique identifier for this request to match with the response.
+
+**Responses:**
+
+*   On success, the device will respond with a [`project_state_diff_content_response`](#project_state_diff_content_response) event.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### `project_state_git_stage`
@@ -713,6 +761,18 @@ Confirms that a file or folder has been renamed successfully in response to a `f
 *   `is_directory` (boolean, mandatory): Indicates whether the renamed item is a directory.
 *   `success` (boolean, mandatory): Indicates whether the rename was successful.
 
+### <a name="content_response"></a>`content_response`
+
+Returns cached content in response to a `content_request` action. This is part of the content caching system used for performance optimization. Handled by [`content_request`](./file_handlers.py).
+
+**Event Fields:**
+
+*   `request_id` (string, mandatory): The unique identifier from the corresponding request, used to match request and response.
+*   `content_hash` (string, mandatory): The SHA-256 hash that was requested.
+*   `content` (string, optional): The cached content if found and `success` is true. Null if content was not found.
+*   `success` (boolean, mandatory): Indicates whether the content was found and returned successfully.
+*   `error` (string, optional): Error message if `success` is false (e.g., "Content not found in cache").
+
 ### Project State Events
 
 ### <a name="project_state_initialized"></a>`project_state_initialized`
@@ -752,13 +812,17 @@ Confirms that project state has been successfully initialized for a client sessi
     *   `tab_type` (string, mandatory): Type of tab ("file", "diff", "untitled", "image", "audio", "video").
     *   `title` (string, mandatory): Display title for the tab.
     *   `file_path` (string, optional): Path for file-based tabs.
-    *   `content` (string, optional): Text content or base64 for media.
-    *   `original_content` (string, optional): For diff tabs - original content.
-    *   `modified_content` (string, optional): For diff tabs - modified content.
+    *   `content` (string, optional): Text content or base64 for media. When content caching is enabled, this field may be excluded from project state events if the content is available via `content_hash`.
+    *   `original_content` (string, optional): For diff tabs - original content. When content caching is enabled, this field may be excluded from project state events if the content is available via `original_content_hash`.
+    *   `modified_content` (string, optional): For diff tabs - modified content. When content caching is enabled, this field may be excluded from project state events if the content is available via `modified_content_hash`.
     *   `is_dirty` (boolean, mandatory): Whether the tab has unsaved changes.
     *   `mime_type` (string, optional): MIME type for media files.
     *   `encoding` (string, optional): Content encoding (base64, utf-8, etc.).
-    *   `metadata` (object, optional): Additional metadata.
+    *   `metadata` (object, optional): Additional metadata. When content caching is enabled, large metadata such as `html_diff_versions` may be excluded from project state events if available via `html_diff_hash`.
+    *   `content_hash` (string, optional): SHA-256 hash of the tab content for content caching optimization. When present, the content can be retrieved via [`content_request`](#content_request) action.
+    *   `original_content_hash` (string, optional): SHA-256 hash of the original content for diff tabs. When present, the original content can be retrieved via [`content_request`](#content_request) action.
+    *   `modified_content_hash` (string, optional): SHA-256 hash of the modified content for diff tabs. When present, the modified content can be retrieved via [`content_request`](#content_request) action.
+    *   `html_diff_hash` (string, optional): SHA-256 hash of the HTML diff versions JSON for diff tabs. When present, the HTML diff data can be retrieved via [`content_request`](#content_request) action as a JSON string.
 *   `active_tab` (object, optional): The currently active tab object, or null if no tab is active.
 *   `items` (array, mandatory): Flattened array of all visible file/folder items. Always includes root level items and one level down from the project root (since the project root is treated as expanded by default). Also includes items within explicitly expanded folders and one level down from each expanded folder. Each item object contains the following fields:
     *   `name` (string, mandatory): The file or directory name.
@@ -870,6 +934,24 @@ Confirms the result of opening a diff tab with git timeline references.
 *   `from_hash` (string, optional): The commit hash used for `from_ref` if it was `"commit"`.
 *   `to_hash` (string, optional): The commit hash used for `to_ref` if it was `"commit"`.
 *   `success` (boolean, mandatory): Whether the diff tab creation was successful.
+*   `error` (string, optional): Error message if the operation failed.
+
+### <a name="project_state_diff_content_response"></a>`project_state_diff_content_response`
+
+Returns the requested content for a specific diff tab, sent in response to a [`project_state_diff_content_request`](#project_state_diff_content_request) action.
+
+**Event Fields:**
+
+*   `project_id` (string, mandatory): The project ID the operation was performed on.
+*   `file_path` (string, mandatory): The path to the file the diff content is for.
+*   `from_ref` (string, mandatory): The source reference point used in the diff.
+*   `to_ref` (string, mandatory): The target reference point used in the diff.
+*   `from_hash` (string, optional): The commit hash used for `from_ref` if it was `"commit"`.
+*   `to_hash` (string, optional): The commit hash used for `to_ref` if it was `"commit"`.
+*   `content_type` (string, mandatory): The type of content being returned (`"original"`, `"modified"`, or `"html_diff"`).
+*   `request_id` (string, mandatory): The unique identifier from the request to match response with request.
+*   `success` (boolean, mandatory): Whether the content retrieval was successful.
+*   `content` (string, optional): The requested content. For `html_diff` type, this is a JSON string containing the HTML diff versions object. For `all` type, this is a JSON string containing an object with `original_content`, `modified_content`, and `html_diff_versions` fields.
 *   `error` (string, optional): Error message if the operation failed.
 
 ### <a name="project_state_git_stage_response"></a>`project_state_git_stage_response`

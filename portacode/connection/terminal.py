@@ -30,25 +30,28 @@ from .handlers import (
     TerminalListHandler,
     SystemInfoHandler,
     FileReadHandler,
-    FileWriteHandler,
     DirectoryListHandler,
     FileInfoHandler,
     FileDeleteHandler,
-    FileCreateHandler,
-    FolderCreateHandler,
     FileRenameHandler,
+    ContentRequestHandler,
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
     ProjectStateFileOpenHandler,
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
     ProjectStateDiffOpenHandler,
+    ProjectStateDiffContentHandler,
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
     ProjectStateGitCommitHandler,
 )
-from .handlers.project_aware_file_handlers import ProjectAwareFileWriteHandler
+from .handlers.project_aware_file_handlers import (
+    ProjectAwareFileWriteHandler,
+    ProjectAwareFileCreateHandler,
+    ProjectAwareFolderCreateHandler,
+)
 from .handlers.session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -398,6 +401,7 @@ class TerminalManager:
             "session_manager": self._session_manager,
             "client_session_manager": self._client_session_manager,
             "mux": mux,
+            "use_content_caching": True,  # Enable content caching optimization
             "debug": self.debug,
         }
         
@@ -428,13 +432,14 @@ class TerminalManager:
         self._command_registry.register(SystemInfoHandler)
         # File operation handlers
         self._command_registry.register(FileReadHandler)
-        self._command_registry.register(FileWriteHandler)
+        self._command_registry.register(ProjectAwareFileWriteHandler)  # Use project-aware version
         self._command_registry.register(DirectoryListHandler)
         self._command_registry.register(FileInfoHandler)
         self._command_registry.register(FileDeleteHandler)
-        self._command_registry.register(FileCreateHandler)
-        self._command_registry.register(FolderCreateHandler)
+        self._command_registry.register(ProjectAwareFileCreateHandler)  # Use project-aware version
+        self._command_registry.register(ProjectAwareFolderCreateHandler)  # Use project-aware version
         self._command_registry.register(FileRenameHandler)
+        self._command_registry.register(ContentRequestHandler)
         # Project state handlers
         self._command_registry.register(ProjectStateFolderExpandHandler)
         self._command_registry.register(ProjectStateFolderCollapseHandler)
@@ -442,6 +447,7 @@ class TerminalManager:
         self._command_registry.register(ProjectStateTabCloseHandler)
         self._command_registry.register(ProjectStateSetActiveTabHandler)
         self._command_registry.register(ProjectStateDiffOpenHandler)
+        self._command_registry.register(ProjectStateDiffContentHandler)
         self._command_registry.register(ProjectStateGitStageHandler)
         self._command_registry.register(ProjectStateGitUnstageHandler)
         self._command_registry.register(ProjectStateGitRevertHandler)

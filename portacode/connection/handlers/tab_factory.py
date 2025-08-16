@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from .project_state_handlers import TabInfo
+from .project_state.utils import generate_content_hash
+from .file_handlers import cache_content
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,11 @@ class TabFactory:
         # Determine how to handle the file
         if extension in IGNORED_EXTENSIONS:
             tab_info['metadata']['ignored'] = True
-            tab_info['content'] = f"# Binary file not displayed\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}"
+            content = f"# Binary file not displayed\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}"
+            tab_info['content'] = content
+            content_hash = generate_content_hash(content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, content)
             return TabInfo(**tab_info)
         
         # Handle different file types
@@ -181,6 +187,12 @@ class TabFactory:
         if diff_details:
             metadata['diff_details'] = diff_details
         
+        # Cache diff content
+        original_hash = generate_content_hash(original_content)
+        modified_hash = generate_content_hash(modified_content)
+        cache_content(original_hash, original_content)
+        cache_content(modified_hash, modified_content)
+        
         return TabInfo(
             tab_id=tab_id,
             tab_type='diff',
@@ -189,6 +201,8 @@ class TabFactory:
             content=None,  # Diff tabs don't use regular content
             original_content=original_content,
             modified_content=modified_content,
+            original_content_hash=original_hash,
+            modified_content_hash=modified_hash,
             is_dirty=False,
             mime_type=None,
             encoding='utf-8',
@@ -219,6 +233,12 @@ class TabFactory:
         if diff_details:
             metadata['diff_details'] = diff_details
         
+        # Cache diff content
+        original_hash = generate_content_hash(original_content)
+        modified_hash = generate_content_hash(modified_content)
+        cache_content(original_hash, original_content)
+        cache_content(modified_hash, modified_content)
+        
         return TabInfo(
             tab_id=tab_id,
             tab_type='diff',
@@ -227,6 +247,8 @@ class TabFactory:
             content=None,  # Diff tabs don't use regular content
             original_content=original_content,
             modified_content=modified_content,
+            original_content_hash=original_hash,
+            modified_content_hash=modified_hash,
             is_dirty=False,
             mime_type=None,
             encoding='utf-8',
@@ -248,12 +270,17 @@ class TabFactory:
         if tab_id is None:
             tab_id = str(uuid.uuid4())
         
+        # Cache untitled content
+        content_hash = generate_content_hash(content)
+        cache_content(content_hash, content)
+        
         return TabInfo(
             tab_id=tab_id,
             tab_type='untitled',
             title="Untitled",
             file_path=None,
             content=content,
+            content_hash=content_hash,
             original_content=None,
             modified_content=None,
             is_dirty=bool(content),  # Dirty if has initial content
@@ -265,7 +292,11 @@ class TabFactory:
     async def _load_text_content(self, file_path: Path, tab_info: Dict[str, Any], file_size: int):
         """Load text content from file."""
         if file_size > MAX_TEXT_FILE_SIZE:
-            tab_info['content'] = f"# File too large to display\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}\n# Maximum size for text files: {self._format_file_size(MAX_TEXT_FILE_SIZE)}"
+            content = f"# File too large to display\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}\n# Maximum size for text files: {self._format_file_size(MAX_TEXT_FILE_SIZE)}"
+            tab_info['content'] = content
+            content_hash = generate_content_hash(content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, content)
             tab_info['metadata']['truncated'] = True
             return
         
@@ -275,6 +306,9 @@ class TabFactory:
                 try:
                     content = file_path.read_text(encoding=encoding)
                     tab_info['content'] = content
+                    content_hash = generate_content_hash(content)
+                    tab_info['content_hash'] = content_hash
+                    cache_content(content_hash, content)
                     tab_info['encoding'] = encoding
                     self.logger.debug(f"Successfully loaded {file_path} with {encoding} encoding")
                     return
@@ -287,14 +321,22 @@ class TabFactory:
             
         except OSError as e:
             self.logger.error(f"Error reading file {file_path}: {e}")
-            tab_info['content'] = f"# Error reading file\n# {e}"
+            content = f"# Error reading file\n# {e}"
+            tab_info['content'] = content
+            content_hash = generate_content_hash(content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, content)
             tab_info['metadata']['error'] = str(e)
     
     async def _load_media_content(self, file_path: Path, tab_info: Dict[str, Any], 
                                 file_size: int, mime_type: Optional[str]):
         """Load media content as base64."""
         if file_size > MAX_BINARY_FILE_SIZE:
-            tab_info['content'] = f"# Media file too large to display\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}"
+            content = f"# Media file too large to display\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}"
+            tab_info['content'] = content
+            content_hash = generate_content_hash(content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, content)
             tab_info['metadata']['too_large'] = True
             return
         
@@ -313,6 +355,9 @@ class TabFactory:
             base64_content = base64.b64encode(binary_content).decode('ascii')
             
             tab_info['content'] = base64_content
+            content_hash = generate_content_hash(base64_content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, base64_content)
             tab_info['encoding'] = 'base64'
             tab_info['metadata']['original_size'] = file_size
             
@@ -320,12 +365,20 @@ class TabFactory:
             
         except OSError as e:
             self.logger.error(f"Error reading media file {file_path}: {e}")
-            tab_info['content'] = f"# Error loading media file\n# {e}"
+            content = f"# Error loading media file\n# {e}"
+            tab_info['content'] = content
+            content_hash = generate_content_hash(content)
+            tab_info['content_hash'] = content_hash
+            cache_content(content_hash, content)
             tab_info['metadata']['error'] = str(e)
     
     async def _load_binary_content(self, file_path: Path, tab_info: Dict[str, Any], file_size: int):
         """Handle binary files that can't be displayed."""
-        tab_info['content'] = f"# Binary file\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}\n# Type: {tab_info.get('mime_type', 'Unknown')}\n\n# This file contains binary data and cannot be displayed as text."
+        content = f"# Binary file\n# File: {file_path.name}\n# Size: {self._format_file_size(file_size)}\n# Type: {tab_info.get('mime_type', 'Unknown')}\n\n# This file contains binary data and cannot be displayed as text."
+        tab_info['content'] = content
+        content_hash = generate_content_hash(content)
+        tab_info['content_hash'] = content_hash
+        cache_content(content_hash, content)
         tab_info['metadata']['binary'] = True
         self.logger.debug(f"Marked {file_path} as binary file")
     

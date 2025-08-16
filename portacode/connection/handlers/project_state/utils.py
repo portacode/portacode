@@ -4,6 +4,7 @@ This module contains shared utility functions used across the project state
 management system, including tab key generation and other helper functions.
 """
 
+import hashlib
 import uuid
 
 
@@ -32,3 +33,18 @@ def generate_tab_key(tab_type: str, file_path: str, **kwargs) -> str:
     else:
         # For other tab types, use file_path if available, otherwise tab_id
         return file_path if file_path else kwargs.get('tab_id', str(uuid.uuid4()))
+
+
+def generate_content_hash(content: str) -> str:
+    """Generate SHA-256 hash of content for caching.
+    
+    Args:
+        content: The string content to hash
+        
+    Returns:
+        SHA-256 hash prefixed with 'sha256:'
+    """
+    if content is None:
+        return None
+    
+    return "sha256:" + hashlib.sha256(content.encode('utf-8')).hexdigest()

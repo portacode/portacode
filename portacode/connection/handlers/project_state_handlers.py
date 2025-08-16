@@ -23,6 +23,7 @@ from .project_state.handlers import (
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
     ProjectStateDiffOpenHandler,
+    ProjectStateDiffContentHandler,
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,

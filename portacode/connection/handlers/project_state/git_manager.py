@@ -925,14 +925,6 @@ class GitManager:
                     
                     # For staged files in no-HEAD repo, they are all "added" (new files)
                     diff_details = None
-                    if content_hash and os.path.exists(file_abs_path):
-                        try:
-                            with open(file_abs_path, 'r', encoding='utf-8') as f:
-                                working_content = f.read()
-                            # Compare empty content vs staged content (new file)
-                            diff_details = self._compute_diff_details("", working_content)
-                        except (OSError, UnicodeDecodeError):
-                            diff_details = None
                     
                     change = GitFileChange(
                         file_repo_path=file_repo_path,
@@ -990,17 +982,11 @@ class GitManager:
                 elif change_type == 'untracked':
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # For new files, compare empty content vs current staged content
-                    if content_hash:
-                        staged_content = self.get_file_content_staged(file_abs_path) or ""
-                        diff_details = self._compute_diff_details("", staged_content)
-                    else:
-                        diff_details = None
+                    diff_details = None
                 else:  # modified
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # Compare HEAD content vs staged content
-                    head_content = self.get_file_content_at_commit(file_abs_path) or ""
-                    staged_content = self.get_file_content_staged(file_abs_path) or ""
-                    diff_details = self._compute_diff_details(head_content, staged_content)
+                    diff_details = None
                 
                 change = GitFileChange(
                     file_repo_path=file_repo_path,
@@ -1034,29 +1020,12 @@ class GitManager:
                     change_type = 'added'
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # For new files, compare empty content vs current working content
-                    if content_hash and os.path.exists(file_abs_path):
-                        try:
-                            with open(file_abs_path, 'r', encoding='utf-8') as f:
-                                working_content = f.read()
-                            diff_details = self._compute_diff_details("", working_content)
-                        except (OSError, UnicodeDecodeError):
-                            diff_details = None
-                    else:
-                        diff_details = None
+                    diff_details = None
                 else:
                     change_type = 'modified'
                     content_hash = self._compute_file_hash(file_abs_path) if os.path.exists(file_abs_path) else None
                     # Compare staged/index content vs working content
-                    staged_content = self.get_file_content_staged(file_abs_path) or ""
-                    if os.path.exists(file_abs_path):
-                        try:
-                            with open(file_abs_path, 'r', encoding='utf-8') as f:
-                                working_content = f.read()
-                            diff_details = self._compute_diff_details(staged_content, working_content)
-                        except (OSError, UnicodeDecodeError):
-                            diff_details = None
-                    else:
-                        diff_details = None
+                    diff_details = None
                 
                 change = GitFileChange(
                     file_repo_path=file_repo_path,
@@ -1084,13 +1053,6 @@ class GitManager:
                 
                 # For untracked files, compare empty content vs current file content
                 diff_details = None
-                if content_hash and os.path.exists(file_abs_path):
-                    try:
-                        with open(file_abs_path, 'r', encoding='utf-8') as f:
-                            working_content = f.read()
-                        diff_details = self._compute_diff_details("", working_content)
-                    except (OSError, UnicodeDecodeError):
-                        diff_details = None
                 
                 change = GitFileChange(
                     file_repo_path=file_repo_path,

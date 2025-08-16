@@ -23,6 +23,7 @@ from .file_handlers import (
     FileCreateHandler,
     FolderCreateHandler,
     FileRenameHandler,
+    ContentRequestHandler,
 )
 from .project_state_handlers import (
     ProjectStateFolderExpandHandler,
@@ -31,6 +32,7 @@ from .project_state_handlers import (
     ProjectStateTabCloseHandler,
     ProjectStateSetActiveTabHandler,
     ProjectStateDiffOpenHandler,
+    ProjectStateDiffContentHandler,
     ProjectStateGitStageHandler,
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
@@ -56,6 +58,7 @@ __all__ = [
     "FileCreateHandler",
     "FolderCreateHandler",
     "FileRenameHandler",
+    "ContentRequestHandler",
     # Project state handlers
     "ProjectStateFolderExpandHandler",
     "ProjectStateFolderCollapseHandler",
@@ -63,6 +66,7 @@ __all__ = [
     "ProjectStateTabCloseHandler",
     "ProjectStateSetActiveTabHandler",
     "ProjectStateDiffOpenHandler",
+    "ProjectStateDiffContentHandler",
     "ProjectStateGitStageHandler",
     "ProjectStateGitUnstageHandler",
     "ProjectStateGitRevertHandler",

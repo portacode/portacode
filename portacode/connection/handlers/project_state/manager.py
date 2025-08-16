@@ -38,6 +38,9 @@ class ProjectStateManager:
         self.debug_mode = False
         self.debug_file_path: Optional[str] = None
         
+        # Content caching optimization
+        self.use_content_caching = context.get("use_content_caching", False)
+        
         # Debouncing for file changes
         self._change_debounce_timer: Optional[asyncio.Task] = None
         self._pending_changes: Set[str] = set()
@@ -102,7 +105,28 @@ class ProjectStateManager:
     
     def _serialize_tab_info(self, tab: TabInfo) -> Dict[str, Any]:
         """Serialize TabInfo for JSON output."""
-        return asdict(tab) if hasattr(tab, '__dataclass_fields__') else {}
+        if not hasattr(tab, '__dataclass_fields__'):
+            return {}
+        
+        tab_dict = asdict(tab)
+        
+        # If content caching is enabled, exclude content fields to reduce payload size
+        if self.use_content_caching:
+            # Only include hashes, not the actual content
+            tab_dict.pop('content', None)
+            tab_dict.pop('original_content', None) 
+            tab_dict.pop('modified_content', None)
+            # Keep the hashes for client-side cache lookup
+            # content_hash, original_content_hash, modified_content_hash remain
+            
+            # Also exclude large metadata for diff tabs
+            if tab_dict.get('metadata'):
+                metadata = tab_dict['metadata']
+                # Remove massive HTML diff content that can be megabytes
+                metadata.pop('html_diff_versions', None)
+                metadata.pop('diff_details', None)
+            
+        return tab_dict
     
     async def initialize_project_state(self, client_session_id: str, project_folder_path: str) -> ProjectState:
         """Initialize project state for a client session."""
@@ -1005,6 +1029,25 @@ class ProjectStateManager:
         
         logger.info("Cleaned up %d project states", len(client_session_ids))
     
+    async def refresh_project_state_for_file_change(self, file_path: str):
+        """Public method to trigger project state refresh for a specific file change."""
+        logger.info(f"Manual refresh triggered for file change: {file_path}")
+        
+        # Find project states that include this file path
+        for client_session_id, project_state in self.projects.items():
+            project_folder = Path(project_state.project_folder_path)
+            
+            # Check if the file is within this project
+            try:
+                Path(file_path).relative_to(project_folder)
+                # File is within this project, trigger refresh
+                logger.info(f"Refreshing project state for session {client_session_id} after file change: {file_path}")
+                await self._refresh_project_state(client_session_id)
+                break
+            except ValueError:
+                # File is not within this project
+                continue
+
     def cleanup_orphaned_project_states(self, current_client_sessions: List[str]):
         """Clean up project states that don't match any current client session."""
         current_sessions_set = set(current_client_sessions)
