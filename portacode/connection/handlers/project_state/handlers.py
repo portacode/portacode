@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict, List
 
 from ..base import AsyncHandler
+from ..chunked_content import create_chunked_response
 from .manager import get_or_create_project_state_manager
 
 logger = logging.getLogger(__name__)
@@ -724,7 +725,7 @@ class ProjectStateDiffContentHandler(AsyncHandler):
                             })
             
             success = content is not None
-            response = {
+            base_response = {
                 "event": "project_state_diff_content_response",
                 "project_id": server_project_id,
                 "file_path": file_path,
@@ -736,20 +737,29 @@ class ProjectStateDiffContentHandler(AsyncHandler):
             }
             
             if from_hash:
-                response["from_hash"] = from_hash
+                base_response["from_hash"] = from_hash
             if to_hash:
-                response["to_hash"] = to_hash
+                base_response["to_hash"] = to_hash
             
             if success:
-                response["content"] = content
+                # Create chunked responses for large content
+                responses = create_chunked_response(base_response, "content", content)
+                
+                # Send all responses
+                for response in responses:
+                    await self.send_response(response, project_id=server_project_id)
+                
+                logger.info(f"Sent diff content response in {len(responses)} chunk(s) for {content_type} content")
             else:
-                response["error"] = f"Failed to load {content_type} content for diff"
+                base_response["error"] = f"Failed to load {content_type} content for diff"
+                base_response["chunked"] = False
+                await self.send_response(base_response, project_id=server_project_id)
             
-            return response
+            return  # AsyncHandler doesn't return responses, it sends them
             
         except Exception as e:
             logger.error("Error processing diff content request: %s", e)
-            return {
+            error_response = {
                 "event": "project_state_diff_content_response",
                 "project_id": server_project_id,
                 "file_path": file_path,
@@ -758,5 +768,7 @@ class ProjectStateDiffContentHandler(AsyncHandler):
                 "content_type": content_type,
                 "request_id": request_id,
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "chunked": False
             }
+            await self.send_response(error_response, project_id=server_project_id)

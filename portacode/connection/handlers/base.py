@@ -114,11 +114,15 @@ class AsyncHandler(BaseHandler):
             response = await self.execute(message)
             logger.info("handler: Command %s executed successfully", self.command_name)
             
-            # Extract project_id from response for session targeting
-            project_id = response.get("project_id")
-            logger.info("handler: %s response project_id=%s, response=%s", 
-                       self.command_name, project_id, response)
-            await self.send_response(response, reply_channel, project_id)
+            # Handle cases where execute() sends responses directly and returns None
+            if response is not None:
+                # Extract project_id from response for session targeting
+                project_id = response.get("project_id")
+                logger.info("handler: %s response project_id=%s, response=%s", 
+                           self.command_name, project_id, response)
+                await self.send_response(response, reply_channel, project_id)
+            else:
+                logger.info("handler: %s handled response transmission directly", self.command_name)
         except Exception as exc:
             logger.exception("handler: Error in async handler %s: %s", self.command_name, exc)
             # Extract project_id from original message for error targeting

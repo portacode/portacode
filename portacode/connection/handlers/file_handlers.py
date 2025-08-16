@@ -2,10 +2,11 @@
 
 import os
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from pathlib import Path
 
 from .base import AsyncHandler, SyncHandler
+from .chunked_content import create_chunked_response
 
 logger = logging.getLogger(__name__)
 
@@ -371,17 +372,18 @@ class FileRenameHandler(SyncHandler):
             raise RuntimeError(f"Failed to rename: {e}")
 
 
-class ContentRequestHandler(SyncHandler):
+class ContentRequestHandler(AsyncHandler):
     """Handler for requesting content by hash for caching optimization."""
     
     @property
     def command_name(self) -> str:
         return "content_request"
     
-    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Return content by hash if available."""
+    async def execute(self, message: Dict[str, Any]) -> None:
+        """Return content by hash if available, chunked for large content."""
         content_hash = message.get("content_hash")
         request_id = message.get("request_id")
+        source_client_session = message.get("source_client_session")
         
         if not content_hash:
             raise ValueError("content_hash parameter is required")
@@ -392,23 +394,34 @@ class ContentRequestHandler(SyncHandler):
         content = _content_cache.get(content_hash)
         
         if content is not None:
-            return {
+            # Create base response
+            base_response = {
                 "event": "content_response",
                 "request_id": request_id,
                 "content_hash": content_hash,
-                "content": content,
                 "success": True,
             }
+            
+            # Create chunked responses
+            responses = create_chunked_response(base_response, "content", content)
+            
+            # Send all responses
+            for response in responses:
+                await self.send_response(response, project_id=None)
+            
+            logger.info(f"Sent content response in {len(responses)} chunk(s) for hash: {content_hash[:16]}...")
         else:
             # Content not found in cache
-            return {
+            response = {
                 "event": "content_response",
                 "request_id": request_id,
                 "content_hash": content_hash,
                 "content": None,
                 "success": False,
                 "error": "Content not found in cache",
+                "chunked": False,
             }
+            await self.send_response(response, project_id=None)
 
 
 def cache_content(content_hash: str, content: str) -> None:

@@ -304,7 +304,7 @@ Renames a file or folder. Handled by [`file_rename`](./file_handlers.py).
 
 ### `content_request`
 
-Requests cached content by SHA-256 hash. This action is used to implement content caching for performance optimization, allowing clients to request large content (such as file content, HTML diffs, etc.) by hash instead of receiving it in every WebSocket message. Handled by [`content_request`](./file_handlers.py).
+Requests cached content by SHA-256 hash. This action is used to implement content caching for performance optimization, allowing clients to request large content (such as file content, HTML diffs, etc.) by hash instead of receiving it in every WebSocket message. For large content (>200KB), the response will be automatically chunked into multiple messages for reliable transmission. Handled by [`content_request`](./file_handlers.py).
 
 **Payload Fields:**
 
@@ -313,7 +313,7 @@ Requests cached content by SHA-256 hash. This action is used to implement conten
 
 **Responses:**
 
-*   On success, the device will respond with a [`content_response`](#content_response) event containing the cached content.
+*   On success, the device will respond with one or more [`content_response`](#content_response) events containing the cached content. Large content is automatically chunked.
 *   On error (content not found), a [`content_response`](#content_response) event with `success: false` is sent.
 
 ## Project State Actions
@@ -428,7 +428,7 @@ Opens a diff tab for comparing file versions at different points in the git time
 
 ### `project_state_diff_content_request`
 
-Requests the content for a specific diff tab identified by its diff parameters. This action is used to load the actual file content (original and modified) as well as HTML diff data for diff tabs after they have been created by [`project_state_diff_open`](#project_state_diff_open).
+Requests the content for a specific diff tab identified by its diff parameters. This action is used to load the actual file content (original and modified) as well as HTML diff data for diff tabs after they have been created by [`project_state_diff_open`](#project_state_diff_open). For large content (>200KB), the response will be automatically chunked into multiple messages for reliable transmission.
 
 **Content Types:** This action can request content for a diff:
 - `original`: The original (from) content of the diff
@@ -453,7 +453,7 @@ Requests the content for a specific diff tab identified by its diff parameters. 
 
 **Responses:**
 
-*   On success, the device will respond with a [`project_state_diff_content_response`](#project_state_diff_content_response) event.
+*   On success, the device will respond with one or more [`project_state_diff_content_response`](#project_state_diff_content_response) events. Large content is automatically chunked.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### `project_state_git_stage`
@@ -763,15 +763,65 @@ Confirms that a file or folder has been renamed successfully in response to a `f
 
 ### <a name="content_response"></a>`content_response`
 
-Returns cached content in response to a `content_request` action. This is part of the content caching system used for performance optimization. Handled by [`content_request`](./file_handlers.py).
+Returns cached content in response to a `content_request` action. This is part of the content caching system used for performance optimization. For large content (>200KB), the response is automatically chunked into multiple messages to ensure reliable transmission over WebSocket connections. Handled by [`content_request`](./file_handlers.py).
 
 **Event Fields:**
 
 *   `request_id` (string, mandatory): The unique identifier from the corresponding request, used to match request and response.
 *   `content_hash` (string, mandatory): The SHA-256 hash that was requested.
-*   `content` (string, optional): The cached content if found and `success` is true. Null if content was not found.
+*   `content` (string, optional): The cached content or chunk content if found and `success` is true. Null if content was not found.
 *   `success` (boolean, mandatory): Indicates whether the content was found and returned successfully.
 *   `error` (string, optional): Error message if `success` is false (e.g., "Content not found in cache").
+*   `chunked` (boolean, mandatory): Indicates whether this response is part of a chunked transfer. False for single responses, true for chunked responses.
+
+**Chunked Transfer Fields (when `chunked` is true):**
+
+*   `transfer_id` (string, mandatory): Unique identifier for the chunked transfer session.
+*   `chunk_index` (integer, mandatory): Zero-based index of this chunk in the sequence.
+*   `chunk_count` (integer, mandatory): Total number of chunks in the transfer.
+*   `chunk_size` (integer, mandatory): Size of this chunk in bytes.
+*   `total_size` (integer, mandatory): Total size of the complete content in bytes.
+*   `chunk_hash` (string, mandatory): SHA-256 hash of this chunk for verification.
+*   `is_final_chunk` (boolean, mandatory): Indicates if this is the last chunk in the sequence.
+
+**Chunked Transfer Process:**
+
+1. **Size Check**: Content >200KB is automatically chunked into 64KB chunks
+2. **Sequential Delivery**: Chunks are sent in order with increasing `chunk_index`
+3. **Client Assembly**: Client collects all chunks and verifies integrity using hashes
+4. **Hash Verification**: Both individual chunk hashes and final content hash are verified
+5. **Error Handling**: Missing chunks or hash mismatches trigger request failure
+
+**Example Non-Chunked Response:**
+```json
+{
+  "event": "content_response",
+  "request_id": "req_abc123",
+  "content_hash": "sha256:...",
+  "content": "Small content here",
+  "success": true,
+  "chunked": false
+}
+```
+
+**Example Chunked Response (first chunk):**
+```json
+{
+  "event": "content_response", 
+  "request_id": "req_abc123",
+  "content_hash": "sha256:...",
+  "content": "First chunk content...",
+  "success": true,
+  "chunked": true,
+  "transfer_id": "transfer_xyz789",
+  "chunk_index": 0,
+  "chunk_count": 5,
+  "chunk_size": 65536,
+  "total_size": 300000,
+  "chunk_hash": "chunk_sha256:...",
+  "is_final_chunk": false
+}
+```
 
 ### Project State Events
 
@@ -938,7 +988,7 @@ Confirms the result of opening a diff tab with git timeline references.
 
 ### <a name="project_state_diff_content_response"></a>`project_state_diff_content_response`
 
-Returns the requested content for a specific diff tab, sent in response to a [`project_state_diff_content_request`](#project_state_diff_content_request) action.
+Returns the requested content for a specific diff tab, sent in response to a [`project_state_diff_content_request`](#project_state_diff_content_request) action. For large content (>200KB), the response is automatically chunked into multiple messages to ensure reliable transmission over WebSocket connections.
 
 **Event Fields:**
 
@@ -948,11 +998,24 @@ Returns the requested content for a specific diff tab, sent in response to a [`p
 *   `to_ref` (string, mandatory): The target reference point used in the diff.
 *   `from_hash` (string, optional): The commit hash used for `from_ref` if it was `"commit"`.
 *   `to_hash` (string, optional): The commit hash used for `to_ref` if it was `"commit"`.
-*   `content_type` (string, mandatory): The type of content being returned (`"original"`, `"modified"`, or `"html_diff"`).
+*   `content_type` (string, mandatory): The type of content being returned (`"original"`, `"modified"`, `"html_diff"`, or `"all"`).
 *   `request_id` (string, mandatory): The unique identifier from the request to match response with request.
 *   `success` (boolean, mandatory): Whether the content retrieval was successful.
-*   `content` (string, optional): The requested content. For `html_diff` type, this is a JSON string containing the HTML diff versions object. For `all` type, this is a JSON string containing an object with `original_content`, `modified_content`, and `html_diff_versions` fields.
+*   `content` (string, optional): The requested content or chunk content. For `html_diff` type, this is a JSON string containing the HTML diff versions object. For `all` type, this is a JSON string containing an object with `original_content`, `modified_content`, and `html_diff_versions` fields.
 *   `error` (string, optional): Error message if the operation failed.
+*   `chunked` (boolean, mandatory): Indicates whether this response is part of a chunked transfer. False for single responses, true for chunked responses.
+
+**Chunked Transfer Fields (when `chunked` is true):**
+
+*   `transfer_id` (string, mandatory): Unique identifier for the chunked transfer session.
+*   `chunk_index` (integer, mandatory): Zero-based index of this chunk in the sequence.
+*   `chunk_count` (integer, mandatory): Total number of chunks in the transfer.
+*   `chunk_size` (integer, mandatory): Size of this chunk in bytes.
+*   `total_size` (integer, mandatory): Total size of the complete content in bytes.
+*   `chunk_hash` (string, mandatory): SHA-256 hash of this chunk for verification.
+*   `is_final_chunk` (boolean, mandatory): Indicates if this is the last chunk in the sequence.
+
+**Note:** The chunked transfer process follows the same pattern as described in [`content_response`](#content_response), with content >200KB automatically split into 64KB chunks for reliable transmission.
 
 ### <a name="project_state_git_stage_response"></a>`project_state_git_stage_response`
 
