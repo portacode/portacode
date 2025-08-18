@@ -1134,6 +1134,41 @@ class GitManager:
             logger.error("Error getting staged content for %s: %s", file_path, e)
             return None
     
+    def _is_submodule(self, file_path: str) -> bool:
+        """Check if the given path is a submodule."""
+        if not self.is_git_repo or not self.repo:
+            return False
+        
+        try:
+            # Convert to relative path from repo root
+            rel_path = os.path.relpath(file_path, self.repo.working_dir)
+            
+            # Check if this path is listed in .gitmodules
+            gitmodules_path = os.path.join(self.repo.working_dir, '.gitmodules')
+            if os.path.exists(gitmodules_path):
+                try:
+                    with open(gitmodules_path, 'r') as f:
+                        content = f.read()
+                        # Simple check - look for path = rel_path in .gitmodules
+                        for line in content.splitlines():
+                            if line.strip().startswith('path ='):
+                                submodule_path = line.split('=', 1)[1].strip()
+                                if submodule_path == rel_path:
+                                    return True
+                except Exception as e:
+                    logger.warning("Error reading .gitmodules: %s", e)
+            
+            # Alternative check: see if the path has a .git file (submodule indicator)
+            git_path = os.path.join(file_path, '.git')
+            if os.path.isfile(git_path):  # Submodules have .git as a file, not directory
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.warning("Error checking if %s is submodule: %s", file_path, e)
+            return False
+
     def stage_file(self, file_path: str) -> bool:
         """Stage a file for commit."""
         if not self.is_git_repo or not self.repo:
@@ -1143,8 +1178,15 @@ class GitManager:
             # Convert to relative path from repo root
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
-            # Stage the file
-            self.repo.index.add([rel_path])
+            # Check if this is a submodule
+            if self._is_submodule(file_path):
+                logger.info("Detected submodule, using git add command directly: %s", rel_path)
+                # For submodules, use git add directly to stage only the submodule reference
+                self.repo.git.add(rel_path)
+            else:
+                # For regular files, use the index method
+                self.repo.index.add([rel_path])
+            
             logger.info("Successfully staged file: %s", rel_path)
             return True
             
@@ -1161,19 +1203,25 @@ class GitManager:
             # Convert to relative path from repo root
             rel_path = os.path.relpath(file_path, self.repo.working_dir)
             
-            # Check if repository has any commits (HEAD exists)
-            try:
-                self.repo.head.commit
-                has_head = True
-            except Exception:
-                has_head = False
-            
-            if has_head:
-                # Reset the file from HEAD (unstage) - for repos with commits
+            # Check if this is a submodule
+            if self._is_submodule(file_path):
+                logger.info("Detected submodule, using git restore for unstaging: %s", rel_path)
+                # For submodules, always use git restore --staged (works with submodules)
                 self.repo.git.restore('--staged', rel_path)
             else:
-                # For repositories with no commits, use git rm --cached to unstage
-                self.repo.git.rm('--cached', rel_path)
+                # Check if repository has any commits (HEAD exists)
+                try:
+                    self.repo.head.commit
+                    has_head = True
+                except Exception:
+                    has_head = False
+                
+                if has_head:
+                    # Reset the file from HEAD (unstage) - for repos with commits
+                    self.repo.git.restore('--staged', rel_path)
+                else:
+                    # For repositories with no commits, use git rm --cached to unstage
+                    self.repo.git.rm('--cached', rel_path)
             
             logger.info("Successfully unstaged file: %s", rel_path)
             return True
@@ -1217,6 +1265,207 @@ class GitManager:
             logger.error("Error reverting file %s: %s", file_path, e)
             raise RuntimeError(f"Failed to revert file: {e}")
     
+    def stage_files(self, file_paths: List[str]) -> bool:
+        """Stage multiple files for commit in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        if not file_paths:
+            logger.info("No files provided for staging")
+            return True
+        
+        try:
+            # Convert all paths to relative paths from repo root
+            rel_paths = []
+            submodule_paths = []
+            
+            for file_path in file_paths:
+                rel_path = os.path.relpath(file_path, self.repo.working_dir)
+                if self._is_submodule(file_path):
+                    submodule_paths.append(rel_path)
+                else:
+                    rel_paths.append(rel_path)
+            
+            # Stage submodules using git add directly
+            if submodule_paths:
+                logger.info("Staging submodules using git add directly: %s", submodule_paths)
+                for submodule_path in submodule_paths:
+                    self.repo.git.add(submodule_path)
+            
+            # Stage regular files using index.add for efficiency
+            if rel_paths:
+                logger.info("Staging regular files: %s", rel_paths)
+                self.repo.index.add(rel_paths)
+            
+            logger.info("Successfully staged %d files (%d submodules, %d regular)", 
+                       len(file_paths), len(submodule_paths), len(rel_paths))
+            return True
+            
+        except Exception as e:
+            logger.error("Error staging files %s: %s", file_paths, e)
+            raise RuntimeError(f"Failed to stage files: {e}")
+
+    def unstage_files(self, file_paths: List[str]) -> bool:
+        """Unstage multiple files in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        if not file_paths:
+            logger.info("No files provided for unstaging")
+            return True
+        
+        try:
+            # Convert all paths to relative paths from repo root
+            rel_paths = []
+            submodule_paths = []
+            
+            for file_path in file_paths:
+                rel_path = os.path.relpath(file_path, self.repo.working_dir)
+                if self._is_submodule(file_path):
+                    submodule_paths.append(rel_path)
+                else:
+                    rel_paths.append(rel_path)
+            
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            # Unstage all files using appropriate method
+            all_rel_paths = rel_paths + submodule_paths
+            
+            if has_head:
+                # Use git restore --staged for all files (works for both regular files and submodules)
+                if all_rel_paths:
+                    self.repo.git.restore('--staged', *all_rel_paths)
+            else:
+                # For repositories with no commits, use git rm --cached
+                if all_rel_paths:
+                    self.repo.git.rm('--cached', *all_rel_paths)
+            
+            logger.info("Successfully unstaged %d files (%d submodules, %d regular)", 
+                       len(file_paths), len(submodule_paths), len(rel_paths))
+            return True
+            
+        except Exception as e:
+            logger.error("Error unstaging files %s: %s", file_paths, e)
+            raise RuntimeError(f"Failed to unstage files: {e}")
+
+    def revert_files(self, file_paths: List[str]) -> bool:
+        """Revert multiple files to their HEAD version in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        if not file_paths:
+            logger.info("No files provided for reverting")
+            return True
+        
+        try:
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if has_head:
+                # Convert to relative paths and restore all files at once
+                rel_paths = [os.path.relpath(file_path, self.repo.working_dir) for file_path in file_paths]
+                # Filter out submodules - we don't revert submodules as they don't have working directory changes
+                regular_files = []
+                for i, file_path in enumerate(file_paths):
+                    if not self._is_submodule(file_path):
+                        regular_files.append(rel_paths[i])
+                
+                if regular_files:
+                    self.repo.git.restore(*regular_files)
+                    logger.info("Successfully reverted %d files", len(regular_files))
+            else:
+                # For repositories with no commits, remove files to "revert" them
+                removed_count = 0
+                for file_path in file_paths:
+                    if not self._is_submodule(file_path) and os.path.exists(file_path):
+                        os.remove(file_path)
+                        removed_count += 1
+                logger.info("Successfully removed %d files (no HEAD to revert to)", removed_count)
+            
+            return True
+            
+        except Exception as e:
+            logger.error("Error reverting files %s: %s", file_paths, e)
+            raise RuntimeError(f"Failed to revert files: {e}")
+
+    def stage_all_changes(self) -> bool:
+        """Stage all changes (modified, deleted, untracked) in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Use git add . to stage everything - this is the most efficient way
+            self.repo.git.add('.')
+            logger.info("Successfully staged all changes using 'git add .'")
+            return True
+            
+        except Exception as e:
+            logger.error("Error staging all changes: %s", e)
+            raise RuntimeError(f"Failed to stage all changes: {e}")
+
+    def unstage_all_changes(self) -> bool:
+        """Unstage all staged changes in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if has_head:
+                # Use git restore --staged . to unstage everything
+                self.repo.git.restore('--staged', '.')
+            else:
+                # For repositories with no commits, remove everything from index
+                self.repo.git.rm('--cached', '-r', '.')
+            
+            logger.info("Successfully unstaged all changes")
+            return True
+            
+        except Exception as e:
+            logger.error("Error unstaging all changes: %s", e)
+            raise RuntimeError(f"Failed to unstage all changes: {e}")
+
+    def revert_all_changes(self) -> bool:
+        """Revert all working directory changes in one atomic operation."""
+        if not self.is_git_repo or not self.repo:
+            raise RuntimeError("Not a git repository")
+        
+        try:
+            # Check if repository has any commits (HEAD exists)
+            try:
+                self.repo.head.commit
+                has_head = True
+            except Exception:
+                has_head = False
+            
+            if has_head:
+                # Use git restore . to revert all working directory changes
+                self.repo.git.restore('.')
+                logger.info("Successfully reverted all working directory changes")
+            else:
+                logger.warning("Cannot revert changes in repository with no commits")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error("Error reverting all changes: %s", e)
+            raise RuntimeError(f"Failed to revert all changes: {e}")
+
     def commit_changes(self, message: str) -> bool:
         """Commit staged changes with the given message."""
         if not self.is_git_repo or not self.repo:

@@ -365,20 +365,33 @@ class ProjectStateGitStageHandler(AsyncHandler):
         return "project_state_git_stage"
     
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Stage a file in git for a project."""
+        """Stage file(s) in git for a project. Supports both single file and bulk operations."""
         server_project_id = message.get("project_id")
-        file_path = message.get("file_path")
+        file_path = message.get("file_path")  # Single file (backward compatibility)
+        file_paths = message.get("file_paths")  # Multiple files (bulk operation)
+        stage_all = message.get("stage_all", False)  # Stage all changes
         source_client_session = message.get("source_client_session")
         
         if not server_project_id:
             raise ValueError("project_id is required")
-        if not file_path:
-            raise ValueError("file_path is required")
         if not source_client_session:
             raise ValueError("source_client_session is required")
         
-        logger.info("Staging file %s for project %s (client session: %s)", 
-                   file_path, server_project_id, source_client_session)
+        # Determine operation mode
+        if stage_all:
+            operation_desc = "staging all changes"
+            file_paths_to_stage = []
+        elif file_paths:
+            operation_desc = f"staging {len(file_paths)} files"
+            file_paths_to_stage = file_paths
+        elif file_path:
+            operation_desc = f"staging file {file_path}"
+            file_paths_to_stage = [file_path]
+        else:
+            raise ValueError("Either file_path, file_paths, or stage_all must be provided")
+        
+        logger.info("%s for project %s (client session: %s)", 
+                   operation_desc.capitalize(), server_project_id, source_client_session)
         
         # Get the project state manager
         manager = get_or_create_project_state_manager(self.context, self.control_channel)
@@ -388,19 +401,34 @@ class ProjectStateGitStageHandler(AsyncHandler):
         if not git_manager:
             raise ValueError("No git repository found for this project")
         
-        # Stage the file
-        success = git_manager.stage_file(file_path)
+        # Perform the staging operation
+        if stage_all:
+            success = git_manager.stage_all_changes()
+        elif len(file_paths_to_stage) == 1:
+            success = git_manager.stage_file(file_paths_to_stage[0])
+        else:
+            success = git_manager.stage_files(file_paths_to_stage)
         
         if success:
             # Refresh entire project state to ensure consistency
             await manager._refresh_project_state(source_client_session)
         
-        return {
+        # Build response
+        response = {
             "event": "project_state_git_stage_response",
             "project_id": server_project_id,
-            "file_path": file_path,
             "success": success
         }
+        
+        # Include appropriate file information in response for backward compatibility
+        if file_path:
+            response["file_path"] = file_path
+        if file_paths:
+            response["file_paths"] = file_paths
+        if stage_all:
+            response["stage_all"] = True
+            
+        return response
 
 
 class ProjectStateGitUnstageHandler(AsyncHandler):
@@ -411,20 +439,33 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
         return "project_state_git_unstage"
     
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Unstage a file in git for a project."""
+        """Unstage file(s) in git for a project. Supports both single file and bulk operations."""
         server_project_id = message.get("project_id")
-        file_path = message.get("file_path")
+        file_path = message.get("file_path")  # Single file (backward compatibility)
+        file_paths = message.get("file_paths")  # Multiple files (bulk operation)
+        unstage_all = message.get("unstage_all", False)  # Unstage all changes
         source_client_session = message.get("source_client_session")
         
         if not server_project_id:
             raise ValueError("project_id is required")
-        if not file_path:
-            raise ValueError("file_path is required")
         if not source_client_session:
             raise ValueError("source_client_session is required")
         
-        logger.info("Unstaging file %s for project %s (client session: %s)", 
-                   file_path, server_project_id, source_client_session)
+        # Determine operation mode
+        if unstage_all:
+            operation_desc = "unstaging all changes"
+            file_paths_to_unstage = []
+        elif file_paths:
+            operation_desc = f"unstaging {len(file_paths)} files"
+            file_paths_to_unstage = file_paths
+        elif file_path:
+            operation_desc = f"unstaging file {file_path}"
+            file_paths_to_unstage = [file_path]
+        else:
+            raise ValueError("Either file_path, file_paths, or unstage_all must be provided")
+        
+        logger.info("%s for project %s (client session: %s)", 
+                   operation_desc.capitalize(), server_project_id, source_client_session)
         
         # Get the project state manager
         manager = get_or_create_project_state_manager(self.context, self.control_channel)
@@ -434,19 +475,34 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
         if not git_manager:
             raise ValueError("No git repository found for this project")
         
-        # Unstage the file
-        success = git_manager.unstage_file(file_path)
+        # Perform the unstaging operation
+        if unstage_all:
+            success = git_manager.unstage_all_changes()
+        elif len(file_paths_to_unstage) == 1:
+            success = git_manager.unstage_file(file_paths_to_unstage[0])
+        else:
+            success = git_manager.unstage_files(file_paths_to_unstage)
         
         if success:
             # Refresh entire project state to ensure consistency
             await manager._refresh_project_state(source_client_session)
         
-        return {
+        # Build response
+        response = {
             "event": "project_state_git_unstage_response",
             "project_id": server_project_id,
-            "file_path": file_path,
             "success": success
         }
+        
+        # Include appropriate file information in response for backward compatibility
+        if file_path:
+            response["file_path"] = file_path
+        if file_paths:
+            response["file_paths"] = file_paths
+        if unstage_all:
+            response["unstage_all"] = True
+            
+        return response
 
 
 class ProjectStateGitRevertHandler(AsyncHandler):
@@ -457,20 +513,33 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         return "project_state_git_revert"
     
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Revert a file in git for a project."""
+        """Revert file(s) in git for a project. Supports both single file and bulk operations."""
         server_project_id = message.get("project_id")
-        file_path = message.get("file_path")
+        file_path = message.get("file_path")  # Single file (backward compatibility)
+        file_paths = message.get("file_paths")  # Multiple files (bulk operation)
+        revert_all = message.get("revert_all", False)  # Revert all changes
         source_client_session = message.get("source_client_session")
         
         if not server_project_id:
             raise ValueError("project_id is required")
-        if not file_path:
-            raise ValueError("file_path is required")
         if not source_client_session:
             raise ValueError("source_client_session is required")
         
-        logger.info("Reverting file %s for project %s (client session: %s)", 
-                   file_path, server_project_id, source_client_session)
+        # Determine operation mode
+        if revert_all:
+            operation_desc = "reverting all changes"
+            file_paths_to_revert = []
+        elif file_paths:
+            operation_desc = f"reverting {len(file_paths)} files"
+            file_paths_to_revert = file_paths
+        elif file_path:
+            operation_desc = f"reverting file {file_path}"
+            file_paths_to_revert = [file_path]
+        else:
+            raise ValueError("Either file_path, file_paths, or revert_all must be provided")
+        
+        logger.info("%s for project %s (client session: %s)", 
+                   operation_desc.capitalize(), server_project_id, source_client_session)
         
         # Get the project state manager
         manager = get_or_create_project_state_manager(self.context, self.control_channel)
@@ -480,19 +549,34 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         if not git_manager:
             raise ValueError("No git repository found for this project")
         
-        # Revert the file
-        success = git_manager.revert_file(file_path)
+        # Perform the revert operation
+        if revert_all:
+            success = git_manager.revert_all_changes()
+        elif len(file_paths_to_revert) == 1:
+            success = git_manager.revert_file(file_paths_to_revert[0])
+        else:
+            success = git_manager.revert_files(file_paths_to_revert)
         
         if success:
             # Refresh entire project state to ensure consistency
             await manager._refresh_project_state(source_client_session)
         
-        return {
+        # Build response
+        response = {
             "event": "project_state_git_revert_response",
             "project_id": server_project_id,
-            "file_path": file_path,
             "success": success
         }
+        
+        # Include appropriate file information in response for backward compatibility
+        if file_path:
+            response["file_path"] = file_path
+        if file_paths:
+            response["file_paths"] = file_paths
+        if revert_all:
+            response["revert_all"] = True
+            
+        return response
 
 
 class ProjectStateGitCommitHandler(AsyncHandler):

@@ -458,12 +458,19 @@ Requests the content for a specific diff tab identified by its diff parameters. 
 
 ### `project_state_git_stage`
 
-Stages a file for commit in the project's git repository. Handled by [`project_state_git_stage`](./project_state_handlers.py).
+Stages file(s) for commit in the project's git repository. Supports both single file and bulk operations. Handled by [`project_state_git_stage`](./project_state_handlers.py).
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
-*   `file_path` (string, mandatory): The absolute path to the file to stage.
+*   `file_path` (string, optional): The absolute path to a single file to stage. Used for backward compatibility.
+*   `file_paths` (array of strings, optional): Array of absolute paths to files to stage. Used for bulk operations.
+*   `stage_all` (boolean, optional): If true, stages all unstaged changes in the repository. Takes precedence over file_path/file_paths.
+
+**Operation Modes:**
+- Single file: Provide `file_path`
+- Bulk operation: Provide `file_paths` array  
+- Stage all: Set `stage_all` to true
 
 **Responses:**
 
@@ -472,12 +479,19 @@ Stages a file for commit in the project's git repository. Handled by [`project_s
 
 ### `project_state_git_unstage`
 
-Unstages a file (removes from staging area) in the project's git repository. Handled by [`project_state_git_unstage`](./project_state_handlers.py).
+Unstages file(s) (removes from staging area) in the project's git repository. Supports both single file and bulk operations. Handled by [`project_state_git_unstage`](./project_state_handlers.py).
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
-*   `file_path` (string, mandatory): The absolute path to the file to unstage.
+*   `file_path` (string, optional): The absolute path to a single file to unstage. Used for backward compatibility.
+*   `file_paths` (array of strings, optional): Array of absolute paths to files to unstage. Used for bulk operations.
+*   `unstage_all` (boolean, optional): If true, unstages all staged changes in the repository. Takes precedence over file_path/file_paths.
+
+**Operation Modes:**
+- Single file: Provide `file_path`
+- Bulk operation: Provide `file_paths` array  
+- Unstage all: Set `unstage_all` to true
 
 **Responses:**
 
@@ -486,12 +500,19 @@ Unstages a file (removes from staging area) in the project's git repository. Han
 
 ### `project_state_git_revert`
 
-Reverts a file to its HEAD version, discarding local changes in the project's git repository. Handled by [`project_state_git_revert`](./project_state_handlers.py).
+Reverts file(s) to their HEAD version, discarding local changes in the project's git repository. Supports both single file and bulk operations. Handled by [`project_state_git_revert`](./project_state_handlers.py).
 
 **Payload Fields:**
 
 *   `project_id` (string, mandatory): The project ID from the initialized project state.
-*   `file_path` (string, mandatory): The absolute path to the file to revert.
+*   `file_path` (string, optional): The absolute path to a single file to revert. Used for backward compatibility.
+*   `file_paths` (array of strings, optional): Array of absolute paths to files to revert. Used for bulk operations.
+*   `revert_all` (boolean, optional): If true, reverts all unstaged changes in the repository. Takes precedence over file_path/file_paths.
+
+**Operation Modes:**
+- Single file: Provide `file_path`
+- Bulk operation: Provide `file_paths` array  
+- Revert all: Set `revert_all` to true
 
 **Responses:**
 
@@ -1019,34 +1040,40 @@ Returns the requested content for a specific diff tab, sent in response to a [`p
 
 ### <a name="project_state_git_stage_response"></a>`project_state_git_stage_response`
 
-Confirms the result of a git stage operation.
+Confirms the result of a git stage operation. Supports responses for both single file and bulk operations.
 
 **Event Fields:**
 
 *   `project_id` (string, mandatory): The project ID the operation was performed on.
-*   `file_path` (string, mandatory): The path to the file that was staged.
+*   `file_path` (string, optional): The path to the file that was staged (for single file operations).
+*   `file_paths` (array of strings, optional): Array of paths to files that were staged (for bulk operations).
+*   `stage_all` (boolean, optional): Present if the operation was a "stage all" operation.
 *   `success` (boolean, mandatory): Whether the stage operation was successful.
 *   `error` (string, optional): Error message if the operation failed.
 
 ### <a name="project_state_git_unstage_response"></a>`project_state_git_unstage_response`
 
-Confirms the result of a git unstage operation.
+Confirms the result of a git unstage operation. Supports responses for both single file and bulk operations.
 
 **Event Fields:**
 
 *   `project_id` (string, mandatory): The project ID the operation was performed on.
-*   `file_path` (string, mandatory): The path to the file that was unstaged.
+*   `file_path` (string, optional): The path to the file that was unstaged (for single file operations).
+*   `file_paths` (array of strings, optional): Array of paths to files that were unstaged (for bulk operations).
+*   `unstage_all` (boolean, optional): Present if the operation was an "unstage all" operation.
 *   `success` (boolean, mandatory): Whether the unstage operation was successful.
 *   `error` (string, optional): Error message if the operation failed.
 
 ### <a name="project_state_git_revert_response"></a>`project_state_git_revert_response`
 
-Confirms the result of a git revert operation.
+Confirms the result of a git revert operation. Supports responses for both single file and bulk operations.
 
 **Event Fields:**
 
 *   `project_id` (string, mandatory): The project ID the operation was performed on.
-*   `file_path` (string, mandatory): The path to the file that was reverted.
+*   `file_path` (string, optional): The path to the file that was reverted (for single file operations).
+*   `file_paths` (array of strings, optional): Array of paths to files that were reverted (for bulk operations).
+*   `revert_all` (boolean, optional): Present if the operation was a "revert all" operation.
 *   `success` (boolean, mandatory): Whether the revert operation was successful.
 *   `error` (string, optional): Error message if the operation failed.
 
