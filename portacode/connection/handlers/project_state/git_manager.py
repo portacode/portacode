@@ -181,22 +181,71 @@ class GitManager:
             if is_ignored:
                 return {"is_tracked": False, "status": "ignored", "is_ignored": True, "is_staged": False}
             
-            # For directories, only report status if they contain tracked or untracked files
+            # For directories, aggregate status from contained files
             if os.path.isdir(file_path):
-                # Check if directory contains any untracked files using path.startswith()
-                # This handles cross-platform path separators correctly
-                has_untracked = any(
-                    os.path.commonpath([f, rel_path]) == rel_path and f != rel_path
-                    for f in self.repo.untracked_files
-                )
+                # Normalize the relative path for cross-platform compatibility
+                rel_path_normalized = rel_path.replace('\\', '/')
+                
+                # Check for untracked files in this directory
+                has_untracked = False
+                for untracked_file in self.repo.untracked_files:
+                    untracked_normalized = untracked_file.replace('\\', '/')
+                    if untracked_normalized.startswith(rel_path_normalized + '/') or untracked_normalized == rel_path_normalized:
+                        has_untracked = True
+                        break
+                
+                # Check for modified files in this directory using git status
+                has_modified = False
+                has_deleted = False
+                try:
+                    # Get status for files in this directory
+                    status_output = self.repo.git.status(rel_path, porcelain=True)
+                    if status_output.strip():
+                        for line in status_output.strip().split('\n'):
+                            if len(line) >= 2:
+                                # When filtering git status by path, GitPython strips the leading space
+                                # So format is either "XY filename" or " XY filename"  
+                                if line.startswith(' '):
+                                    # Full status format: " XY filename"
+                                    index_status = line[0]
+                                    worktree_status = line[1] 
+                                    file_path_from_status = line[3:] if len(line) > 3 else ""
+                                else:
+                                    # Path-filtered format: "XY filename" (leading space stripped)
+                                    # Two possible formats:
+                                    # 1. Regular files: "M  filename" (index + worktree + space + filename)
+                                    # 2. Submodules: "M filename" (index + space + filename)
+                                    index_status = line[0] if len(line) > 0 else ' '
+                                    worktree_status = line[1] if len(line) > 1 else ' '
+                                    
+                                    # Detect format by checking if position 2 is a space
+                                    if len(line) > 2 and line[2] == ' ':
+                                        # Regular file format: "M  filename"
+                                        file_path_from_status = line[3:] if len(line) > 3 else ""
+                                    else:
+                                        # Submodule format: "M filename" 
+                                        file_path_from_status = line[2:] if len(line) > 2 else ""
+                                
+                                # Check if this file is within our directory
+                                file_normalized = file_path_from_status.replace('\\', '/')
+                                if (file_normalized.startswith(rel_path_normalized + '/') or 
+                                    file_normalized == rel_path_normalized):
+                                    if index_status in ['M', 'A', 'R', 'C'] or worktree_status in ['M', 'A', 'R', 'C']:
+                                        has_modified = True
+                                    elif index_status == 'D' or worktree_status == 'D':
+                                        has_deleted = True
+                except Exception as e:
+                    logger.debug("Error checking directory git status for %s: %s", rel_path, e)
+                
+                # Priority order: untracked > modified/deleted > clean
                 if has_untracked:
                     return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
-                
-                # Check if directory is dirty - GitPython handles path normalization
-                if self.repo.is_dirty(path=rel_path):
+                elif has_deleted:
+                    return {"is_tracked": True, "status": "deleted", "is_ignored": False, "is_staged": is_staged}
+                elif has_modified:
                     return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
                 
-                # Check if directory has tracked files - let GitPython handle paths
+                # Check if directory has tracked files to determine if it should show as clean
                 try:
                     tracked_files = self.repo.git.ls_files(rel_path)
                     is_tracked = bool(tracked_files.strip())
