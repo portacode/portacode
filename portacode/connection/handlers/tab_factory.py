@@ -59,7 +59,7 @@ MEDIA_EXTENSIONS = {
     '.ico', '.icns', '.cur', '.psd', '.ai', '.eps', '.raw', '.cr2', '.nef',
     
     # Audio
-    '.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.webm',
+    '.mp3', '.wav', '.flac', '.aac', '.ogg', '.oga', '.wma', '.m4a', '.opus', '.webm',
     
     # Video
     '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp',
