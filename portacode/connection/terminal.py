@@ -738,15 +738,17 @@ class TerminalManager:
             payload: The message payload to send
             project_id: Optional project filter for targeting specific sessions
         """
+        event_type = payload.get("event", "unknown")
+        
         # Check if there are any interested clients
         if not self._client_session_manager.has_interested_clients():
-            logger.debug("terminal_manager: No interested clients, skipping message send")
+            logger.info("terminal_manager: No interested clients for %s event, skipping send", event_type)
             return
         
         # Get target sessions
         target_sessions = self._client_session_manager.get_target_sessions(project_id)
         if not target_sessions:
-            logger.debug("terminal_manager: No target sessions found, skipping message send")
+            logger.info("terminal_manager: No target sessions found for %s event (project_id=%s), skipping send", event_type, project_id)
             return
         
         # Add session targeting information
@@ -758,8 +760,15 @@ class TerminalManager:
         if reply_channel and "reply_channel" not in enhanced_payload:
             enhanced_payload["reply_channel"] = reply_channel
         
-        logger.debug("terminal_manager: Sending to %d client sessions: %s", 
-                    len(target_sessions), target_sessions)
+        # Log all event dispatches at INFO level, with data size for terminal_data
+        if event_type == "terminal_data":
+            data_size = len(payload.get("data", ""))
+            terminal_id = payload.get("channel", "unknown")
+            logger.info("terminal_manager: Dispatching %s event (terminal_id=%s, data_size=%d bytes) to %d client sessions", 
+                       event_type, terminal_id, data_size, len(target_sessions))
+        else:
+            logger.info("terminal_manager: Dispatching %s event to %d client sessions", 
+                       event_type, len(target_sessions))
         
         await self._control_channel.send(enhanced_payload)
 

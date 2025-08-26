@@ -161,6 +161,10 @@ class TerminalSession:
     async def _send_terminal_data_now(self, data: str) -> None:
         """Send terminal data immediately and update last send time."""
         self._last_send_time = time.time()
+        data_size = len(data.encode('utf-8'))
+        
+        logger.info("session: Attempting to send terminal_data for terminal %s (data_size=%d bytes)", 
+                   self.id, data_size)
         
         # Add to buffer for snapshots with size limiting
         self._add_to_buffer(data)
@@ -174,18 +178,25 @@ class TerminalSession:
                     "data": data,
                     "project_id": self.project_id
                 }, project_id=self.project_id)
+                logger.info("session: Successfully queued terminal_data for terminal %s via terminal_manager", self.id)
             else:
                 # Fallback to raw channel for backward compatibility
                 await self.channel.send(data)
+                logger.info("session: Successfully sent terminal_data for terminal %s via raw channel", self.id)
         except Exception as exc:
-            logger.warning("Failed to forward terminal output: %s", exc)
+            logger.warning("session: Failed to forward terminal output for terminal %s: %s", self.id, exc)
 
     async def _flush_pending_data(self) -> None:
         """Send accumulated pending data and reset pending buffer."""
         if self._pending_data:
+            pending_size = len(self._pending_data.encode('utf-8'))
+            logger.info("session: Flushing pending terminal_data for terminal %s (pending_size=%d bytes)", 
+                       self.id, pending_size)
             data_to_send = self._pending_data
             self._pending_data = ""
             await self._send_terminal_data_now(data_to_send)
+        else:
+            logger.debug("session: No pending data to flush for terminal %s", self.id)
         
         # Clear the debounce task
         self._debounce_task = None
@@ -194,6 +205,10 @@ class TerminalSession:
         """Handle new terminal data with rate limiting and debouncing."""
         current_time = time.time()
         time_since_last_send = (current_time - self._last_send_time) * 1000  # Convert to milliseconds
+        data_size = len(data.encode('utf-8'))
+        
+        logger.info("session: Received terminal_data for terminal %s (data_size=%d bytes, time_since_last_send=%.1fms)", 
+                   self.id, data_size, time_since_last_send)
         
         # Add new data to pending buffer with simple size limiting
         # Always add the new data first
@@ -202,15 +217,19 @@ class TerminalSession:
         # Simple size limiting - only trim if we exceed the 30KB limit significantly
         pending_size = len(self._pending_data.encode('utf-8'))
         if pending_size > TERMINAL_BUFFER_SIZE_LIMIT_BYTES:
+            logger.info("session: Buffer size limit exceeded for terminal %s (pending_size=%d bytes, limit=%d bytes), trimming", 
+                       self.id, pending_size, TERMINAL_BUFFER_SIZE_LIMIT_BYTES)
             # Only do minimal ANSI-safe trimming from the beginning
             excess_bytes = pending_size - TERMINAL_BUFFER_SIZE_LIMIT_BYTES
             trim_pos = self._find_minimal_safe_trim_position(excess_bytes)
             
             if trim_pos > 0:
                 self._pending_data = self._pending_data[trim_pos:]
+                logger.info("session: Trimmed %d bytes from pending buffer for terminal %s", trim_pos, self.id)
         
         # Cancel existing debounce task if any
         if self._debounce_task and not self._debounce_task.done():
+            logger.debug("session: Cancelling existing debounce task for terminal %s", self.id)
             self._debounce_task.cancel()
         
         # Always set up a debounce timer to catch rapid consecutive outputs
@@ -219,19 +238,27 @@ class TerminalSession:
                 if time_since_last_send >= TERMINAL_DATA_RATE_LIMIT_MS:
                     # Enough time has passed since last send, wait initial delay for more data
                     wait_time = TERMINAL_DATA_INITIAL_WAIT_MS / 1000
+                    logger.info("session: Rate limit satisfied for terminal %s, waiting %.1fms for more data", 
+                               self.id, wait_time * 1000)
                 else:
                     # Too soon since last send, wait for either the rate limit period or max wait time
                     wait_time = min(
                         (TERMINAL_DATA_RATE_LIMIT_MS - time_since_last_send) / 1000,
                         TERMINAL_DATA_MAX_WAIT_MS / 1000
                     )
+                    logger.info("session: Rate limit active for terminal %s, waiting %.1fms before send (time_since_last=%.1fms, rate_limit=%dms)", 
+                               self.id, wait_time * 1000, time_since_last_send, TERMINAL_DATA_RATE_LIMIT_MS)
+                
                 await asyncio.sleep(wait_time)
+                logger.info("session: Debounce timer expired for terminal %s, flushing pending data", self.id)
                 await self._flush_pending_data()
             except asyncio.CancelledError:
+                logger.debug("session: Debounce timer cancelled for terminal %s (new data arrived)", self.id)
                 # Timer was cancelled, another data event came in
                 pass
         
         self._debounce_task = asyncio.create_task(_debounce_timer())
+        logger.info("session: Started debounce timer for terminal %s", self.id)
 
     def _find_minimal_safe_trim_position(self, excess_bytes: int) -> int:
         """Find a minimal safe position to trim that only avoids breaking ANSI sequences."""
