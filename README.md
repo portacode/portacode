@@ -30,7 +30,7 @@ portacode connect
 ```
 
 Follow the on-screen instructions to:
-- Visit [https://remote.portacode.com](https://remote.portacode.com)
+- Visit [https://portacode.com](https://portacode.com)
 - Create your free account
 - Add your device using the generated key
 - Start coding and administrating!
@@ -117,7 +117,7 @@ sudo portacode service uninstall
 
 ## 🌐 Web Dashboard
 
-Access your connected devices at [https://remote.portacode.com](https://remote.portacode.com)
+Access your connected devices at [https://portacode.com](https://portacode.com)
 
 **Current Features:**
 - Real-time terminal access

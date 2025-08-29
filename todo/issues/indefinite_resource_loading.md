@@ -1,0 +1,5 @@
+# Issue
+Sometimes on initial page load, while the device sends the websocket message "event": "system_info" apparently the loading sequence goes incorrectly and the even is not handled correctly in the page and the device-card hides the device-resources under the loading overlay indefinitely until next system_info websocket message which wouldn't happen spontanously.
+
+# Suggested solution
+Edit the client side code to ensure such the handlers for such system_info messages are ready before establishing the websocket connection plus, since typically the resources are already available from cache, the loading overlay should not be active unless there is abolutely no info for resource usage, which is not the case in this scenario and we can even see the blurred numbers under the loading overlay, and in that scenario the loading overlay should not be visible to begine with

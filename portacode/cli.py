@@ -16,7 +16,7 @@ from .data import get_pid_file, is_process_running
 from .keypair import get_or_create_keypair, fingerprint_public_key
 from .connection.client import ConnectionManager, run_until_interrupt
 
-GATEWAY_URL = "wss://device.portacode.com/gateway"
+GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
 
 
@@ -115,7 +115,7 @@ def connect(gateway: str | None, detach: bool, debug: bool, log_categories: str 
         click.echo(click.style("🚀 Welcome to Portacode!", fg="bright_blue", bold=True))
         click.echo()
         click.echo(click.style("📱 Next steps:", fg="bright_cyan", bold=True))
-        click.echo(click.style("  1. Visit ", fg="white") + click.style("https://remote.portacode.com", fg="bright_blue", underline=True))
+        click.echo(click.style("  1. Visit ", fg="white") + click.style("https://portacode.com", fg="bright_blue", underline=True))
         click.echo(click.style("  2. Create your free account or sign in", fg="white"))
         click.echo(click.style("  3. Add this device using the key below", fg="white"))
         click.echo()
