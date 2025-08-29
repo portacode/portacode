@@ -2,7 +2,7 @@
 
 **An AI-first, mobile-first IDE and admin tool, made with love and passion by software engineers, for software engineers.**
 
-Portacode transforms any computer into a remotely accessible development environment. Access your home lab from your phone, code on your desktop from anywhere, or help a colleague debug their server - all through a beautiful web interface designed for the modern developer.
+Portacode transforms any device with python into a remotely accessible development environment. Access your home lab, server or even embedded system chip from your phone, code on your desktop or your smartphone from anywhere, or help a colleague debug their server - all through a beautiful web interface designed for the modern developer.
 
 ## ✨ Why Portacode?
 
@@ -45,40 +45,9 @@ Once connected, you can:
 
 ## 💡 Use Cases
 
-### Remote Development
-```bash
-# Connect your development machine
-portacode connect
-
-# Now code, build, and debug from anywhere - even your phone
-```
-
-### Server Administration
-```bash
-# For a persistent connection, install system-wide first
-sudo pip install portacode --system
-
-# Then install as a service
-sudo portacode service install
-
-# Your server is now accessible 24/7 from the web dashboard
-```
-
-### Mobile Development
-```bash
-# Connect your desktop/laptop
-portacode connect
-
-# Code on-the-go from your mobile device with a full IDE experience
-```
-
-### Team Collaboration
-```bash
-# Connect shared development environments
-portacode connect
-
-# Enable team members to access shared resources securely
-```
+- **Remote Development**: Code, build, and debug from anywhere - even your phone
+- **Server Administration**: 24/7 server access with persistent service installation
+- **Mobile Development**: Full IDE experience on mobile devices
 
 ## 🔧 Essential Commands
 
@@ -99,19 +68,21 @@ portacode --help
 
 ### Service Management
 ```bash
-# For system services, install package system-wide first
+# First, authenticate your device
+portacode connect
+
+# For system services, install package system-wide
 sudo pip install portacode --system
 
 # Install persistent service (auto-start on boot)
 sudo portacode service install
 
-# Check service status
+# Check service status (use -v for verbose debugging)
 sudo portacode service status
+sudo portacode service status -v
 
-# Stop the service
+# Stop/remove the service
 sudo portacode service stop
-
-# Remove the service
 sudo portacode service uninstall
 ```
 
@@ -153,11 +124,17 @@ sudo portacode service status --verbose
 
 ### Service Installation Issues
 ```bash
+# First authenticate your device
+portacode connect
+
 # If service commands fail, ensure system-wide installation
 sudo pip install portacode --system
 
 # Then try service installation again
 sudo portacode service install
+
+# Use verbose status to debug connection issues
+sudo portacode service status -v
 ```
 
 ### Clipboard Issues (Linux)
