@@ -1,10 +1,38 @@
 # WebSocket Communication Protocol
 
-This document outlines the WebSocket communication protocol between the Portacode server and the connected client devices.
+This document outlines the WebSocket communication protocol used in Portacode. The protocol involves three main participants: client sessions, the Portacode server, and devices.
+
+## Architecture Overview
+
+```
+┌─────────────┐          ┌──────────────────┐          ┌─────────────────────────┐
+│   Client    │          │   Portacode      │          │        Device           │
+│   Session   │◄────────►│    Server        │◄────────►│ (Portacode CLI or       │
+│             │          │                  │          │  Python package)        │
+└─────────────┘          └──────────────────┘          └─────────────────────────┘
+     │                           │                                  │
+     │                           │                                  │
+  Client-Side              Acts as middleman                  Device-Side
+  Protocol                 - Routes messages                  Protocol
+                          - Manages sessions
+```
+
+The Portacode server acts as a **routing middleman** between client sessions and devices. It manages routing fields that are included in messages to specify routing destinations but are removed or transformed before reaching the final recipient:
+
+**Routing Fields Behavior:**
+
+- **`device_id`** (Client → Server): Client includes this to specify which device to route to. Server uses it for routing, then **removes it** before forwarding to the device (the device knows the message is for them). Server **adds it** when routing device responses back to clients (so clients know which device the message came from).
+
+- **`client_sessions`** (Device → Server): Device includes this to specify which client session(s) to route to. Server uses it for routing, then **removes it** before forwarding to clients (clients just receive the message without seeing routing metadata).
+
+- **`source_client_session`** (Server → Device): Server **adds this** when forwarding client commands to devices (so device knows which client sent the command and can target responses back). Clients never include this field.
+
+This document describes the complete protocol for communicating with devices through the server, guiding app developers on how to get their client sessions to communicate with devices.
 
 ## Table of Contents
 
-- [Raw Message Format](#raw-message-format)
+- [Raw Message Format On Device Side](#raw-message-format-on-device-side)
+- [Raw Message Format On Client Side](#raw-message-format-on-client-side)
 - [Actions](#actions)
   - [Terminal Actions](#terminal-actions)
     - [`terminal_start`](#terminal_start)
@@ -82,11 +110,11 @@ This document outlines the WebSocket communication protocol between the Portacod
     - [`device_status`](#device_status)
     - [`devices`](#devices)
 
-## Raw Message Format
+## Raw Message Format On Device Side
 
-All communication over the WebSocket is managed by a [multiplexer](./multiplex.py) that wraps every message in a JSON object with a `channel` and a `payload`. This allows for multiple virtual communication channels over a single connection.
+Communication between the server and devices uses a [multiplexer](./multiplex.py) that wraps every message in a JSON object with a `channel` and a `payload`. This allows for multiple virtual communication channels over a single WebSocket connection.
 
-**Raw Message Structure:**
+**Device-Side Message Structure:**
 
 ```json
 {
@@ -97,8 +125,98 @@ All communication over the WebSocket is managed by a [multiplexer](./multiplex.p
 }
 ```
 
-*   `channel` (string|integer, mandatory): Identifies the virtual channel the message is for. When sending control commands to the device, they should be sent to channel 0 and when the device responsed to such control commands or sends system events, they will also be send on the zero channel. When a terminal session is created in the device, it is assigned a uuid, the uuid becomes the channel for communicating to that specific terminal.
+**Field Descriptions:**
+
+*   `channel` (string|integer, mandatory): Identifies the virtual channel the message is for. When sending control commands to the device, they should be sent to channel 0 and when the device responds to such control commands or sends system events, they will also be sent on the zero channel. When a terminal session is created in the device, it is assigned a uuid, the uuid becomes the channel for communicating to that specific terminal.
 *   `payload` (object, mandatory): The content of the message, which will be either an [Action](#actions) or an [Event](#events) object.
+
+**Channel Types:**
+- **Channel 0** (control channel): Used for system commands, terminal management, file operations, and project state management
+- **Channel UUID** (terminal channel): Used for terminal I/O to a specific terminal session
+
+---
+
+## Raw Message Format On Client Side
+
+Client sessions communicate with the server using a unified message format with the same field names as the device protocol, plus routing information.
+
+**Client-Side Message Structure (Client → Server):**
+
+```json
+{
+  "device_id": <number>,
+  "channel": <number|string>,
+  "payload": {
+    "cmd": "<command_name>",
+    ...command-specific fields
+  }
+}
+```
+
+**Field Descriptions:**
+
+*   `device_id` (number, mandatory): Routing field - specifies which device to send the message to. The server validates that the client has access to this device before forwarding.
+*   `channel` (number|string, mandatory): Same as device protocol - the target channel (0 for control, UUID for terminal). Uses the same field name for consistency.
+*   `payload` (object, mandatory): Same as device protocol - the command payload. Uses the same field name for consistency.
+
+**Server Transformation (Client → Device):**
+
+When the server receives a client message, it:
+1. Validates client has access to the specified `device_id`
+2. **Removes** `device_id` from the message (device doesn't need to be told "this is for you")
+3. **Adds** `source_client_session` to the payload (so device knows which client to respond to)
+4. Forwards to device: `{channel, payload: {...payload, source_client_session}}`
+
+**Server Transformation (Device → Client):**
+
+When the server receives a device response, it:
+1. **Adds** `device_id` to the message (so client knows which device it came from, based on authenticated device connection)
+2. **Removes** `client_sessions` routing metadata (clients don't need to see routing info)
+3. Routes to appropriate client session(s)
+
+**Server Response Format (Server → Client):**
+
+```json
+{
+  "event": "<event_name>",
+  "device_id": <number>,
+  ...event-specific fields
+}
+```
+
+**Field Descriptions:**
+
+*   `event` (string, mandatory): The name of the event being sent.
+*   `device_id` (number, mandatory): Authenticated field - identifies which device the event came from (added by server based on authenticated device connection).
+*   Additional fields depend on the specific event type.
+
+**Example Client Message:**
+```json
+{
+  "device_id": 42,
+  "channel": 0,
+  "payload": {
+    "cmd": "terminal_start",
+    "shell": "bash",
+    "cwd": "/home/user/project"
+  }
+}
+```
+
+**Example Server Response:**
+```json
+{
+  "event": "terminal_started",
+  "device_id": 42,
+  "terminal_id": "uuid-1234-5678",
+  "channel": "uuid-1234-5678",
+  "pid": 12345
+}
+```
+
+**Note:** The server acts as a translator between the client-side and device-side protocols:
+- When a client sends a command, the server transforms it from the client format to the device format
+- When a device sends an event, the server adds the `device_id` and routes it to the appropriate client sessions
 
 ---
 
@@ -110,18 +228,18 @@ Actions are messages sent from the server to the device, placed within the `payl
 
 ```json
 {
-  "command": "<command_name>",
-  "payload": {
-    "arg1": "value1",
-    "...": "..."
-  },
+  "cmd": "<command_name>",
+  "arg1": "value1",
+  "arg2": "value2",
   "source_client_session": "channel.abc123"
 }
 ```
 
-*   `command` (string, mandatory): The name of the action to be executed (e.g., `terminal_start`).
-*   `payload` (object, mandatory): An object containing the specific arguments for the action.
+**Field Descriptions:**
+
+*   `cmd` (string, mandatory): The name of the action to be executed (e.g., `terminal_start`, `file_read`, `system_info`).
 *   `source_client_session` (string, mandatory): The channel name of the client session that originated this command. This field is automatically added by the server and allows devices to identify which specific client sent the command.
+*   Additional fields depend on the specific command (see individual command documentation below).
 
 **Note**: Actions do not require targeting information - responses are automatically routed using the client session management system.
 
