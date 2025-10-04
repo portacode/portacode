@@ -683,9 +683,8 @@ class ProjectStateDiffContentHandler(AsyncHandler):
         from_hash = message.get("from_hash")
         to_hash = message.get("to_hash")
         content_type = message.get("content_type")  # 'original', 'modified', 'html_diff'
-        request_id = message.get("request_id")
         source_client_session = message.get("source_client_session")
-        
+
         # Validate required fields
         if not server_project_id:
             raise ValueError("project_id is required")
@@ -697,8 +696,6 @@ class ProjectStateDiffContentHandler(AsyncHandler):
             raise ValueError("to_ref is required")
         if not content_type:
             raise ValueError("content_type is required")
-        if not request_id:
-            raise ValueError("request_id is required")
         if not source_client_session:
             raise ValueError("source_client_session is required")
         
@@ -816,9 +813,12 @@ class ProjectStateDiffContentHandler(AsyncHandler):
                 "from_ref": from_ref,
                 "to_ref": to_ref,
                 "content_type": content_type,
-                "request_id": request_id,
                 "success": success
             }
+
+            # Add request_id if present in original message
+            if "request_id" in message:
+                base_response["request_id"] = message["request_id"]
             
             if from_hash:
                 base_response["from_hash"] = from_hash
@@ -850,9 +850,12 @@ class ProjectStateDiffContentHandler(AsyncHandler):
                 "from_ref": from_ref,
                 "to_ref": to_ref,
                 "content_type": content_type,
-                "request_id": request_id,
                 "success": False,
                 "error": str(e),
                 "chunked": False
             }
+
+            # Add request_id if present in original message
+            if "request_id" in message:
+                error_response["request_id"] = message["request_id"]
             await self.send_response(error_response, project_id=server_project_id)

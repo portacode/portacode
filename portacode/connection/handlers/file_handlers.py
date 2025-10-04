@@ -382,22 +382,18 @@ class ContentRequestHandler(AsyncHandler):
     async def execute(self, message: Dict[str, Any]) -> None:
         """Return content by hash if available, chunked for large content."""
         content_hash = message.get("content_hash")
-        request_id = message.get("request_id")
         source_client_session = message.get("source_client_session")
-        
+
         if not content_hash:
             raise ValueError("content_hash parameter is required")
-        if not request_id:
-            raise ValueError("request_id parameter is required")
-        
+
         # Check if content is in cache
         content = _content_cache.get(content_hash)
-        
+
         if content is not None:
-            # Create base response
+            # Create base response (request_id will be added automatically by base class)
             base_response = {
                 "event": "content_response",
-                "request_id": request_id,
                 "content_hash": content_hash,
                 "success": True,
             }
@@ -411,10 +407,9 @@ class ContentRequestHandler(AsyncHandler):
             
             logger.info(f"Sent content response in {len(responses)} chunk(s) for hash: {content_hash[:16]}...")
         else:
-            # Content not found in cache
+            # Content not found in cache (request_id will be added automatically by base class)
             response = {
                 "event": "content_response",
-                "request_id": request_id,
                 "content_hash": content_hash,
                 "content": None,
                 "success": False,

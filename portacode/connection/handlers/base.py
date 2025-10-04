@@ -107,18 +107,22 @@ class AsyncHandler(BaseHandler):
     
     async def handle(self, message: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
         """Handle the command by executing it and sending the response."""
-        logger.info("handler: Processing command %s with reply_channel=%s", 
+        logger.info("handler: Processing command %s with reply_channel=%s",
                    self.command_name, reply_channel)
-        
+
         try:
             response = await self.execute(message)
             logger.info("handler: Command %s executed successfully", self.command_name)
-            
+
             # Handle cases where execute() sends responses directly and returns None
             if response is not None:
+                # Automatically copy request_id if present in the incoming message
+                if "request_id" in message and "request_id" not in response:
+                    response["request_id"] = message["request_id"]
+
                 # Extract project_id from response for session targeting
                 project_id = response.get("project_id")
-                logger.info("handler: %s response project_id=%s, response=%s", 
+                logger.info("handler: %s response project_id=%s, response=%s",
                            self.command_name, project_id, response)
                 await self.send_response(response, reply_channel, project_id)
             else:
@@ -150,7 +154,11 @@ class SyncHandler(BaseHandler):
         try:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(None, self.execute, message)
-            
+
+            # Automatically copy request_id if present in the incoming message
+            if "request_id" in message and "request_id" not in response:
+                response["request_id"] = message["request_id"]
+
             # Extract project_id from response for session targeting
             project_id = response.get("project_id")
             await self.send_response(response, reply_channel, project_id)
