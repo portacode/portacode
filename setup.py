@@ -17,6 +17,12 @@ setup(
     author_email="hi@menas.pro",
     url="https://github.com/portacode/portacode",
     packages=find_packages(exclude=("tests", "server")),
+    package_data={
+        "portacode": [
+            "static/js/**/*.js",
+            "static/js/**/*.html",
+        ],
+    },
     python_requires=">=3.8",
     install_requires=[
         "click>=8.0",
@@ -31,6 +37,7 @@ setup(
         "watchdog>=3.0",
         "diff-match-patch>=20230430",
         "Pygments>=2.14.0",
+        "ntplib>=0.4.0",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NTP Clock Test</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+        }
+        h1 {
+            color: #4ec9b0;
+        }
+        #status {
+            background: #252526;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #3e3e42;
+        }
+        .synced {
+            color: #4ec9b0;
+        }
+        .not-synced {
+            color: #f48771;
+        }
+        .label {
+            color: #9cdcfe;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>NTP Clock Test - time.cloudflare.com</h1>
+    <div id="status"></div>
+    <script type="module">
+        import ntpClock from './utils/ntp-clock.js';
+
+        function updateDisplay() {
+            const status = ntpClock.getStatus();
+            const syncClass = status.isSynced ? 'synced' : 'not-synced';
+
+            document.getElementById('status').innerHTML = `
+                <p><span class="label">Sync Status:</span> <span class="${syncClass}">${status.isSynced ? '✅ SYNCED' : '❌ NOT SYNCED'}</span></p>
+                <p><span class="label">NTP Server:</span> ${status.server}</p>
+                <p><span class="label">NTP Time:</span> ${ntpClock.nowISO() || 'null (not synced)'}</p>
+                <p><span class="label">Local Time:</span> ${new Date().toISOString()}</p>
+                <p><span class="label">Offset:</span> ${status.offset !== null ? status.offset.toFixed(2) + 'ms' : 'null'}</p>
+                <p><span class="label">Last Sync:</span> ${status.lastSync || 'Never'}</p>
+                <p><span class="label">Time Since Sync:</span> ${status.timeSinceSync ? (status.timeSinceSync / 1000).toFixed(0) + 's' : 'N/A'}</p>
+            `;
+        }
+
+        // Update display every 100ms
+        setInterval(updateDisplay, 100);
+
+        // Log status to console every 5 seconds
+        setInterval(() => {
+            console.log('NTP Clock Status:', ntpClock.getStatus());
+        }, 5000);
+    </script>
+</body>
+</html>

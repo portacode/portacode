@@ -2,6 +2,7 @@
 
 import logging
 from typing import Dict, Type, Any, Optional, List, TYPE_CHECKING
+from portacode.utils.ntp_clock import ntp_clock
 
 if TYPE_CHECKING:
     from ..multiplex import Channel
@@ -72,22 +73,32 @@ class CommandRegistry:
     
     async def dispatch(self, command_name: str, message: Dict[str, Any], reply_channel: Optional[str] = None) -> bool:
         """Dispatch a command to its handler.
-        
+
         Args:
             command_name: The command name
             message: The command message
             reply_channel: Optional reply channel
-            
+
         Returns:
             True if handler was found and executed, False otherwise
         """
         logger.info("registry: Dispatching command '%s' with reply_channel=%s", command_name, reply_channel)
-        
+
+        # Add device_receive timestamp if trace present
+        if "trace" in message and "request_id" in message:
+            device_receive_time = ntp_clock.now_ms()
+            if device_receive_time is not None:
+                message["trace"]["device_receive"] = device_receive_time
+                # Update ping to show total time from client_send
+                if "client_send" in message["trace"]:
+                    message["trace"]["ping"] = device_receive_time - message["trace"]["client_send"]
+                logger.info(f"📨 Device received traced message: {message['request_id']}")
+
         handler = self.get_handler(command_name)
         if handler is None:
             logger.warning("registry: No handler found for command: %s", command_name)
             return False
-        
+
         try:
             await handler.handle(message, reply_channel)
             logger.info("registry: Successfully dispatched command '%s'", command_name)
