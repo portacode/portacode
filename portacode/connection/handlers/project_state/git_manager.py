@@ -291,7 +291,242 @@ class GitManager:
         except Exception as e:
             logger.debug("Error getting Git status for %s: %s", file_path, e)
             return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
-    
+
+    def get_file_status_batch(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Get Git status for multiple files/directories at once (optimized batch operation).
+
+        Args:
+            file_paths: List of absolute file paths
+
+        Returns:
+            Dict mapping file_path to status dict: {"is_tracked": bool, "status": str, "is_ignored": bool, "is_staged": bool|"mixed"}
+        """
+        if not self.is_git_repo or not self.repo:
+            # Return empty status for all paths
+            return {path: {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+                    for path in file_paths}
+
+        result = {}
+
+        try:
+            # Convert all paths to relative paths
+            rel_paths_map = {}  # abs_path -> rel_path
+            for file_path in file_paths:
+                try:
+                    rel_path = os.path.relpath(file_path, self.repo.working_dir)
+                    rel_paths_map[file_path] = rel_path
+                except Exception as e:
+                    logger.debug("Error converting path %s to relative: %s", file_path, e)
+                    result[file_path] = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+            rel_paths = list(rel_paths_map.values())
+
+            # BATCH OPERATION 1: Get all ignored paths at once
+            ignored_paths = set()
+            try:
+                ignored_list = self.repo.ignored(*rel_paths)
+                ignored_paths = set(ignored_list) if ignored_list else set()
+            except Exception as e:
+                logger.debug("Error checking ignored status for batch: %s", e)
+
+            # BATCH OPERATION 2: Get global git data once
+            untracked_files = set(self.repo.untracked_files)
+
+            try:
+                staged_files_output = self.repo.git.diff('--cached', '--name-only')
+                staged_files = set(staged_files_output.splitlines()) if staged_files_output.strip() else set()
+            except Exception:
+                staged_files = set()
+
+            try:
+                unstaged_files_output = self.repo.git.diff('--name-only')
+                unstaged_files = set(unstaged_files_output.splitlines()) if unstaged_files_output.strip() else set()
+            except Exception:
+                unstaged_files = set()
+
+            # BATCH OPERATION 3: Get status for all paths at once
+            status_map = {}  # rel_path -> status_line
+            try:
+                status_output = self.repo.git.status(*rel_paths, porcelain=True)
+                if status_output.strip():
+                    for line in status_output.strip().split('\n'):
+                        if len(line) >= 3:
+                            file_path_from_status = line[3:] if len(line) > 3 else ""
+                            status_map[file_path_from_status] = line
+            except Exception as e:
+                logger.debug("Error getting batch status: %s", e)
+
+            # BATCH OPERATION 4: Get all tracked files
+            try:
+                tracked_files_output = self.repo.git.ls_files()
+                tracked_files = set(tracked_files_output.splitlines()) if tracked_files_output.strip() else set()
+            except Exception:
+                tracked_files = set()
+
+            # Process each file with the batch data
+            for file_path, rel_path in rel_paths_map.items():
+                try:
+                    # Check if ignored
+                    if rel_path in ignored_paths:
+                        result[file_path] = {"is_tracked": False, "status": "ignored", "is_ignored": True, "is_staged": False}
+                        continue
+
+                    # Determine staging status
+                    is_staged = self._get_staging_status_from_batch(
+                        file_path, rel_path, staged_files, unstaged_files
+                    )
+
+                    # Handle directories
+                    if os.path.isdir(file_path):
+                        result[file_path] = self._get_directory_status_from_batch(
+                            file_path, rel_path, untracked_files, status_map, tracked_files, is_staged
+                        )
+                    # Handle files
+                    else:
+                        result[file_path] = self._get_file_status_from_batch(
+                            file_path, rel_path, untracked_files, staged_files, tracked_files, is_staged
+                        )
+
+                except Exception as e:
+                    logger.debug("Error processing status for %s: %s", file_path, e)
+                    result[file_path] = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+            # Fill in any missing paths with default status
+            for file_path in file_paths:
+                if file_path not in result:
+                    result[file_path] = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+        except Exception as e:
+            logger.error("Error in get_file_status_batch: %s", e)
+            # Return default status for all paths on error
+            for file_path in file_paths:
+                if file_path not in result:
+                    result[file_path] = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+        return result
+
+    def _get_staging_status_from_batch(self, file_path: str, rel_path: str,
+                                       staged_files: set, unstaged_files: set) -> Union[bool, str]:
+        """Get staging status using pre-fetched batch data."""
+        try:
+            if os.path.isdir(file_path):
+                # For directories, check files within
+                dir_staged_files = [f for f in staged_files if f.startswith(rel_path + '/') or f == rel_path]
+                dir_unstaged_files = [f for f in unstaged_files if f.startswith(rel_path + '/') or f == rel_path]
+
+                has_staged = len(dir_staged_files) > 0
+                has_unstaged = len(dir_unstaged_files) > 0
+
+                # Check for mixed staging
+                has_mixed_files = any(f in dir_unstaged_files for f in dir_staged_files)
+
+                if has_mixed_files or (has_staged and has_unstaged):
+                    return "mixed"
+                elif has_staged:
+                    return True
+                else:
+                    return False
+            else:
+                # For files
+                has_staged = rel_path in staged_files
+                has_unstaged = rel_path in unstaged_files
+
+                if has_staged and has_unstaged:
+                    return "mixed"
+                elif has_staged:
+                    return True
+                else:
+                    return False
+        except Exception:
+            return False
+
+    def _get_directory_status_from_batch(self, file_path: str, rel_path: str,
+                                         untracked_files: set, status_map: dict,
+                                         tracked_files: set, is_staged: Union[bool, str]) -> Dict[str, Any]:
+        """Get directory status using pre-fetched batch data."""
+        try:
+            rel_path_normalized = rel_path.replace('\\', '/')
+
+            # Check for untracked files in this directory
+            has_untracked = any(
+                f.replace('\\', '/').startswith(rel_path_normalized + '/') or f.replace('\\', '/') == rel_path_normalized
+                for f in untracked_files
+            )
+
+            # Check for modified/deleted files using status map
+            has_modified = False
+            has_deleted = False
+
+            for status_file_path, status_line in status_map.items():
+                if len(status_line) >= 2:
+                    file_normalized = status_file_path.replace('\\', '/')
+                    if file_normalized.startswith(rel_path_normalized + '/') or file_normalized == rel_path_normalized:
+                        index_status = status_line[0] if len(status_line) > 0 else ' '
+                        worktree_status = status_line[1] if len(status_line) > 1 else ' '
+
+                        if index_status in ['M', 'A', 'R', 'C'] or worktree_status in ['M', 'A', 'R', 'C']:
+                            has_modified = True
+                        elif index_status == 'D' or worktree_status == 'D':
+                            has_deleted = True
+
+            # Priority order: untracked > modified/deleted > clean
+            if has_untracked:
+                return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
+            elif has_deleted:
+                return {"is_tracked": True, "status": "deleted", "is_ignored": False, "is_staged": is_staged}
+            elif has_modified:
+                return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
+
+            # Check if directory has tracked files
+            has_tracked = any(
+                f.replace('\\', '/').startswith(rel_path_normalized + '/') or f.replace('\\', '/') == rel_path_normalized
+                for f in tracked_files
+            )
+
+            status = "clean" if has_tracked else None
+            return {"is_tracked": has_tracked, "status": status, "is_ignored": False, "is_staged": is_staged}
+
+        except Exception as e:
+            logger.debug("Error getting directory status for %s: %s", file_path, e)
+            return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+    def _get_file_status_from_batch(self, file_path: str, rel_path: str,
+                                    untracked_files: set, staged_files: set,
+                                    tracked_files: set, is_staged: Union[bool, str]) -> Dict[str, Any]:
+        """Get file status using pre-fetched batch data."""
+        try:
+            # Check if untracked
+            if rel_path in untracked_files:
+                return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
+
+            # If file is staged, determine original status
+            if is_staged:
+                # Check if file existed in HEAD
+                try:
+                    self.repo.git.show(f"HEAD:{rel_path}")
+                    # File existed in HEAD
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
+                except Exception:
+                    # File didn't exist in HEAD (new file)
+                    return {"is_tracked": False, "status": "added", "is_ignored": False, "is_staged": is_staged}
+
+            # Check if tracked and dirty
+            try:
+                if self.repo.is_dirty(path=rel_path):
+                    return {"is_tracked": True, "status": "modified", "is_ignored": False, "is_staged": is_staged}
+            except Exception:
+                pass
+
+            # Check if tracked and clean
+            if rel_path in tracked_files:
+                return {"is_tracked": True, "status": "clean", "is_ignored": False, "is_staged": is_staged}
+
+            return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
+        except Exception as e:
+            logger.debug("Error getting file status for %s: %s", file_path, e)
+            return {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
+
     def get_status_summary(self) -> Dict[str, int]:
         """Get summary of Git status."""
         if not self.is_git_repo or not self.repo:

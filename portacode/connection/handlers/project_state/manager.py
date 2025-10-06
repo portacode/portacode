@@ -359,13 +359,50 @@ class ProjectStateManager:
     
     async def _build_flattened_items_structure(self, project_state: ProjectState):
         """Build a flattened items structure including ALL items from ALL monitored folders."""
+        import time
+        func_start = time.time()
+
         all_items = []
 
         # Create sets for quick lookup
         expanded_paths = {mf.folder_path for mf in project_state.monitored_folders if mf.is_expanded}
         monitored_paths = {mf.folder_path for mf in project_state.monitored_folders}
 
-        # Load items from ALL monitored folders
+        # OPTIMIZATION: Collect all file paths first, then batch git operations
+        batch_git_start = time.time()
+        all_file_paths = []
+        folder_to_paths = {}  # monitored_folder_path -> list of child paths
+
+        # First pass: scan all directories to collect file paths
+        for monitored_folder in project_state.monitored_folders:
+            try:
+                child_paths = []
+                with os.scandir(monitored_folder.folder_path) as entries:
+                    for entry in entries:
+                        if entry.name != '.git' or not entry.is_dir():
+                            child_paths.append(entry.path)
+                            all_file_paths.append(entry.path)
+                folder_to_paths[monitored_folder.folder_path] = child_paths
+            except (OSError, PermissionError) as e:
+                logger.error("Error scanning folder %s: %s", monitored_folder.folder_path, e)
+                folder_to_paths[monitored_folder.folder_path] = []
+
+        # BATCH GIT OPERATION: Get status for ALL files at once
+        git_manager = self.git_managers.get(project_state.client_session_id)
+        git_status_map = {}
+        if git_manager and all_file_paths:
+            loop = asyncio.get_event_loop()
+            git_status_map = await loop.run_in_executor(
+                None,
+                git_manager.get_file_status_batch,
+                all_file_paths
+            )
+
+        batch_git_duration = time.time() - batch_git_start
+        logger.info("⏱️ Batch git operations for %d files took %.4f seconds", len(all_file_paths), batch_git_duration)
+
+        # Second pass: load items using pre-fetched git status
+        load_items_start = time.time()
         loop = asyncio.get_event_loop()
         for monitored_folder in project_state.monitored_folders:
             # Load direct children of this monitored folder (run in executor to avoid blocking)
@@ -373,7 +410,8 @@ class ProjectStateManager:
                 None,
                 self._load_directory_items_list_sync,
                 monitored_folder.folder_path,
-                monitored_folder.folder_path
+                monitored_folder.folder_path,
+                git_status_map  # Pass pre-fetched git status
             )
             
             # Set correct expansion and loading states for each child
@@ -387,27 +425,41 @@ class ProjectStateManager:
                     # Files are always loaded
                     child.is_loaded = True
                 all_items.append(child)
-        
+
+        load_items_duration = time.time() - load_items_start
+        logger.info("⏱️ Loading items took %.4f seconds", load_items_duration)
+
         # Remove duplicates (items might be loaded multiple times due to nested monitoring)
-        # Use a dict to deduplicate by path while preserving the last loaded state
+        dedup_start = time.time()
         items_dict = {}
         for item in all_items:
             items_dict[item.path] = item
-        
+
+        dedup_duration = time.time() - dedup_start
+        logger.info("⏱️ Deduplication took %.4f seconds", dedup_duration)
+
         # Convert back to list and sort for consistent ordering
+        sort_start = time.time()
         project_state.items = list(items_dict.values())
         project_state.items.sort(key=lambda x: (x.parent_path, not x.is_directory, x.name.lower()))
+        sort_duration = time.time() - sort_start
+        logger.info("⏱️ Sorting took %.4f seconds", sort_duration)
+
+        func_duration = time.time() - func_start
+        logger.info("⏱️ _build_flattened_items_structure TOTAL: %.4f seconds (batch_git=%.4f, load=%.4f)",
+                   func_duration, batch_git_duration, load_items_duration)
     
-    def _load_directory_items_list_sync(self, directory_path: str, parent_path: str) -> List[FileItem]:
-        """Load directory items and return as a list with parent_path (synchronous version for executor)."""
-        git_manager = None
-        for manager in self.git_managers.values():
-            if directory_path.startswith(manager.project_path):
-                git_manager = manager
-                break
-        
+    def _load_directory_items_list_sync(self, directory_path: str, parent_path: str,
+                                       git_status_map: Dict[str, Dict[str, Any]] = None) -> List[FileItem]:
+        """Load directory items and return as a list with parent_path (synchronous version for executor).
+
+        Args:
+            directory_path: Directory to scan
+            parent_path: Parent path for items
+            git_status_map: Optional pre-fetched git status map (path -> status_dict)
+        """
         items = []
-        
+
         try:
             with os.scandir(directory_path) as entries:
                 for entry in entries:
@@ -415,15 +467,15 @@ class ProjectStateManager:
                         # Skip .git folders and their contents
                         if entry.name == '.git' and entry.is_dir():
                             continue
-                            
+
                         stat_info = entry.stat()
                         is_hidden = entry.name.startswith('.')
-                        
-                        # Get Git status if available
+
+                        # Get Git status from pre-fetched map or use default
                         git_info = {"is_tracked": False, "status": None, "is_ignored": False, "is_staged": False}
-                        if git_manager:
-                            git_info = git_manager.get_file_status(entry.path)
-                        
+                        if git_status_map and entry.path in git_status_map:
+                            git_info = git_status_map[entry.path]
+
                         file_item = FileItem(
                             name=entry.name,
                             path=entry.path,
@@ -439,19 +491,19 @@ class ProjectStateManager:
                             is_expanded=False,
                             is_loaded=True  # Will be set correctly in _build_flattened_items_structure
                         )
-                        
+
                         items.append(file_item)
-                        
+
                     except (OSError, PermissionError) as e:
                         logger.debug("Error reading entry %s: %s", entry.path, e)
                         continue
-            
+
             # Sort items: directories first, then files, both alphabetically
             items.sort(key=lambda x: (not x.is_directory, x.name.lower()))
-            
+
         except (OSError, PermissionError) as e:
             logger.error("Error loading directory %s: %s", directory_path, e)
-        
+
         return items
     
     async def expand_folder(self, client_session_id: str, folder_path: str) -> bool:
