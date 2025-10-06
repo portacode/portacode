@@ -177,8 +177,14 @@ class PlaywrightManager:
     async def _perform_login(self):
         """Perform login using provided credentials."""
         try:
+            # Navigate to login page first
+            login_url = f"{self.base_url}/accounts/login/"
+            await self.page.goto(login_url)
+            await self.log_action("navigate_to_login", {"url": login_url})
+            await self.take_screenshot("login_page")
+
             await self.log_action("login_start", {"username": self.username})
-            
+
             # Look for common login form elements
             username_selectors = [
                 'input[name="username"]',
