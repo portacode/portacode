@@ -383,6 +383,7 @@ class ContentRequestHandler(AsyncHandler):
         """Return content by hash if available, chunked for large content."""
         content_hash = message.get("content_hash")
         source_client_session = message.get("source_client_session")
+        server_project_id = message.get("project_id")
 
         if not content_hash:
             raise ValueError("content_hash parameter is required")
@@ -391,23 +392,27 @@ class ContentRequestHandler(AsyncHandler):
         content = _content_cache.get(content_hash)
 
         if content is not None:
-            # Create base response (request_id will be added automatically by base class)
+
             base_response = {
                 "event": "content_response",
                 "content_hash": content_hash,
                 "success": True,
             }
+
+            # Add request_id if present in original message
+            if "request_id" in message:
+                base_response["request_id"] = message["request_id"]
             
             # Create chunked responses
             responses = create_chunked_response(base_response, "content", content)
             
             # Send all responses
             for response in responses:
-                await self.send_response(response, project_id=None)
+                await self.send_response(response, project_id=server_project_id)
             
             logger.info(f"Sent content response in {len(responses)} chunk(s) for hash: {content_hash[:16]}...")
         else:
-            # Content not found in cache (request_id will be added automatically by base class)
+
             response = {
                 "event": "content_response",
                 "content_hash": content_hash,
@@ -416,7 +421,10 @@ class ContentRequestHandler(AsyncHandler):
                 "error": "Content not found in cache",
                 "chunked": False,
             }
-            await self.send_response(response, project_id=None)
+            # Add request_id if present in original message
+            if "request_id" in message:
+                base_response["request_id"] = message["request_id"]
+            await self.send_response(response, project_id=server_project_id)
 
 
 def cache_content(content_hash: str, content: str) -> None:
