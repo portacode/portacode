@@ -497,9 +497,10 @@ class TerminalManager:
                     logger.info("terminal_manager: ✅ Updated client sessions (%d sessions)", len(sessions))
                     
                     # Auto-send initial data only to newly added clients
+                    # Create a background task so it doesn't block the control loop
                     if newly_added_sessions:
-                        logger.info("terminal_manager: 🚀 Triggering auto-send of initial data to newly added clients")
-                        await self._send_initial_data_to_clients(newly_added_sessions)
+                        logger.info("terminal_manager: 🚀 Triggering auto-send of initial data to newly added clients (non-blocking)")
+                        asyncio.create_task(self._send_initial_data_to_clients(newly_added_sessions))
                     else:
                         logger.info("terminal_manager: ℹ️ No new sessions to send data to")
                     continue

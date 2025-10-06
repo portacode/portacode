@@ -84,15 +84,15 @@ class CommandRegistry:
         """
         logger.info("registry: Dispatching command '%s' with reply_channel=%s", command_name, reply_channel)
 
-        # Add device_receive timestamp if trace present
+        # Add handler_receive timestamp if trace present
         if "trace" in message and "request_id" in message:
-            device_receive_time = ntp_clock.now_ms()
-            if device_receive_time is not None:
-                message["trace"]["device_receive"] = device_receive_time
+            handler_receive_time = ntp_clock.now_ms()
+            if handler_receive_time is not None:
+                message["trace"]["handler_receive"] = handler_receive_time
                 # Update ping to show total time from client_send
                 if "client_send" in message["trace"]:
-                    message["trace"]["ping"] = device_receive_time - message["trace"]["client_send"]
-                logger.info(f"📨 Device received traced message: {message['request_id']}")
+                    message["trace"]["ping"] = handler_receive_time - message["trace"]["client_send"]
+                logger.info(f"🎯 Handler received traced message: {message['request_id']}")
 
         handler = self.get_handler(command_name)
         if handler is None:

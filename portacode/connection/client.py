@@ -148,6 +148,25 @@ class ConnectionManager:
         while not self._stop_event.is_set():
             try:
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=1.0)
+
+                # Add device_receive timestamp if trace present
+                try:
+                    import json
+                    data = json.loads(message)
+                    payload = data.get("payload", {})
+                    if isinstance(payload, dict) and "trace" in payload and "request_id" in payload:
+                        from portacode.utils.ntp_clock import ntp_clock
+                        device_receive_time = ntp_clock.now_ms()
+                        if device_receive_time is not None:
+                            payload["trace"]["device_receive"] = device_receive_time
+                            if "client_send" in payload["trace"]:
+                                payload["trace"]["ping"] = device_receive_time - payload["trace"]["client_send"]
+                            # Re-serialize with updated trace
+                            message = json.dumps(data)
+                            logger.info(f"📥 Device received traced message: {payload['request_id']}")
+                except:
+                    pass  # Not a traced message, continue normally
+
                 if self.mux:
                     await self.mux.on_raw_message(message)
             except asyncio.TimeoutError:

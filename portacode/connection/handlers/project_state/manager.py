@@ -156,16 +156,23 @@ class ProjectStateManager:
         
         git_manager = GitManager(project_folder_path, change_callback=git_change_callback)
         self.git_managers[client_session_id] = git_manager
-        
+
+        # Run git operations in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        is_git_repo = git_manager.is_git_repo
+        git_branch = await loop.run_in_executor(None, git_manager.get_branch_name)
+        git_status_summary = await loop.run_in_executor(None, git_manager.get_status_summary)
+        git_detailed_status = await loop.run_in_executor(None, git_manager.get_detailed_status)
+
         # Create project state
         project_state = ProjectState(
             client_session_id=client_session_id,
             project_folder_path=project_folder_path,
             items=[],
-            is_git_repo=git_manager.is_git_repo,
-            git_branch=git_manager.get_branch_name(),
-            git_status_summary=git_manager.get_status_summary(),
-            git_detailed_status=git_manager.get_detailed_status()
+            is_git_repo=is_git_repo,
+            git_branch=git_branch,
+            git_status_summary=git_status_summary,
+            git_detailed_status=git_detailed_status
         )
         
         # Initialize monitored folders with project root and its immediate subdirectories
@@ -353,15 +360,21 @@ class ProjectStateManager:
     async def _build_flattened_items_structure(self, project_state: ProjectState):
         """Build a flattened items structure including ALL items from ALL monitored folders."""
         all_items = []
-        
+
         # Create sets for quick lookup
         expanded_paths = {mf.folder_path for mf in project_state.monitored_folders if mf.is_expanded}
         monitored_paths = {mf.folder_path for mf in project_state.monitored_folders}
-        
+
         # Load items from ALL monitored folders
+        loop = asyncio.get_event_loop()
         for monitored_folder in project_state.monitored_folders:
-            # Load direct children of this monitored folder
-            children = await self._load_directory_items_list(monitored_folder.folder_path, monitored_folder.folder_path)
+            # Load direct children of this monitored folder (run in executor to avoid blocking)
+            children = await loop.run_in_executor(
+                None,
+                self._load_directory_items_list_sync,
+                monitored_folder.folder_path,
+                monitored_folder.folder_path
+            )
             
             # Set correct expansion and loading states for each child
             for child in children:
@@ -385,8 +398,8 @@ class ProjectStateManager:
         project_state.items = list(items_dict.values())
         project_state.items.sort(key=lambda x: (x.parent_path, not x.is_directory, x.name.lower()))
     
-    async def _load_directory_items_list(self, directory_path: str, parent_path: str) -> List[FileItem]:
-        """Load directory items and return as a list with parent_path."""
+    def _load_directory_items_list_sync(self, directory_path: str, parent_path: str) -> List[FileItem]:
+        """Load directory items and return as a list with parent_path (synchronous version for executor)."""
         git_manager = None
         for manager in self.git_managers.values():
             if directory_path.startswith(manager.project_path):
