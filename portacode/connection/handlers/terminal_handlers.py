@@ -218,24 +218,33 @@ class TerminalListHandler(AsyncHandler):
     
     async def handle(self, message: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
         """Handle the command by executing it and sending the response to the requesting client session."""
-        logger.info("handler: Processing command %s with reply_channel=%s", 
+        logger.info("handler: Processing command %s with reply_channel=%s",
                    self.command_name, reply_channel)
-        
+
         try:
             response = await self.execute(message)
             logger.info("handler: Command %s executed successfully", self.command_name)
-            
+
+            # Automatically copy request_id if present in the incoming message
+            if "request_id" in message and "request_id" not in response:
+                response["request_id"] = message["request_id"]
+
             # Get the source client session from the message
             source_client_session = message.get("source_client_session")
             project_id = response.get("project_id")
-            
-            logger.info("handler: %s response project_id=%s, source_client_session=%s", 
+
+            logger.info("handler: %s response project_id=%s, source_client_session=%s",
                        self.command_name, project_id, source_client_session)
-            
+
             # Send response only to the requesting client session
             if source_client_session:
                 # Add client_sessions field to target only the requesting session
                 response["client_sessions"] = [source_client_session]
+
+                import json
+                logger.info("handler: 📤 SENDING EVENT '%s' (via direct control_channel.send)", response.get("event", "unknown"))
+                logger.info("handler: 📤 FULL EVENT PAYLOAD: %s", json.dumps(response, indent=2, default=str))
+
                 await self.control_channel.send(response)
             else:
                 # Fallback to original behavior if no source_client_session
@@ -249,15 +258,19 @@ class TerminalListHandler(AsyncHandler):
         session_manager = self.context.get("session_manager")
         if not session_manager:
             raise RuntimeError("Session manager not available")
-        
+
         # Accept project_id argument: None (default) = only no project, 'all' = all, else = filter by project_id
         requested_project_id = message.get("project_id")
+        logger.info("terminal_list: requested_project_id=%r (type: %s)", requested_project_id, type(requested_project_id))
 
         if requested_project_id == "all":
+            logger.info("terminal_list: Using 'all' mode to list all terminals")
             sessions = session_manager.list_sessions(project_id="all")
         else:
+            logger.info("terminal_list: Filtering by project_id=%r", requested_project_id)
             sessions = session_manager.list_sessions(project_id=requested_project_id)
-        
+
+        logger.info("terminal_list: Found %d sessions, returning with project_id=%r", len(sessions), requested_project_id)
         return {
             "event": "terminal_list",
             "sessions": sessions,
