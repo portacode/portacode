@@ -28,12 +28,13 @@ except ImportError:
 
 class FileSystemWatcher:
     """Watches file system changes for project folders."""
-    
+
     def __init__(self, project_manager):
         self.project_manager = project_manager  # Reference to ProjectStateManager
         self.observer: Optional[Observer] = None
         self.event_handler: Optional[FileSystemEventHandler] = None
         self.watched_paths: Set[str] = set()
+        self.watch_handles: dict = {}  # Map path -> watch handle for proper cleanup
         # Store reference to the event loop for thread-safe async task creation
         try:
             self.event_loop = asyncio.get_running_loop()
@@ -140,14 +141,15 @@ class FileSystemWatcher:
         if not WATCHDOG_AVAILABLE or not self.observer:
             logger.warning("Watchdog not available, cannot start watching: %s", path)
             return
-        
+
         if path not in self.watched_paths:
             try:
                 # Use recursive=False to watch only direct contents of each folder
-                self.observer.schedule(self.event_handler, path, recursive=False)
+                watch_handle = self.observer.schedule(self.event_handler, path, recursive=False)
                 self.watched_paths.add(path)
+                self.watch_handles[path] = watch_handle  # Store handle for cleanup
                 logger.info("Started watching path (non-recursive): %s", path)
-                
+
                 if not self.observer.is_alive():
                     self.observer.start()
                     logger.info("Started file system observer")
@@ -161,14 +163,15 @@ class FileSystemWatcher:
         if not WATCHDOG_AVAILABLE or not self.observer:
             logger.warning("Watchdog not available, cannot start watching git directory: %s", git_path)
             return
-        
+
         if git_path not in self.watched_paths:
             try:
                 # Watch .git directory recursively to catch changes in refs/, logs/, etc.
-                self.observer.schedule(self.event_handler, git_path, recursive=True)
+                watch_handle = self.observer.schedule(self.event_handler, git_path, recursive=True)
                 self.watched_paths.add(git_path)
+                self.watch_handles[git_path] = watch_handle  # Store handle for cleanup
                 logger.info("Started watching git directory (recursive): %s", git_path)
-                
+
                 if not self.observer.is_alive():
                     self.observer.start()
                     logger.info("Started file system observer")
@@ -181,9 +184,19 @@ class FileSystemWatcher:
         """Stop watching a specific path."""
         if not WATCHDOG_AVAILABLE or not self.observer:
             return
-        
+
         if path in self.watched_paths:
-            # Note: watchdog doesn't have direct path removal, would need to recreate observer
+            # Actually unschedule the watch using stored handle
+            watch_handle = self.watch_handles.get(path)
+            if watch_handle:
+                try:
+                    self.observer.unschedule(watch_handle)
+                    logger.info("Successfully unscheduled watch for: %s", path)
+                except Exception as e:
+                    logger.error("Error unscheduling watch for %s: %s", path, e)
+                finally:
+                    self.watch_handles.pop(path, None)
+
             self.watched_paths.discard(path)
             logger.debug("Stopped watching path: %s", path)
     
@@ -193,3 +206,4 @@ class FileSystemWatcher:
             self.observer.stop()
             self.observer.join()
             self.watched_paths.clear()
+            self.watch_handles.clear()
