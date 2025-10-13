@@ -1,5 +1,33 @@
 # Device Performance Degradation over time.
 
+## **CONFIRMED ROOT CAUSE (2025-10-13)**
+
+**Trigger: Opening/refreshing project workspace pages for git repositories**
+
+Experimental findings:
+- ✅ Terminal sessions have NO impact on performance (can run for days with heavy I/O)
+- ✅ Project workspace pages WITHOUT .git folder: always fast, no degradation
+- ❌ Project workspace pages WITH .git folder: **catastrophic degradation**
+  - 1st load: takes several seconds
+  - 2nd load: noticeably slower
+  - 5th load: barely responsive, device goes offline momentarily
+
+**Diagnostic evidence from running service (PID 1891992, 16+ hours uptime):**
+- 200 pipes (normally <20)
+- 65 threads (normally 5-10)
+- 91% sustained CPU usage
+- Performance: 55ms → 12,418ms (224x slowdown)
+
+**Primary culprit: Watchdog file system watcher + Git operations**
+- file_system_watcher.py:186-188 - `stop_watching()` doesn't unschedule watches
+- file_system_watcher.py:168 - .git directories watched **recursively**
+- manager.py:904 - Every project state refresh adds .git watch
+- Result: Orphaned watches accumulate, every file change triggers 100+ unnecessary handlers
+
+---
+
+## Original Issue Description
+
 When we run "portacode connect" or "portacode service install" and the device gets connected, initially, the totall time elapsed from the moment a client session sends a command to the device till the device response event arrivs back to the client session is typically less than 100ms with an average of 55ms. However, when we start actively using the device, the device starts to slow down gradually until within just a couple of hours or so, it becomes so slow it takes more than 12 seconds! The trace looks something like this:
 
 {
