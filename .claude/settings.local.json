@@ -15,7 +15,8 @@
       "Bash(mkdir:*)",
       "Bash(./connect.sh)",
       "Bash(git -C /home/menas/testing_folder status --porcelain)",
-      "Bash(docker-compose restart:*)"
+      "Bash(docker-compose restart:*)",
+      "Bash(./debug/list_user_devices_and_projects.sh:*)"
     ],
     "deny": []
   }
