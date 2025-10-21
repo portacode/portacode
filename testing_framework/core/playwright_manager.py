@@ -71,6 +71,7 @@ class PlaywrightManager:
             env_headless = os.getenv('TEST_HEADLESS', 'false').lower() in ('true', '1', 'yes')
             env_video_width = int(os.getenv('TEST_VIDEO_WIDTH', '1920'))
             env_video_height = int(os.getenv('TEST_VIDEO_HEIGHT', '1080'))
+            automation_token = os.getenv('TEST_RUNNER_BYPASS_TOKEN')
             
             # Use provided values or fall back to environment
             self.base_url = url or env_url
@@ -125,14 +126,20 @@ class PlaywrightManager:
 
             # Create context with recording enabled and proper viewport
             video_size = {"width": env_video_width, "height": env_video_height}
-            self.context = await self.browser.new_context(
-                record_video_dir=str(self.test_recordings_dir),
-                record_video_size=video_size,
-                record_har_path=str(self.har_path),
-                record_har_omit_content=False,
-                viewport=video_size
-            )
-            
+            context_kwargs = {
+                "record_video_dir": str(self.test_recordings_dir),
+                "record_video_size": video_size,
+                "record_har_path": str(self.har_path),
+                "record_har_omit_content": False,
+                "viewport": video_size
+            }
+            if automation_token:
+                context_kwargs["extra_http_headers"] = {
+                    "X-Portacode-Automation": automation_token
+                }
+                self.logger.info("Automation bypass header attached for Playwright session")
+            self.context = await self.browser.new_context(**context_kwargs)
+
             self.logger.info(f"Video recording configured: {env_video_width}x{env_video_height}")
 
             # Start tracing
@@ -178,7 +185,7 @@ class PlaywrightManager:
         """Perform login using provided credentials."""
         try:
             # Navigate to login page first
-            login_url = f"{self.base_url}/accounts/login/"
+            login_url = f"{self.base_url}accounts/login/"
             await self.page.goto(login_url)
             await self.log_action("navigate_to_login", {"url": login_url})
             await self.take_screenshot("login_page")
