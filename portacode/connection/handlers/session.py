@@ -9,7 +9,8 @@ import uuid
 from asyncio.subprocess import Process
 from pathlib import Path
 from typing import Any, Dict, Optional, List, TYPE_CHECKING
-from collections import deque
+
+import pyte
 
 if TYPE_CHECKING:
     from ..multiplex import Channel
@@ -19,8 +20,10 @@ TERMINAL_DATA_RATE_LIMIT_MS = 60  # Minimum time between terminal_data events (m
 TERMINAL_DATA_MAX_WAIT_MS = 1000   # Maximum time to wait before sending accumulated data (milliseconds)
 TERMINAL_DATA_INITIAL_WAIT_MS = 10  # Time to wait for additional data even on first event (milliseconds)
 
-# Terminal buffer size limit configuration
-TERMINAL_BUFFER_SIZE_LIMIT_BYTES = 30 * 1024  # Maximum buffer size in bytes (30KB)
+# Terminal buffer configuration - using pyte for proper screen state management
+TERMINAL_COLUMNS = 80  # Default terminal width
+TERMINAL_ROWS = 24     # Default terminal height (visible area)
+TERMINAL_SCROLLBACK_LIMIT = 1000  # Maximum number of scrollback lines to preserve
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +55,11 @@ class TerminalSession:
         self.project_id = project_id
         self.terminal_manager = terminal_manager
         self._reader_task: Optional[asyncio.Task[None]] = None
-        self._buffer: deque[str] = deque()
-        self._buffer_size_bytes = 0  # Track total buffer size in bytes
-        
+
+        # Use pyte for proper terminal screen state management
+        self._screen = pyte.HistoryScreen(TERMINAL_COLUMNS, TERMINAL_ROWS, history=TERMINAL_SCROLLBACK_LIMIT)
+        self._stream = pyte.Stream(self._screen)  # Use Stream (not ByteStream) since data is already decoded to strings
+
         # Rate limiting for terminal_data events
         self._last_send_time: float = 0
         self._pending_data: str = ""
@@ -162,13 +167,13 @@ class TerminalSession:
         """Send terminal data immediately and update last send time."""
         self._last_send_time = time.time()
         data_size = len(data.encode('utf-8'))
-        
-        logger.info("session: Attempting to send terminal_data for terminal %s (data_size=%d bytes)", 
+
+        logger.info("session: Attempting to send terminal_data for terminal %s (data_size=%d bytes)",
                    self.id, data_size)
-        
-        # Add to buffer for snapshots with size limiting
+
+        # Feed data to pyte screen for proper terminal state management
         self._add_to_buffer(data)
-        
+
         try:
             # Send terminal data via control channel with client session targeting
             if self.terminal_manager:
@@ -206,39 +211,25 @@ class TerminalSession:
         current_time = time.time()
         time_since_last_send = (current_time - self._last_send_time) * 1000  # Convert to milliseconds
         data_size = len(data.encode('utf-8'))
-        
-        logger.info("session: Received terminal_data for terminal %s (data_size=%d bytes, time_since_last_send=%.1fms)", 
+
+        logger.info("session: Received terminal_data for terminal %s (data_size=%d bytes, time_since_last_send=%.1fms)",
                    self.id, data_size, time_since_last_send)
-        
-        # Add new data to pending buffer with simple size limiting
-        # Always add the new data first
+
+        # Add new data to pending buffer (no trimming needed - pyte handles screen state)
         self._pending_data += data
-        
-        # Simple size limiting - only trim if we exceed the 30KB limit significantly
-        pending_size = len(self._pending_data.encode('utf-8'))
-        if pending_size > TERMINAL_BUFFER_SIZE_LIMIT_BYTES:
-            logger.info("session: Buffer size limit exceeded for terminal %s (pending_size=%d bytes, limit=%d bytes), trimming", 
-                       self.id, pending_size, TERMINAL_BUFFER_SIZE_LIMIT_BYTES)
-            # Only do minimal ANSI-safe trimming from the beginning
-            excess_bytes = pending_size - TERMINAL_BUFFER_SIZE_LIMIT_BYTES
-            trim_pos = self._find_minimal_safe_trim_position(excess_bytes)
-            
-            if trim_pos > 0:
-                self._pending_data = self._pending_data[trim_pos:]
-                logger.info("session: Trimmed %d bytes from pending buffer for terminal %s", trim_pos, self.id)
-        
+
         # Cancel existing debounce task if any
         if self._debounce_task and not self._debounce_task.done():
             logger.debug("session: Cancelling existing debounce task for terminal %s", self.id)
             self._debounce_task.cancel()
-        
+
         # Always set up a debounce timer to catch rapid consecutive outputs
         async def _debounce_timer():
             try:
                 if time_since_last_send >= TERMINAL_DATA_RATE_LIMIT_MS:
                     # Enough time has passed since last send, wait initial delay for more data
                     wait_time = TERMINAL_DATA_INITIAL_WAIT_MS / 1000
-                    logger.info("session: Rate limit satisfied for terminal %s, waiting %.1fms for more data", 
+                    logger.info("session: Rate limit satisfied for terminal %s, waiting %.1fms for more data",
                                self.id, wait_time * 1000)
                 else:
                     # Too soon since last send, wait for either the rate limit period or max wait time
@@ -246,9 +237,9 @@ class TerminalSession:
                         (TERMINAL_DATA_RATE_LIMIT_MS - time_since_last_send) / 1000,
                         TERMINAL_DATA_MAX_WAIT_MS / 1000
                     )
-                    logger.info("session: Rate limit active for terminal %s, waiting %.1fms before send (time_since_last=%.1fms, rate_limit=%dms)", 
+                    logger.info("session: Rate limit active for terminal %s, waiting %.1fms before send (time_since_last=%.1fms, rate_limit=%dms)",
                                self.id, wait_time * 1000, time_since_last_send, TERMINAL_DATA_RATE_LIMIT_MS)
-                
+
                 await asyncio.sleep(wait_time)
                 logger.info("session: Debounce timer expired for terminal %s, flushing pending data", self.id)
                 await self._flush_pending_data()
@@ -256,56 +247,175 @@ class TerminalSession:
                 logger.debug("session: Debounce timer cancelled for terminal %s (new data arrived)", self.id)
                 # Timer was cancelled, another data event came in
                 pass
-        
+
         self._debounce_task = asyncio.create_task(_debounce_timer())
         logger.info("session: Started debounce timer for terminal %s", self.id)
 
-    def _find_minimal_safe_trim_position(self, excess_bytes: int) -> int:
-        """Find a minimal safe position to trim that only avoids breaking ANSI sequences."""
-        import re
-        
-        # Find the basic character-safe position
-        trim_pos = 0
-        current_bytes = 0
-        for i, char in enumerate(self._pending_data):
-            char_bytes = len(char.encode('utf-8'))
-            if current_bytes + char_bytes > excess_bytes:
-                trim_pos = i
-                break
-            current_bytes += char_bytes
-        
-        # Only adjust if we're breaking an ANSI sequence
-        search_start = max(0, trim_pos - 20)  # Much smaller search area
-        text_before_trim = self._pending_data[search_start:trim_pos]
-        
-        # Check if we're in the middle of an incomplete ANSI sequence
-        incomplete_pattern = r'\x1b\[[0-9;]*$'
-        if re.search(incomplete_pattern, text_before_trim):
-            # Find the start of this sequence and trim before it
-            last_esc = text_before_trim.rfind('\x1b[')
-            if last_esc >= 0:
-                return search_start + last_esc
-        
-        # Check if we're cutting right after an ESC character
-        if trim_pos > 0 and self._pending_data[trim_pos - 1] == '\x1b':
-            return trim_pos - 1
-        
-        return trim_pos
-
     def _add_to_buffer(self, data: str) -> None:
-        """Add data to buffer while maintaining size limit."""
-        data_bytes = len(data.encode('utf-8'))
-        self._buffer.append(data)
-        self._buffer_size_bytes += data_bytes
-        
-        # Remove oldest entries until we're under the size limit
-        while self._buffer_size_bytes > TERMINAL_BUFFER_SIZE_LIMIT_BYTES and self._buffer:
-            oldest_data = self._buffer.popleft()
-            self._buffer_size_bytes -= len(oldest_data.encode('utf-8'))
+        """Feed data to pyte virtual terminal screen."""
+        # Feed the data to pyte - it handles all ANSI parsing and screen state management
+        self._stream.feed(data)
+        # Pyte automatically manages scrollback with the history limit we configured
 
     def snapshot_buffer(self) -> str:
-        """Return concatenated last buffer contents suitable for UI."""
-        return "".join(self._buffer)
+        """Return the visible terminal content as ANSI sequences suitable for XTerm.js."""
+        return self._render_screen_to_ansi()
+
+    def _render_screen_to_ansi(self) -> str:
+        """Convert pyte screen state to ANSI escape sequences.
+
+        This renders both scrollback history and visible screen with full formatting
+        (colors, bold, italics, underline) preserved as ANSI sequences.
+        """
+        lines = []
+
+        # Get scrollback history if available (HistoryScreen provides this)
+        if hasattr(self._screen, 'history'):
+            # Process scrollback lines (lines that have scrolled off the top)
+            history_top = self._screen.history.top
+            for line_data in history_top:
+                # line_data is a dict mapping column positions to Char objects
+                line = self._render_line_to_ansi(line_data, self._screen.columns)
+                lines.append(line)
+
+        # Process visible screen lines
+        for y in range(self._screen.lines):
+            line_data = self._screen.buffer[y]
+            line = self._render_line_to_ansi(line_data, self._screen.columns)
+            lines.append(line)
+
+        # Join all lines with CRLF for proper terminal display
+        return '\r\n'.join(lines)
+
+    def _render_line_to_ansi(self, line_data: Dict[int, 'pyte.screens.Char'], columns: int) -> str:
+        """Convert a single line from pyte format to ANSI escape sequences.
+
+        Args:
+            line_data: Dict mapping column index to Char objects
+            columns: Number of columns in the terminal
+
+        Returns:
+            String with ANSI escape codes for formatting
+        """
+        result = []
+        last_char = None
+
+        for x in range(columns):
+            char = line_data.get(x)
+            if char is None:
+                # Empty cell
+                result.append(' ')
+                last_char = None
+                continue
+
+            # Check if formatting changed from previous character
+            if last_char is None or self._char_format_changed(last_char, char):
+                # Reset formatting first if we had any previous formatting
+                if last_char is not None:
+                    result.append('\x1b[0m')
+
+                # Apply new formatting
+                ansi_codes = self._get_ansi_codes_for_char(char)
+                if ansi_codes:
+                    result.append(f'\x1b[{ansi_codes}m')
+
+            # Add the character data
+            result.append(char.data)
+            last_char = char
+
+        # Reset formatting at end of line if we had any
+        if last_char is not None and self._char_has_formatting(last_char):
+            result.append('\x1b[0m')
+
+        # Strip trailing whitespace from the line
+        line_text = ''.join(result).rstrip()
+        return line_text
+
+    def _char_has_formatting(self, char: 'pyte.screens.Char') -> bool:
+        """Check if a character has any formatting applied."""
+        return (char.bold or char.italics or char.underscore or char.strikethrough or
+                char.reverse or char.fg != 'default' or char.bg != 'default')
+
+    def _char_format_changed(self, char1: 'pyte.screens.Char', char2: 'pyte.screens.Char') -> bool:
+        """Check if formatting changed between two characters."""
+        return (char1.bold != char2.bold or
+                char1.italics != char2.italics or
+                char1.underscore != char2.underscore or
+                char1.strikethrough != char2.strikethrough or
+                char1.reverse != char2.reverse or
+                char1.fg != char2.fg or
+                char1.bg != char2.bg)
+
+    def _get_ansi_codes_for_char(self, char: 'pyte.screens.Char') -> str:
+        """Convert pyte Char formatting to ANSI escape codes.
+
+        Returns:
+            String of semicolon-separated ANSI codes (e.g., "1;32;44")
+        """
+        codes = []
+
+        # Text attributes
+        if char.bold:
+            codes.append('1')
+        if char.italics:
+            codes.append('3')
+        if char.underscore:
+            codes.append('4')
+        if char.strikethrough:
+            codes.append('9')
+        if char.reverse:
+            codes.append('7')
+
+        # Foreground color
+        if char.fg != 'default':
+            fg_code = self._color_to_ansi(char.fg, is_background=False)
+            if fg_code:
+                codes.append(fg_code)
+
+        # Background color
+        if char.bg != 'default':
+            bg_code = self._color_to_ansi(char.bg, is_background=True)
+            if bg_code:
+                codes.append(bg_code)
+
+        return ';'.join(codes)
+
+    def _color_to_ansi(self, color, is_background: bool = False) -> Optional[str]:
+        """Convert pyte color to ANSI color code.
+
+        Args:
+            color: Color value (can be string name, int for 256-color, or tuple for RGB)
+            is_background: True for background color, False for foreground
+
+        Returns:
+            ANSI color code string or None
+        """
+        base = 40 if is_background else 30
+
+        if isinstance(color, str):
+            # Named colors (black, red, green, yellow, blue, magenta, cyan, white)
+            color_map = {
+                'black': 0, 'red': 1, 'green': 2, 'yellow': 3,
+                'blue': 4, 'magenta': 5, 'cyan': 6, 'white': 7,
+                'default': None
+            }
+            if color in color_map and color_map[color] is not None:
+                # Check if it's bright/intense color (pyte uses 'bright-' prefix or names like 'brightred')
+                if color.startswith('bright'):
+                    color_base = color.replace('bright', '').replace('-', '')
+                    if color_base in color_map and color_map[color_base] is not None:
+                        return str(base + 60 + color_map[color_base])  # Bright colors: 90-97 (fg), 100-107 (bg)
+                return str(base + color_map[color])
+        elif isinstance(color, int):
+            # 256-color palette
+            if 0 <= color <= 255:
+                return f'{"48" if is_background else "38"};5;{color}'
+        elif isinstance(color, tuple) and len(color) == 3:
+            # RGB color (true color)
+            r, g, b = color
+            return f'{"48" if is_background else "38"};2;{r};{g};{b}'
+
+        return None
 
     async def reattach_channel(self, new_channel: "Channel") -> None:
         """Reattach this session to a new channel after reconnection."""
