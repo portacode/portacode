@@ -1844,16 +1844,17 @@ class GitManager:
         """Monitor git changes periodically and trigger callback when changes are detected."""
         try:
             while self._monitoring_enabled:
-                await asyncio.sleep(1.0)  # Check every 1000ms
-                
+                await asyncio.sleep(5.0)  # Check every 5000ms
+
                 if not self._monitoring_enabled or not self.is_git_repo:
                     break
-                
+
                 try:
-                    # Get current status
-                    current_status_summary = self.get_status_summary()
-                    current_detailed_status = self.get_detailed_status()
-                    current_branch = self.get_branch_name()
+                    # Get current status - run in executor to avoid blocking event loop
+                    loop = asyncio.get_event_loop()
+                    current_status_summary = await loop.run_in_executor(None, self.get_status_summary)
+                    current_detailed_status = await loop.run_in_executor(None, self.get_detailed_status)
+                    current_branch = await loop.run_in_executor(None, self.get_branch_name)
                     
                     # Compare with cached status
                     status_changed = (
