@@ -940,18 +940,19 @@ class ProjectStateManager:
         else:
             logger.debug("🔍 [TRACE] ❌ No git manager found for session: %s", client_session_id)
 
-        # Only perform filesystem operations if this is not a git-only refresh
+        # For git-only operations, skip scanning for new directories
+        # but still sync items to update git attributes for UI
         if not git_only:
             # Detect and add new directories in expanded folders before syncing
             logger.debug("🔍 [TRACE] Detecting and adding new directories...")
             await self._detect_and_add_new_directories(project_state)
-
-            # Sync all dependent state (items, watchdog) with updated monitored folders
-            logger.debug("🔍 [TRACE] Syncing all state with monitored folders...")
-            await self._sync_all_state_with_monitored_folders(project_state)
         else:
-            logger.debug("🔍 [TRACE] Skipping filesystem operations (git_only=True)")
-        
+            logger.debug("🔍 [TRACE] Skipping directory detection (git_only=True)")
+
+        # Always sync state to update git attributes on items (needed for UI updates)
+        logger.debug("🔍 [TRACE] Syncing all state with monitored folders...")
+        await self._sync_all_state_with_monitored_folders(project_state)
+
         # Send update to clients
         logger.debug("🔍 [TRACE] About to send project state update...")
         await self._send_project_state_update(project_state)

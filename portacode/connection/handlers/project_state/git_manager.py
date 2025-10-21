@@ -350,9 +350,18 @@ class GitManager:
                 status_output = self.repo.git.status(*rel_paths, porcelain=True)
                 if status_output.strip():
                     for line in status_output.strip().split('\n'):
+                        # Git porcelain format: XY path (X=index, Y=worktree, then space, then path)
+                        # Some files may have renamed format: XY path -> new_path
                         if len(line) >= 3:
-                            file_path_from_status = line[3:] if len(line) > 3 else ""
-                            status_map[file_path_from_status] = line
+                            # Skip first 3 characters (2 status + 1 space) to get the file path
+                            # But git uses exactly 2 chars for status then space, so position 3 onwards is path
+                            parts = line.split(None, 1)  # Split on first whitespace to separate status from path
+                            if len(parts) >= 2:
+                                file_path_from_status = parts[1]
+                                # Handle renames (format: "old_path -> new_path")
+                                if ' -> ' in file_path_from_status:
+                                    file_path_from_status = file_path_from_status.split(' -> ')[1]
+                                status_map[file_path_from_status] = line
             except Exception as e:
                 logger.debug("Error getting batch status: %s", e)
 
@@ -469,7 +478,6 @@ class GitManager:
                         elif index_status == 'D' or worktree_status == 'D':
                             has_deleted = True
 
-            # Priority order: untracked > modified/deleted > clean
             if has_untracked:
                 return {"is_tracked": False, "status": "untracked", "is_ignored": False, "is_staged": is_staged}
             elif has_deleted:
