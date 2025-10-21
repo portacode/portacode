@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import struct
 import sys
 import time
 import uuid
@@ -29,6 +30,23 @@ logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform.startswith("win")
 
+
+def _configure_pty_window_size(fd: int, rows: int, cols: int) -> None:
+    """Set the PTY window size so subprocesses see a real terminal."""
+    if _IS_WINDOWS:
+        return
+    try:
+        import fcntl
+        import termios
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+    except ImportError:
+        logger.debug("termios/fcntl unavailable; skipping PTY window sizing")
+    except OSError as exc:
+        logger.warning("Failed to set PTY window size (%sx%s): %s", cols, rows, exc)
+
+
+
 # Minimal, safe defaults for interactive shells
 _DEFAULT_ENV = {
     "TERM": "xterm-256color",
@@ -42,6 +60,8 @@ def _build_child_env() -> Dict[str, str]:
     env = os.environ.copy()
     for k, v in _DEFAULT_ENV.items():
         env.setdefault(k, v)
+    env.setdefault("COLUMNS", str(TERMINAL_COLUMNS))
+    env.setdefault("LINES", str(TERMINAL_ROWS))
     return env
 
 
@@ -674,6 +694,7 @@ class SessionManager:
             try:
                 import pty
                 master_fd, slave_fd = pty.openpty()
+                _configure_pty_window_size(slave_fd, TERMINAL_ROWS, TERMINAL_COLUMNS)
                 proc = await asyncio.create_subprocess_exec(
                     shell,
                     stdin=slave_fd,
