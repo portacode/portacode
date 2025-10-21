@@ -408,10 +408,10 @@ class ProjectStateGitStageHandler(AsyncHandler):
             success = git_manager.stage_file(file_paths_to_stage[0])
         else:
             success = git_manager.stage_files(file_paths_to_stage)
-        
+
         if success:
-            # Refresh entire project state to ensure consistency
-            await manager._refresh_project_state(source_client_session)
+            # Refresh git status only (no filesystem changes from staging)
+            await manager._refresh_project_state(source_client_session, git_only=True)
         
         # Build response
         response = {
@@ -482,10 +482,10 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
             success = git_manager.unstage_file(file_paths_to_unstage[0])
         else:
             success = git_manager.unstage_files(file_paths_to_unstage)
-        
+
         if success:
-            # Refresh entire project state to ensure consistency
-            await manager._refresh_project_state(source_client_session)
+            # Refresh git status only (no filesystem changes from unstaging)
+            await manager._refresh_project_state(source_client_session, git_only=True)
         
         # Build response
         response = {
@@ -620,9 +620,9 @@ class ProjectStateGitCommitHandler(AsyncHandler):
             if success:
                 # Get the commit hash of the new commit
                 commit_hash = git_manager.get_head_commit_hash()
-                
-                # Refresh entire project state to ensure consistency
-                await manager._refresh_project_state(source_client_session)
+
+                # Refresh git status only (no filesystem changes from commit)
+                await manager._refresh_project_state(source_client_session, git_only=True)
         except Exception as e:
             error_message = str(e)
             logger.error("Error during commit: %s", error_message)

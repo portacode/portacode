@@ -152,7 +152,8 @@ class ProjectStateManager:
         async def git_change_callback():
             """Callback when git status changes are detected."""
             logger.debug("Git change detected, refreshing project state for %s", client_session_id)
-            await self._refresh_project_state(client_session_id)
+            # Git directory changes only affect git status, not filesystem
+            await self._refresh_project_state(client_session_id, git_only=True)
         
         git_manager = GitManager(project_folder_path, change_callback=git_change_callback)
         self.git_managers[client_session_id] = git_manager
@@ -877,9 +878,17 @@ class ProjectStateManager:
         self._pending_changes.clear()
         logger.debug("🔍 [TRACE] ✅ Finished processing file changes")
     
-    async def _refresh_project_state(self, client_session_id: str):
-        """Refresh project state after file changes."""
-        logger.debug("🔍 [TRACE] _refresh_project_state called for session: %s", client_session_id)
+    async def _refresh_project_state(self, client_session_id: str, git_only: bool = False):
+        """Refresh project state after file changes.
+
+        Args:
+            client_session_id: The client session ID
+            git_only: If True, only git status changed (skip filesystem operations like
+                     detecting new directories and syncing file state). Use this for
+                     git operations (stage, unstage, revert) to avoid unnecessary work.
+        """
+        logger.debug("🔍 [TRACE] _refresh_project_state called for session: %s (git_only=%s)",
+                   client_session_id, git_only)
         
         if client_session_id not in self.projects:
             logger.debug("🔍 [TRACE] ❌ Session not found in projects: %s", client_session_id)
@@ -930,14 +939,18 @@ class ProjectStateManager:
                        old_status_summary, project_state.git_status_summary)
         else:
             logger.debug("🔍 [TRACE] ❌ No git manager found for session: %s", client_session_id)
-        
-        # Detect and add new directories in expanded folders before syncing
-        logger.debug("🔍 [TRACE] Detecting and adding new directories...")
-        await self._detect_and_add_new_directories(project_state)
-        
-        # Sync all dependent state (items, watchdog) with updated monitored folders
-        logger.debug("🔍 [TRACE] Syncing all state with monitored folders...")
-        await self._sync_all_state_with_monitored_folders(project_state)
+
+        # Only perform filesystem operations if this is not a git-only refresh
+        if not git_only:
+            # Detect and add new directories in expanded folders before syncing
+            logger.debug("🔍 [TRACE] Detecting and adding new directories...")
+            await self._detect_and_add_new_directories(project_state)
+
+            # Sync all dependent state (items, watchdog) with updated monitored folders
+            logger.debug("🔍 [TRACE] Syncing all state with monitored folders...")
+            await self._sync_all_state_with_monitored_folders(project_state)
+        else:
+            logger.debug("🔍 [TRACE] Skipping filesystem operations (git_only=True)")
         
         # Send update to clients
         logger.debug("🔍 [TRACE] About to send project state update...")
