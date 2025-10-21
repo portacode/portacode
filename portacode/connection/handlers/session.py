@@ -255,11 +255,21 @@ class TerminalSession:
         """Feed data to pyte virtual terminal screen."""
         # Feed the data to pyte - it handles all ANSI parsing and screen state management
         self._stream.feed(data)
-        # Pyte automatically manages scrollback with the history limit we configured
 
     def snapshot_buffer(self) -> str:
         """Return the visible terminal content as ANSI sequences suitable for XTerm.js."""
-        return self._render_screen_to_ansi()
+        # Render screen content to ANSI
+        result = self._render_screen_to_ansi()
+
+        # Add cursor positioning at the end so XTerm.js knows where the cursor should be
+        # This is critical - without it, new data gets written at the wrong position causing duplication
+        cursor_y = self._screen.cursor.y + 1  # Convert 0-indexed to 1-indexed
+        cursor_x = self._screen.cursor.x + 1  # Convert 0-indexed to 1-indexed
+
+        # Move cursor to the correct position
+        result += f'\x1b[{cursor_y};{cursor_x}H'
+
+        return result
 
     def _render_screen_to_ansi(self) -> str:
         """Convert pyte screen state to ANSI escape sequences.
@@ -299,25 +309,34 @@ class TerminalSession:
         """
         result = []
         last_char = None
+        did_reset = False  # Track if we just emitted a reset code
 
         for x in range(columns):
             char = line_data.get(x)
             if char is None:
-                # Empty cell
+                # Empty cell - reset formatting if we had any
+                if last_char is not None and self._char_has_formatting(last_char):
+                    result.append('\x1b[0m')
+                    did_reset = True
                 result.append(' ')
                 last_char = None
                 continue
 
             # Check if formatting changed from previous character
-            if last_char is None or self._char_format_changed(last_char, char):
-                # Reset formatting first if we had any previous formatting
-                if last_char is not None:
+            format_changed = last_char is None or self._char_format_changed(last_char, char) or did_reset
+
+            if format_changed:
+                # If previous char had formatting and current is different, reset first
+                if last_char is not None and self._char_has_formatting(last_char) and not did_reset:
                     result.append('\x1b[0m')
 
-                # Apply new formatting
+                # Apply new formatting (always apply after reset)
                 ansi_codes = self._get_ansi_codes_for_char(char)
                 if ansi_codes:
                     result.append(f'\x1b[{ansi_codes}m')
+                    did_reset = False
+                else:
+                    did_reset = True  # No formatting to apply after reset
 
             # Add the character data
             result.append(char.data)
@@ -333,16 +352,27 @@ class TerminalSession:
 
     def _char_has_formatting(self, char: 'pyte.screens.Char') -> bool:
         """Check if a character has any formatting applied."""
-        return (char.bold or char.italics or char.underscore or char.strikethrough or
-                char.reverse or char.fg != 'default' or char.bg != 'default')
+        return (char.bold or
+                (hasattr(char, 'dim') and char.dim) or
+                char.italics or
+                char.underscore or
+                (hasattr(char, 'blink') and char.blink) or
+                char.reverse or
+                (hasattr(char, 'hidden') and char.hidden) or
+                char.strikethrough or
+                char.fg != 'default' or
+                char.bg != 'default')
 
     def _char_format_changed(self, char1: 'pyte.screens.Char', char2: 'pyte.screens.Char') -> bool:
         """Check if formatting changed between two characters."""
         return (char1.bold != char2.bold or
+                (hasattr(char1, 'dim') and hasattr(char2, 'dim') and char1.dim != char2.dim) or
                 char1.italics != char2.italics or
                 char1.underscore != char2.underscore or
-                char1.strikethrough != char2.strikethrough or
+                (hasattr(char1, 'blink') and hasattr(char2, 'blink') and char1.blink != char2.blink) or
                 char1.reverse != char2.reverse or
+                (hasattr(char1, 'hidden') and hasattr(char2, 'hidden') and char1.hidden != char2.hidden) or
+                char1.strikethrough != char2.strikethrough or
                 char1.fg != char2.fg or
                 char1.bg != char2.bg)
 
@@ -354,17 +384,23 @@ class TerminalSession:
         """
         codes = []
 
-        # Text attributes
+        # Text attributes - comprehensive list matching ANSI SGR codes
         if char.bold:
             codes.append('1')
+        if hasattr(char, 'dim') and char.dim:
+            codes.append('2')
         if char.italics:
             codes.append('3')
         if char.underscore:
             codes.append('4')
-        if char.strikethrough:
-            codes.append('9')
+        if hasattr(char, 'blink') and char.blink:
+            codes.append('5')
         if char.reverse:
             codes.append('7')
+        if hasattr(char, 'hidden') and char.hidden:
+            codes.append('8')
+        if char.strikethrough:
+            codes.append('9')
 
         # Foreground color
         if char.fg != 'default':
@@ -384,37 +420,90 @@ class TerminalSession:
         """Convert pyte color to ANSI color code.
 
         Args:
-            color: Color value (can be string name, int for 256-color, or tuple for RGB)
+            color: Color value (can be string name, int for 256-color, hex string, or tuple for RGB)
             is_background: True for background color, False for foreground
 
         Returns:
             ANSI color code string or None
         """
+        # Handle default/None
+        if color == 'default' or color is None:
+            return None
+
+        # Standard base for 8 basic colors
         base = 40 if is_background else 30
 
         if isinstance(color, str):
+            # pyte stores colors as lowercase strings
+            color_lower = color.lower()
+
+            # Check for hex color format (pyte stores RGB as hex strings like '4782c8')
+            # Hex strings are 6 characters (RRGGBB)
+            if len(color_lower) == 6 and all(c in '0123456789abcdef' for c in color_lower):
+                try:
+                    # Parse hex string to RGB
+                    r = int(color_lower[0:2], 16)
+                    g = int(color_lower[2:4], 16)
+                    b = int(color_lower[4:6], 16)
+                    return f'{"48" if is_background else "38"};2;{r};{g};{b}'
+                except ValueError:
+                    pass  # Not a valid hex color, continue to other checks
+
             # Named colors (black, red, green, yellow, blue, magenta, cyan, white)
             color_map = {
                 'black': 0, 'red': 1, 'green': 2, 'yellow': 3,
-                'blue': 4, 'magenta': 5, 'cyan': 6, 'white': 7,
-                'default': None
+                'blue': 4, 'magenta': 5, 'cyan': 6, 'white': 7
             }
-            if color in color_map and color_map[color] is not None:
-                # Check if it's bright/intense color (pyte uses 'bright-' prefix or names like 'brightred')
-                if color.startswith('bright'):
-                    color_base = color.replace('bright', '').replace('-', '')
-                    if color_base in color_map and color_map[color_base] is not None:
-                        return str(base + 60 + color_map[color_base])  # Bright colors: 90-97 (fg), 100-107 (bg)
-                return str(base + color_map[color])
+
+            # Check for bright/intense colors first (pyte may use different formats)
+            # Format 1: "brightred", "brightblue", etc.
+            if color_lower.startswith('bright') and len(color_lower) > 6:
+                color_base = color_lower[6:]  # Remove 'bright' prefix
+                if color_base in color_map:
+                    # Bright colors: 90-97 (fg), 100-107 (bg)
+                    return str(base + 60 + color_map[color_base])
+
+            # Format 2: "bright_red", "bright_blue", etc.
+            if color_lower.startswith('bright_'):
+                color_base = color_lower[7:]  # Remove 'bright_' prefix
+                if color_base in color_map:
+                    return str(base + 60 + color_map[color_base])
+
+            # Standard color names
+            if color_lower in color_map:
+                return str(base + color_map[color_lower])
+
+            # Some terminals use color names like "brown" instead of "yellow"
+            color_aliases = {
+                'brown': 3,  # yellow
+                'lightgray': 7, 'lightgrey': 7,  # white
+                'darkgray': 0, 'darkgrey': 0,  # black
+            }
+            if color_lower in color_aliases:
+                return str(base + color_aliases[color_lower])
+
         elif isinstance(color, int):
-            # 256-color palette
+            # 256-color palette (0-255)
+            # Note: 0-15 are the basic and bright colors, 16-231 are 216 color cube, 232-255 are grayscale
             if 0 <= color <= 255:
                 return f'{"48" if is_background else "38"};5;{color}'
-        elif isinstance(color, tuple) and len(color) == 3:
-            # RGB color (true color)
-            r, g, b = color
-            return f'{"48" if is_background else "38"};2;{r};{g};{b}'
 
+        elif isinstance(color, tuple) and len(color) == 3:
+            # RGB color (true color / 24-bit)
+            try:
+                r, g, b = color
+                # Ensure values are in valid range
+                r = max(0, min(255, int(r)))
+                g = max(0, min(255, int(g)))
+                b = max(0, min(255, int(b)))
+                return f'{"48" if is_background else "38"};2;{r};{g};{b}'
+            except (ValueError, TypeError):
+                logger.warning("Invalid RGB color tuple: %s", color)
+                return None
+
+        # If we got here, we don't recognize the color format
+        logger.info("PYTE_COLOR_DEBUG: Unrecognized color format - type: %s, value: %r, is_bg: %s",
+                   type(color).__name__, color, is_background)
         return None
 
     async def reattach_channel(self, new_channel: "Channel") -> None:
