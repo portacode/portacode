@@ -8,6 +8,7 @@ import logging
 import json
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -133,12 +134,24 @@ class PlaywrightManager:
                 "record_har_omit_content": False,
                 "viewport": video_size
             }
-            if automation_token:
-                context_kwargs["extra_http_headers"] = {
-                    "X-Portacode-Automation": automation_token
-                }
-                self.logger.info("Automation bypass header attached for Playwright session")
             self.context = await self.browser.new_context(**context_kwargs)
+            if automation_token:
+                parsed_base = urlparse(self.base_url)
+                target_host = parsed_base.hostname
+                target_scheme = parsed_base.scheme or "http"
+                header_name = "X-Portacode-Automation"
+
+                async def automation_header_route(route, request):
+                    headers = dict(request.headers)
+                    parsed_request = urlparse(request.url)
+                    if parsed_request.hostname == target_host and parsed_request.scheme == target_scheme:
+                        headers[header_name] = automation_token
+                    else:
+                        headers.pop(header_name, None)
+                    await route.continue_(headers=headers)
+
+                await self.context.route("**/*", automation_header_route)
+                self.logger.info("Automation bypass header restricted to same-origin requests")
 
             self.logger.info(f"Video recording configured: {env_video_width}x{env_video_height}")
 
