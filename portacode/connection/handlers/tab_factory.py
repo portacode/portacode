@@ -162,53 +162,7 @@ class TabFactory:
                 await self._load_binary_content(file_path, tab_info, file_size)
         
         return TabInfo(**tab_info)
-    
-    async def create_diff_tab(self, file_path: str, original_content: str, 
-                            modified_content: str, tab_id: Optional[str] = None,
-                            diff_details: Optional[Dict[str, Any]] = None) -> TabInfo:
-        """Create a diff tab for comparing file versions.
-        
-        Args:
-            file_path: Path to the file being compared
-            original_content: Original version of the file
-            modified_content: Modified version of the file
-            tab_id: Optional tab ID, will generate UUID if not provided
-            diff_details: Optional detailed diff information from diff-match-patch
-            
-        Returns:
-            TabInfo object configured for diff viewing
-        """
-        if tab_id is None:
-            tab_id = str(uuid.uuid4())
-        
-        file_path = Path(file_path)
-        
-        metadata = {'diff_mode': True}
-        if diff_details:
-            metadata['diff_details'] = diff_details
-        
-        # Cache diff content
-        original_hash = generate_content_hash(original_content)
-        modified_hash = generate_content_hash(modified_content)
-        cache_content(original_hash, original_content)
-        cache_content(modified_hash, modified_content)
-        
-        return TabInfo(
-            tab_id=tab_id,
-            tab_type='diff',
-            title=f"{file_path.name} (diff)",
-            file_path=str(file_path),
-            content=None,  # Diff tabs don't use regular content
-            original_content=original_content,
-            modified_content=modified_content,
-            original_content_hash=original_hash,
-            modified_content_hash=modified_hash,
-            is_dirty=False,
-            mime_type=None,
-            encoding='utf-8',
-            metadata=metadata
-        )
-    
+
     async def create_diff_tab_with_title(self, file_path: str, original_content: str, 
                                        modified_content: str, title: str, 
                                        tab_id: Optional[str] = None,

@@ -764,14 +764,13 @@ class ProjectStateDiffContentHandler(AsyncHandler):
             if content is None or (content_type == "all" and not all([matching_tab.original_content, matching_tab.modified_content])):
                 if content_type in ["original", "modified", "all"]:
                     # Re-generate the diff content if needed
-                    await manager.create_diff_tab(
-                        source_client_session, 
-                        file_path, 
-                        from_ref, 
-                        to_ref, 
-                        from_hash, 
-                        to_hash,
-                        activate=False  # Don't activate, just ensure content is loaded
+                    await manager.open_diff_tab(
+                        source_client_session,
+                        file_path,
+                        from_ref,
+                        to_ref,
+                        from_hash,
+                        to_hash
                     )
                     
                     # Try to get content again after regeneration (use same matching logic)
