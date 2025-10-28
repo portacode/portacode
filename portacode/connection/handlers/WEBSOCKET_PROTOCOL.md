@@ -381,6 +381,8 @@ Lists the contents of a directory. Handled by [`directory_list`](./file_handlers
 
 *   `path` (string, optional): The path to the directory to list. Defaults to the current directory.
 *   `show_hidden` (boolean, optional): Whether to include hidden files in the listing. Defaults to `false`.
+*   `limit` (integer, optional): Maximum number of entries to return (defaults to “all”). Values above 1000 are clamped to 1000.
+*   `offset` (integer, optional): Number of entries to skip before collecting results (defaults to `0`).
 
 **Responses:**
 
@@ -902,7 +904,11 @@ Returns the contents of a directory in response to a `directory_list` action. Ha
 
 *   `path` (string, mandatory): The path of the directory that was listed.
 *   `items` (array, mandatory): A list of objects, each representing a file or directory in the listed directory.
-*   `count` (integer, mandatory): The number of items in the `items` list.
+*   `count` (integer, mandatory): The number of items returned in this response (honours `limit`/`offset`).
+*   `total_count` (integer, mandatory): Total number of entries in the directory before pagination.
+*   `offset` (integer, optional): Offset that was applied.
+*   `limit` (integer, optional): Limit that was applied (or `null` if none).
+*   `has_more` (boolean, optional): Indicates whether additional items remain beyond the returned slice.
 
 ### <a name="file_info_response"></a>`file_info_response`
 

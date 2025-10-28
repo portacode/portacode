@@ -170,6 +170,24 @@ class DirectoryListHandler(SyncHandler):
         """List directory contents."""
         path = message.get("path", ".")
         show_hidden = message.get("show_hidden", False)
+        limit_raw = message.get("limit")
+        offset_raw = message.get("offset", 0)
+
+        def _parse_positive_int(value, *, allow_none=False, minimum=0, maximum=None):
+            if value is None:
+                return None if allow_none else minimum
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None if allow_none else minimum
+            if parsed < minimum:
+                parsed = minimum
+            if maximum is not None and parsed > maximum:
+                parsed = maximum
+            return parsed
+
+        offset = _parse_positive_int(offset_raw, minimum=0)
+        limit = _parse_positive_int(limit_raw, allow_none=True, minimum=1, maximum=1000)
         
         try:
             items = []
@@ -193,11 +211,31 @@ class DirectoryListHandler(SyncHandler):
                     # Skip items we can't stat
                     continue
             
+            total_count = len(items)
+
+            if offset:
+                if offset >= total_count:
+                    sliced_items = []
+                else:
+                    sliced_items = items[offset:]
+            else:
+                sliced_items = items
+
+            if limit is not None and limit >= 0:
+                sliced_items = sliced_items[:limit]
+
+            returned_count = len(sliced_items)
+            has_more = total_count > offset + returned_count if total_count else False
+            
             return {
                 "event": "directory_list_response",
                 "path": path,
-                "items": items,
-                "count": len(items),
+                "items": sliced_items,
+                "count": returned_count,
+                "total_count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
             }
         except FileNotFoundError:
             raise ValueError(f"Directory not found: {path}")
