@@ -23,6 +23,7 @@ from .file_handlers import (
     FileCreateHandler,
     FolderCreateHandler,
     FileRenameHandler,
+    FileSearchHandler,
     ContentRequestHandler,
 )
 from .project_state_handlers import (
@@ -58,6 +59,7 @@ __all__ = [
     "FileCreateHandler",
     "FolderCreateHandler",
     "FileRenameHandler",
+    "FileSearchHandler",
     "ContentRequestHandler",
     # Project state handlers
     "ProjectStateFolderExpandHandler",

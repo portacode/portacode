@@ -33,6 +33,7 @@ from .handlers import (
     DirectoryListHandler,
     FileInfoHandler,
     FileDeleteHandler,
+    FileSearchHandler,
     FileRenameHandler,
     ContentRequestHandler,
     ProjectStateFolderExpandHandler,
@@ -439,6 +440,7 @@ class TerminalManager:
         self._command_registry.register(ProjectAwareFileCreateHandler)  # Use project-aware version
         self._command_registry.register(ProjectAwareFolderCreateHandler)  # Use project-aware version
         self._command_registry.register(FileRenameHandler)
+        self._command_registry.register(FileSearchHandler)
         self._command_registry.register(ContentRequestHandler)
         # Project state handlers
         self._command_registry.register(ProjectStateFolderExpandHandler)

@@ -43,6 +43,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`system_info`](#system_info)
   - [File Actions](#file-actions)
     - [`file_read`](#file_read)
+    - [`file_search`](#file_search)
     - [`file_write`](#file_write)
     - [`directory_list`](#directory_list)
     - [`file_info`](#file_info)
@@ -80,6 +81,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`system_info`](#system_info-event)
   - [File Events](#file-events)
     - [`file_read_response`](#file_read_response)
+    - [`file_search_response`](#file_search_response)
     - [`file_write_response`](#file_write_response)
     - [`directory_list_response`](#directory_list_response)
     - [`file_info_response`](#file_info_response)
@@ -317,10 +319,44 @@ Reads the content of a file. Handled by [`file_read`](./file_handlers.py).
 **Payload Fields:**
 
 *   `path` (string, mandatory): The absolute path to the file to read.
+*   `start_line` (integer, optional): 1-based line number to start reading from. Defaults to `1`.
+*   `end_line` (integer, optional): 1-based line number to stop reading at (inclusive). When provided, limits the response to the range between `start_line` and `end_line`.
+*   `max_lines` (integer, optional): Maximum number of lines to return (capped at 2000). Useful for pagination when `end_line` is not specified.
+*   `encoding` (string, optional): Text encoding to use when reading the file. Defaults to `utf-8` with replacement for invalid bytes.
 
 **Responses:**
 
 *   On success, the device will respond with a [`file_read_response`](#file_read_response) event.
+*   On error, a generic [`error`](#error) event is sent.
+
+### `file_search`
+
+Searches for text matches within files beneath a given root directory. Handled by [`file_search`](./file_handlers.py).
+
+**Payload Fields:**
+
+*   `root_path` (string, mandatory): The absolute path that acts as the search root (typically a project folder).
+*   `query` (string, mandatory): The search query. Treated as plain text unless `regex=true`.
+*   `match_case` (boolean, optional): When `true`, performs a case-sensitive search. Defaults to `false`.
+*   `regex` (boolean, optional): When `true`, interprets `query` as a regular expression. Defaults to `false`.
+*   `whole_word` (boolean, optional): When `true`, matches only whole words. Works with both plain text and regex queries.
+*   `include_patterns` (array[string], optional): Glob patterns that files must match to be included (e.g., `["src/**/*.py"]`).
+*   `exclude_patterns` (array[string], optional): Glob patterns for files/directories to skip (e.g., `["**/tests/**"]`).
+*   `include_hidden` (boolean, optional): When `true`, includes hidden files and folders. Defaults to `false`.
+*   `max_results` (integer, optional): Maximum number of match entries to return (capped at 500). Defaults to `40`.
+*   `max_matches_per_file` (integer, optional): Maximum number of matches to return per file (capped at 50). Defaults to `5`.
+*   `max_file_size` (integer, optional): Maximum file size in bytes to scan (defaults to 1 MiB).
+*   `max_line_length` (integer, optional): Maximum number of characters to return per matching line (defaults to `200`).
+
+**Default Behaviour:**
+
+* Binary files and large vendor/static directories (e.g., `node_modules`, `dist`, `static`) are skipped automatically unless custom `exclude_patterns` are provided.
+* Only common source/text extensions are scanned by default (override with `include_patterns` to widen the scope).
+* Searches stop after 10 seconds, respecting both per-file and global match limits to avoid oversized responses.
+
+**Responses:**
+
+*   On success, the device will respond with a [`file_search_response`](#file_search_response) event containing the matches.
 *   On error, a generic [`error`](#error) event is sent.
 
 ### `file_write`
@@ -814,8 +850,39 @@ Returns the content of a file in response to a `file_read` action. Handled by [`
 **Event Fields:**
 
 *   `path` (string, mandatory): The path of the file that was read.
-*   `content` (string, mandatory): The content of the file.
-*   `size` (integer, mandatory): The size of the file in bytes.
+*   `content` (string, mandatory): The file content returned (may be a slice when pagination parameters are used).
+*   `size` (integer, mandatory): The total size of the file in bytes.
+*   `total_lines` (integer, optional): Total number of lines detected in the file.
+*   `returned_lines` (integer, optional): Number of lines included in `content`.
+*   `start_line` (integer, optional): The first line number included in the response (if any lines were returned).
+*   `requested_start_line` (integer, optional): The requested starting line supplied in the command.
+*   `end_line` (integer, optional): The last line number included in the response.
+*   `has_more_before` (boolean, optional): Whether there is additional content before the returned range.
+*   `has_more_after` (boolean, optional): Whether there is additional content after the returned range.
+*   `encoding` (string, optional): Encoding that was used while reading the file.
+
+### <a name="file_search_response"></a>`file_search_response`
+
+Returns aggregated search results in response to a `file_search` action. Handled by [`file_search`](./file_handlers.py).
+
+**Event Fields:**
+
+*   `root_path` (string, mandatory): The root directory that was searched.
+*   `query` (string, mandatory): The query string that was used.
+*   `match_case` (boolean, mandatory): Indicates if the search was case sensitive.
+*   `regex` (boolean, mandatory): Indicates if the query was interpreted as a regular expression.
+*   `whole_word` (boolean, mandatory): Indicates if the search matched whole words only.
+*   `include_patterns` (array[string], mandatory): Effective include glob patterns.
+*   `exclude_patterns` (array[string], mandatory): Effective exclude glob patterns.
+*   `matches` (array, mandatory): List of match objects containing `relative_path`, `path`, `line_number`, `line`, `match_spans` `[start, end]`, `match_count`, and `line_truncated` (boolean).
+*   `matches_returned` (integer, mandatory): Number of match entries returned (length of `matches`).
+*   `total_matches` (integer, mandatory): Total number of matches found while scanning.
+*   `files_scanned` (integer, mandatory): Count of files inspected.
+*   `truncated` (boolean, mandatory): Indicates if additional matches exist beyond those returned.
+*   `truncated_count` (integer, optional): Number of matches that were omitted due to truncation limits.
+*   `max_results` (integer, mandatory): Maximum number of matches requested.
+*   `max_matches_per_file` (integer, mandatory): Maximum matches requested per file.
+*   `errors` (array[string], optional): Non-fatal errors encountered during scanning (e.g., unreadable files).
 
 ### <a name="file_write_response"></a>`file_write_response`
 
