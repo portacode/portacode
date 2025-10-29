@@ -420,6 +420,14 @@ class TerminalManager:
                 pass
         self._ctl_task = asyncio.create_task(self._control_loop())
         
+        # Start periodic system info sender
+        if getattr(self, "_system_info_task", None):
+            try:
+                self._system_info_task.cancel()
+            except Exception:
+                pass
+        self._system_info_task = asyncio.create_task(self._periodic_system_info())
+        
         # For initial connections, request client sessions after control loop starts
         if is_initial:
             asyncio.create_task(self._initial_connection_setup())
@@ -516,6 +524,20 @@ class TerminalManager:
             except Exception as exc:
                 logger.exception("terminal_manager: Error in control loop: %s", exc)
                 # Continue processing other messages
+                continue
+
+    async def _periodic_system_info(self) -> None:
+        """Send system_info event every 10 seconds when clients are connected."""
+        while True:
+            try:
+                await asyncio.sleep(10)
+                if self._client_session_manager.has_interested_clients():
+                    from .handlers.system_handlers import SystemInfoHandler
+                    handler = SystemInfoHandler(self._control_channel, self._context)
+                    system_info = handler.execute({})
+                    await self._send_session_aware(system_info)
+            except Exception as exc:
+                logger.exception("Error in periodic system info: %s", exc)
                 continue
 
     async def _send_initial_data_to_clients(self, newly_added_sessions: List[str] = None):
