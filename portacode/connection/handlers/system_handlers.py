@@ -3,6 +3,8 @@
 import logging
 import os
 import platform
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict
 from portacode import __version__
@@ -11,6 +13,25 @@ import psutil
 from .base import SyncHandler
 
 logger = logging.getLogger(__name__)
+
+# Global CPU monitoring
+_cpu_percent = 0.0
+_cpu_thread = None
+_cpu_lock = threading.Lock()
+
+def _cpu_monitor():
+    """Background thread to update CPU usage every 5 seconds."""
+    global _cpu_percent
+    while True:
+        _cpu_percent = psutil.cpu_percent(interval=5.0)
+
+def _ensure_cpu_thread():
+    """Ensure CPU monitoring thread is running (singleton)."""
+    global _cpu_thread
+    with _cpu_lock:
+        if _cpu_thread is None or not _cpu_thread.is_alive():
+            _cpu_thread = threading.Thread(target=_cpu_monitor, daemon=True)
+            _cpu_thread.start()
 
 
 def _get_os_info() -> Dict[str, Any]:
@@ -98,15 +119,13 @@ class SystemInfoHandler(SyncHandler):
         """Get system information including OS details."""
         logger.debug("Collecting system information...")
         
+        # Ensure CPU monitoring thread is running
+        _ensure_cpu_thread()
+        
         # Collect basic system metrics
         info = {}
         
-        try:
-            info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
-            logger.debug("CPU usage: %s%%", info["cpu_percent"])
-        except Exception as e:
-            logger.warning("Failed to get CPU info: %s", e)
-            info["cpu_percent"] = 0.0
+        info["cpu_percent"] = _cpu_percent
             
         try:
             info["memory"] = psutil.virtual_memory()._asdict()
