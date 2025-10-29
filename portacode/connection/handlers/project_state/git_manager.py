@@ -61,6 +61,9 @@ class GitManager:
         self.is_git_repo = False
         self._change_callback = change_callback
         
+        # Track git processes spawned by this specific GitManager instance
+        self._tracked_git_processes = set()
+        
         # Periodic monitoring attributes
         self._monitoring_task: Optional[asyncio.Task] = None
         self._cached_status_summary: Optional[Dict[str, int]] = None
@@ -84,8 +87,28 @@ class GitManager:
             self.repo = Repo(self.project_path)
             self.is_git_repo = True
             logger.info("Initialized Git repo for project: %s", self.project_path)
+            
+            # Track initial git processes after repo creation
+            self._track_current_git_processes()
+            
         except (InvalidGitRepositoryError, Exception) as e:
             logger.debug("Not a Git repository or Git error: %s", e)
+    
+    def _track_current_git_processes(self):
+        """Track currently running git cat-file processes for this repo."""
+        try:
+            import psutil
+            for proc in psutil.process_iter(['pid', 'cmdline', 'cwd']):
+                try:
+                    cmdline = proc.info['cmdline']
+                    if (cmdline and len(cmdline) >= 2 and 
+                        'git' in cmdline[0] and 'cat-file' in cmdline[1] and
+                        proc.info['cwd'] == self.project_path):
+                        self._tracked_git_processes.add(proc.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception as e:
+            logger.debug("Error tracking git processes: %s", e)
     
     def reinitialize(self):
         """Reinitialize git repo detection (useful when .git directory is created after initialization)."""
@@ -1934,3 +1957,42 @@ class GitManager:
         """Cleanup resources when GitManager is being destroyed."""
         logger.info("Cleaning up GitManager for %s", self.project_path)
         self.stop_periodic_monitoring()
+        
+        # CRITICAL: Close GitPython repo to cleanup git cat-file processes
+        if self.repo:
+            try:
+                # Force cleanup of git command processes
+                if hasattr(self.repo.git, 'clear_cache'):
+                    self.repo.git.clear_cache()
+                self.repo.close()
+                logger.info("Successfully closed GitPython repo for %s", self.project_path)
+            except Exception as e:
+                logger.warning("Error during git repo cleanup for %s: %s", self.project_path, e)
+            finally:
+                self.repo = None
+        
+        # Clean up only the git processes tracked by this specific GitManager instance
+        try:
+            import psutil
+            killed_count = 0
+            
+            for pid in list(self._tracked_git_processes):
+                try:
+                    proc = psutil.Process(pid)
+                    if proc.is_running():
+                        proc.terminate()
+                        killed_count += 1
+                        logger.info("Terminated tracked git process %d", pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                finally:
+                    self._tracked_git_processes.discard(pid)
+            
+            if killed_count > 0:
+                logger.info("Cleaned up %d tracked git processes for session", killed_count)
+                
+        except Exception as e:
+            logger.warning("Error cleaning up tracked git processes: %s", e)
+        
+        # Clear the tracking set
+        self._tracked_git_processes.clear()
