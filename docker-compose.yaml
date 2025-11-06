@@ -61,6 +61,12 @@ services:
         condition: service_healthy
     volumes:
       - ./server/portacode_django:/app
-
+  reacher:
+    image: reacherhq/backend:latest
+    env_file:
+      - reacher.env
+    ports:
+      - "8080:8080"
+    restart: always
 volumes:
   pgdata: 
