@@ -36,7 +36,6 @@ services:
     build:
       context: ./server/portacode_django
       dockerfile: Dockerfile
-    container_name: portacode-unibot-worker
     restart: unless-stopped
     command: ["python", "manage.py", "run_worker"]
     env_file:
@@ -46,6 +45,8 @@ services:
         condition: service_healthy
     volumes:
       - ./server/portacode_django:/app
+    deploy:
+      replicas: 3
 
   imap-worker:
     build:
