@@ -98,4 +98,58 @@ def fingerprint_public_key(pem: bytes) -> str:
     """Return a short fingerprint for display purposes (SHA-256)."""
     digest = hashes.Hash(hashes.SHA256())
     digest.update(pem)
-    return digest.finalize().hex()[:16] 
+    return digest.finalize().hex()[:16]
+
+
+class InMemoryKeyPair:
+    """Keypair kept purely in memory until explicitly persisted."""
+
+    def __init__(self, private_pem: bytes, public_pem: bytes, key_dir: Path):
+        self._private_pem = private_pem
+        self._public_pem = public_pem
+        self._key_dir = key_dir
+        self._is_new = True
+
+    @property
+    def private_key_pem(self) -> bytes:
+        return self._private_pem
+
+    @property
+    def public_key_pem(self) -> bytes:
+        return self._public_pem
+
+    def sign_challenge(self, challenge: str) -> bytes:
+        private_key = serialization.load_pem_private_key(self._private_pem, password=None)
+        return private_key.sign(
+            challenge.encode(),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+
+    def public_key_der_b64(self) -> str:
+        pubkey = serialization.load_pem_public_key(self._public_pem)
+        der = pubkey.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return base64.b64encode(der).decode()
+
+    def persist(self) -> KeyPair:
+        """Write the keypair to disk and return a regular KeyPair."""
+        key_dir = self._key_dir
+        key_dir.mkdir(parents=True, exist_ok=True)
+        priv_path = key_dir / PRIVATE_KEY_FILE
+        pub_path = key_dir / PUBLIC_KEY_FILE
+        priv_path.write_bytes(self._private_pem)
+        pub_path.write_bytes(self._public_pem)
+        keypair = KeyPair(priv_path, pub_path)
+        keypair._is_new = True  # type: ignore[attr-defined]
+        keypair._key_dir = key_dir  # type: ignore[attr-defined]
+        return keypair
+
+
+def generate_in_memory_keypair() -> InMemoryKeyPair:
+    """Generate a new keypair but keep it in memory until pairing succeeds."""
+    private_pem, public_pem = _generate_keypair()
+    key_dir = get_key_dir()
+    return InMemoryKeyPair(private_pem, public_pem, key_dir)

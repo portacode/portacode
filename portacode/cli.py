@@ -7,13 +7,19 @@ from multiprocessing import Process
 from pathlib import Path
 import signal
 import json
+import socket
 
 import click
 import pyperclip
 
 from . import __version__
 from .data import get_pid_file, is_process_running
-from .keypair import get_or_create_keypair, fingerprint_public_key
+from .keypair import (
+    get_or_create_keypair,
+    fingerprint_public_key,
+    generate_in_memory_keypair,
+)
+from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
 
 GATEWAY_URL = "wss://portacode.com/gateway"
@@ -33,7 +39,17 @@ def cli() -> None:
 @click.option("--log-categories", "log_categories", help="Comma-separated list of log categories to show (e.g., 'connection,auth,git'). Use 'list' to see available categories.")
 @click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
               help="Skip interactive prompts (used by background service)")
-def connect(gateway: str | None, detach: bool, debug: bool, log_categories: str | None, non_interactive: bool) -> None:  # noqa: D401 – Click callback
+@click.option("--pairing-code", "pairing_code_opt", envvar="PORTACODE_PAIRING_CODE", help="Provide a temporary pairing code for zero-copy onboarding")
+@click.option("--device-name", "device_name_opt", envvar="PORTACODE_DEVICE_NAME", help="Custom device name to display during pairing")
+def connect(
+    gateway: str | None,
+    detach: bool,
+    debug: bool,
+    log_categories: str | None,
+    non_interactive: bool,
+    pairing_code_opt: str | None,
+    device_name_opt: str | None,
+) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
     # Set up debug logging if requested
@@ -92,12 +108,37 @@ def connect(gateway: str | None, detach: bool, debug: bool, log_categories: str 
     # Determine gateway URL
     target_gateway = gateway or os.getenv(GATEWAY_ENV) or GATEWAY_URL
 
-    # 2. Load or create keypair
-    keypair = get_or_create_keypair()
+    pairing_code = pairing_code_opt.strip() if pairing_code_opt else None
+    device_name = device_name_opt.strip() if device_name_opt else None
+    pairing_requested = bool(pairing_code)
+
+    # 2. Load or create keypair (in memory if pairing)
+    if pairing_requested:
+        keypair = generate_in_memory_keypair()
+    else:
+        keypair = get_or_create_keypair()
+
+    if pairing_requested:
+        if not device_name:
+            device_name = socket.gethostname() or "Portacode Device"
+        click.echo(click.style(f"🔐 Pairing code detected; pairing as '{device_name}'...", fg="cyan"))
+        try:
+            pair_device_with_code(
+                keypair,
+                pairing_code=pairing_code,
+                device_name=device_name,
+            )
+        except PairingError as exc:
+            click.echo(click.style(f"Pairing failed: {exc}", fg="red"))
+            sys.exit(1)
+        # Persist keypair after successful approval
+        keypair = keypair.persist()
+        click.echo(click.style("✅ Pairing approved. Continuing with connection…", fg="green"))
+
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
 
     pubkey_b64 = keypair.public_key_der_b64()
-    if not non_interactive:
+    if not non_interactive and not pairing_requested:
         # Show key generation status
         if getattr(keypair, '_is_new', False):
             click.echo()

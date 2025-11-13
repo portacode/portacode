@@ -1,3 +1,6 @@
 [submodule "server"]
 	path = server
 	url = ./server
+[submodule "portacode_for_school"]
+	path = portacode_for_school
+	url = git@github.com:meena-erian/portacode_for_school.git
