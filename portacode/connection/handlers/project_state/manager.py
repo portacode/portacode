@@ -308,8 +308,8 @@ class ProjectStateManager:
             with os.scandir(directory_path) as entries:
                 for entry in entries:
                     try:
-                        # Skip .git folders and their contents
-                        if entry.name == '.git' and entry.is_dir():
+                        # Skip .git metadata regardless of whether it's a dir or file (worktrees create files)
+                        if entry.name == '.git':
                             continue
                             
                         stat_info = entry.stat()
@@ -380,9 +380,10 @@ class ProjectStateManager:
                 child_paths = []
                 with os.scandir(monitored_folder.folder_path) as entries:
                     for entry in entries:
-                        if entry.name != '.git' or not entry.is_dir():
-                            child_paths.append(entry.path)
-                            all_file_paths.append(entry.path)
+                        if entry.name == '.git':
+                            continue
+                        child_paths.append(entry.path)
+                        all_file_paths.append(entry.path)
                 folder_to_paths[monitored_folder.folder_path] = child_paths
             except (OSError, PermissionError) as e:
                 logger.error("Error scanning folder %s: %s", monitored_folder.folder_path, e)
@@ -465,8 +466,8 @@ class ProjectStateManager:
             with os.scandir(directory_path) as entries:
                 for entry in entries:
                     try:
-                        # Skip .git folders and their contents
-                        if entry.name == '.git' and entry.is_dir():
+                        # Skip .git metadata regardless of whether it's a dir or file (worktrees create files)
+                        if entry.name == '.git':
                             continue
 
                         stat_info = entry.stat()
