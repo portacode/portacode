@@ -99,21 +99,31 @@ def connect(
             other_pid = None
 
         if other_pid and is_process_running(other_pid):
-            click.echo(
-                click.style(
-                    f"Another portacode connection (PID {other_pid}) is active.", fg="yellow"
+            if other_pid == os.getpid():
+                # We just wrote our own PID (stale pidfile from previous run) – ignore safely.
+                click.echo(
+                    click.style(
+                        "Detected stale portacode pid file referencing the current process; ignoring.",
+                        fg="bright_black",
+                    )
                 )
-            )
-            if non_interactive:
-                click.echo(click.style("Non-interactive mode: terminating the existing connection automatically.", fg="bright_black"))
-                _terminate_process(other_pid)
-                pid_file.unlink(missing_ok=True)
-            elif click.confirm("Terminate the existing connection?", default=False):
-                _terminate_process(other_pid)
                 pid_file.unlink(missing_ok=True)
             else:
-                click.echo("Aborting.")
-                sys.exit(1)
+                click.echo(
+                    click.style(
+                        f"Another portacode connection (PID {other_pid}) is active.", fg="yellow"
+                    )
+                )
+                if non_interactive:
+                    click.echo(click.style("Non-interactive mode: terminating the existing connection automatically.", fg="bright_black"))
+                    _terminate_process(other_pid)
+                    pid_file.unlink(missing_ok=True)
+                elif click.confirm("Terminate the existing connection?", default=False):
+                    _terminate_process(other_pid)
+                    pid_file.unlink(missing_ok=True)
+                else:
+                    click.echo("Aborting.")
+                    sys.exit(1)
         else:
             # Stale pidfile
             pid_file.unlink(missing_ok=True)
