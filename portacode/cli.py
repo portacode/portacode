@@ -18,6 +18,7 @@ from .keypair import (
     get_or_create_keypair,
     fingerprint_public_key,
     generate_in_memory_keypair,
+    keypair_files_exist,
 )
 from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
@@ -95,7 +96,11 @@ def connect(
                     f"Another portacode connection (PID {other_pid}) is active.", fg="yellow"
                 )
             )
-            if click.confirm("Terminate the existing connection?", default=False):
+            if non_interactive:
+                click.echo(click.style("Non-interactive mode: terminating the existing connection automatically.", fg="bright_black"))
+                _terminate_process(other_pid)
+                pid_file.unlink(missing_ok=True)
+            elif click.confirm("Terminate the existing connection?", default=False):
                 _terminate_process(other_pid)
                 pid_file.unlink(missing_ok=True)
             else:
@@ -111,14 +116,16 @@ def connect(
     pairing_code = pairing_code_opt.strip() if pairing_code_opt else None
     device_name = device_name_opt.strip() if device_name_opt else None
     pairing_requested = bool(pairing_code)
+    existing_identity = keypair_files_exist()
+    should_pair = pairing_requested and not existing_identity
 
     # 2. Load or create keypair (in memory if pairing)
-    if pairing_requested:
+    if should_pair:
         keypair = generate_in_memory_keypair()
     else:
         keypair = get_or_create_keypair()
 
-    if pairing_requested:
+    if should_pair:
         if not device_name:
             device_name = socket.gethostname() or "Portacode Device"
         click.echo(click.style(f"🔐 Pairing code detected; pairing as '{device_name}'...", fg="cyan"))
@@ -134,6 +141,13 @@ def connect(
         # Persist keypair after successful approval
         keypair = keypair.persist()
         click.echo(click.style("✅ Pairing approved. Continuing with connection…", fg="green"))
+    elif pairing_requested and existing_identity:
+        click.echo(
+            click.style(
+                "ℹ Pairing code provided but an existing device identity was found; skipping pairing step.",
+                fg="yellow",
+            )
+        )
 
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
 

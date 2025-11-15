@@ -153,3 +153,11 @@ def generate_in_memory_keypair() -> InMemoryKeyPair:
     private_pem, public_pem = _generate_keypair()
     key_dir = get_key_dir()
     return InMemoryKeyPair(private_pem, public_pem, key_dir)
+
+
+def keypair_files_exist() -> bool:
+    """Return True if the persisted keypair already exists on disk."""
+    key_dir = get_key_dir()
+    priv_path = key_dir / PRIVATE_KEY_FILE
+    pub_path = key_dir / PUBLIC_KEY_FILE
+    return priv_path.exists() and pub_path.exists()
