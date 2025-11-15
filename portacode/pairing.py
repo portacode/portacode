@@ -28,6 +28,7 @@ async def _pair_device(
     public_key_b64: str,
     pairing_code: str,
     device_name: str,
+    project_paths: list[str] | None = None,
     timeout: float = 300.0,
 ) -> PairingResult:
     async with websockets.connect(url) as ws:
@@ -49,6 +50,8 @@ async def _pair_device(
             "device_name": device_name,
             "public_key": public_key_b64,
         }
+        if project_paths:
+            payload["project_paths"] = project_paths
         await ws.send(json.dumps(payload))
 
         while True:
@@ -78,6 +81,7 @@ def pair_device_with_code(
     keypair,
     pairing_code: str,
     device_name: Optional[str] = None,
+    project_paths: list[str] | None = None,
     *,
     timeout: float = 300.0,
 ) -> PairingResult:
@@ -93,6 +97,7 @@ def pair_device_with_code(
             public_key_b64=public_key_b64,
             pairing_code=pairing_code,
             device_name=friendly_name,
+            project_paths=project_paths,
             timeout=timeout,
         )
     )

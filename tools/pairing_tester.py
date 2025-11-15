@@ -46,6 +46,13 @@ def parse_args() -> argparse.Namespace:
         default=120.0,
         help="Seconds to wait for approval/rejection before exiting",
     )
+    parser.add_argument(
+        "--project-path",
+        dest="project_paths",
+        action="append",
+        default=[],
+        help="Project folder path to pre-register (repeat for multiple paths)",
+    )
     return parser.parse_args()
 
 
@@ -60,6 +67,8 @@ async def run(args: argparse.Namespace) -> None:
             "device_name": args.device_name,
             "public_key": args.public_key,
         }
+        if args.project_paths:
+            payload["project_paths"] = args.project_paths
         print(f"-> {json.dumps(payload)}")
         await ws.send(json.dumps(payload))
 

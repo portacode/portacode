@@ -25,6 +25,7 @@ from .connection.client import ConnectionManager, run_until_interrupt
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
+MAX_PROJECT_PATHS = 10
 
 
 @click.group()
@@ -42,6 +43,12 @@ def cli() -> None:
               help="Skip interactive prompts (used by background service)")
 @click.option("--pairing-code", "pairing_code_opt", envvar="PORTACODE_PAIRING_CODE", help="Provide a temporary pairing code for zero-copy onboarding")
 @click.option("--device-name", "device_name_opt", envvar="PORTACODE_DEVICE_NAME", help="Custom device name to display during pairing")
+@click.option(
+    "--project-path",
+    "project_paths_opt",
+    multiple=True,
+    help="Project folder to register during pairing (repeat for multiple paths)",
+)
 def connect(
     gateway: str | None,
     detach: bool,
@@ -50,6 +57,7 @@ def connect(
     non_interactive: bool,
     pairing_code_opt: str | None,
     device_name_opt: str | None,
+    project_paths_opt: tuple[str, ...],
 ) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
@@ -115,9 +123,40 @@ def connect(
 
     pairing_code = pairing_code_opt.strip() if pairing_code_opt else None
     device_name = device_name_opt.strip() if device_name_opt else None
+    normalized_project_paths: list[str] = []
+    for raw in project_paths_opt:
+        if not raw:
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > 500:
+            click.echo(click.style(f"Project path too long (max 500 chars): {cleaned[:60]}…", fg="red"))
+            sys.exit(1)
+        if cleaned not in normalized_project_paths:
+            normalized_project_paths.append(cleaned)
+    if len(normalized_project_paths) > MAX_PROJECT_PATHS:
+        click.echo(
+            click.style(
+                f"Too many project paths provided ({len(normalized_project_paths)}). "
+                f"Maximum allowed is {MAX_PROJECT_PATHS}.",
+                fg="red",
+            )
+        )
+        sys.exit(1)
+
     pairing_requested = bool(pairing_code)
     existing_identity = keypair_files_exist()
     should_pair = pairing_requested and not existing_identity
+
+    if normalized_project_paths and not pairing_requested:
+        click.echo(
+            click.style(
+                "⚠ Project paths were provided but no pairing code was supplied; "
+                "they will be ignored.",
+                fg="yellow",
+            )
+        )
 
     # 2. Load or create keypair (in memory if pairing)
     if should_pair:
@@ -134,6 +173,7 @@ def connect(
                 keypair,
                 pairing_code=pairing_code,
                 device_name=device_name,
+                project_paths=normalized_project_paths or None,
             )
         except PairingError as exc:
             click.echo(click.style(f"Pairing failed: {exc}", fg="red"))
