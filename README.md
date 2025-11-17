@@ -43,6 +43,31 @@ Once connected, you can:
 - Monitor system status
 - Access your development environment from any device
 
+## 🔑 Pair Devices with Zero-Touch Codes
+
+The fastest way to bring a new machine online is with a short-lived pairing code:
+
+1. Log in to [https://portacode.com](https://portacode.com) and press **Pair Device** on the dashboard:  
+   ![Pair Device button](docs/images/pair-device-button.png)
+2. A four-digit code appears (valid for 15 minutes). This code only authorizes a pairing **request**—no device can reach your account until you approve it.
+3. On the device, run Portacode with the code:
+   ```bash
+   PORTACODE_PAIRING_CODE=1234 portacode connect \
+     --device-name "My Laptop" \
+     --project-path /srv/project-one \
+     --project-path /srv/project-two
+   ```
+   - `--device-name` (or `PORTACODE_DEVICE_NAME`) pre-fills the friendly label shown in the dashboard.
+   - Repeat `--project-path /abs/path` to register up to ten Projects automatically once the request is approved.
+   - Automating inside Docker? Export your own `PORTACODE_PROJECT_PATHS=/srv/a:/srv/b` and convert it into repeated `--project-path` switches before invoking the CLI—see `portacode_for_school/persistent_workspace/entrypoint.sh` for a reference implementation.
+4. Because the device has no fingerprint yet, the CLI bootstraps an in-memory keypair and announces a pending request to the dashboard. You immediately see the card with the supplied metadata:  
+   ![Pairing request card](docs/images/pairing-request.png)
+5. Click **Approve**. The CLI persists the keypair on disk and transitions into a normal authenticated connection. Future `portacode connect` runs reuse the stored RSA keys—no additional codes required unless you revoke the device.
+
+Need to pair multiple machines at once? A single pairing code can be reused concurrently: every device that launches `portacode connect` with that code shows up as its own approval card until you accept or decline it.
+
+This workflow works great for headless setups and containers: export the environment variables, run `portacode connect --non-interactive`, and finish the approval from the dashboard.
+
 ## 💡 Use Cases
 
 - **Remote Development**: Code, build, and debug from anywhere - even your phone
@@ -144,10 +169,28 @@ sudo apt-get install xclip
 ```
 
 ### Key Management
-Key files are stored in:
+Portacode follows the OS-specific *user data* directory (via [`platformdirs`](https://pypi.org/project/platformdirs/)) and keeps its identity in `portacode/keys/`:
 - **Linux**: `~/.local/share/portacode/keys/`
 - **macOS**: `~/Library/Application Support/portacode/keys/`
 - **Windows**: `%APPDATA%\portacode\keys\`
+
+When `PORTACODE_PAIRING_CODE` is set, the CLI generates an in-memory keypair, waits for dashboard approval, and only then writes the files to this directory. If that folder disappears, the CLI will create a fresh identity next time it runs.
+
+#### Persisting Keys in Containers
+Docker images (including the simple `python:3.11-slim` example that runs Portacode as `root`) store the data inside `/root/.local/share/portacode`. Bind-mount that path or override `XDG_DATA_HOME` so the keys survive container restarts:
+
+```yaml
+services:
+  device-01:
+    build: .
+    environment:
+      PORTACODE_PAIRING_CODE: "${PORTACODE_PAIRING_CODE:-}"
+    volumes:
+      - ./data/device-01/workspace:/root/workspace
+      - ./data/device-01/.local/share/portacode:/root/.local/share/portacode  # persists device keys
+```
+
+Alternatively, set `XDG_DATA_HOME=/root/.portacode` before running `portacode connect` and mount that directory from the host. The rule of thumb: **persist whichever folder contains `.local/share/portacode/keys/`** so your device fingerprint sticks around.
 
 ## 🌱 Early Stage Project
 

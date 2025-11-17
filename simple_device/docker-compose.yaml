@@ -1,0 +1,14 @@
+services:
+  device-01:
+    build: "."
+    command: >
+      portacode connect --non-interactive
+      --device-name "Device 01"
+      --project-path /root/workspace
+    hostname: "device-01"
+    restart: "unless-stopped"
+    environment:
+      PORTACODE_PAIRING_CODE: "${PORTACODE_PAIRING_CODE:-}"
+    volumes:
+      - "./data/device-01/workspace:/root/workspace"
+      - "./data/device-01/.local/share/portacode:/root/.local/share/portacode"
