@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from asyncio import Lock
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
 
@@ -37,6 +38,7 @@ class ProjectStateManager:
         self.file_watcher = FileSystemWatcher(self)
         self.debug_mode = False
         self.debug_file_path: Optional[str] = None
+        self._session_locks: Dict[str, Lock] = {}
         
         # Content caching optimization
         self.use_content_caching = context.get("use_content_caching", False)
@@ -44,6 +46,7 @@ class ProjectStateManager:
         # Debouncing for file changes
         self._change_debounce_timer: Optional[asyncio.Task] = None
         self._pending_changes: Set[str] = set()
+        self._pending_change_sources: Dict[str, Dict[str, Any]] = {}
     
     def set_debug_mode(self, enabled: bool, debug_file_path: Optional[str] = None):
         """Enable or disable debug mode with JSON output."""
@@ -51,6 +54,14 @@ class ProjectStateManager:
         self.debug_file_path = debug_file_path
         if enabled:
             logger.info("Project state debug mode enabled, output to: %s", debug_file_path)
+    
+    def _get_session_lock(self, client_session_id: str) -> Lock:
+        """Get or create an asyncio lock for a client session."""
+        lock = self._session_locks.get(client_session_id)
+        if not lock:
+            lock = Lock()
+            self._session_locks[client_session_id] = lock
+        return lock
     
     def _write_debug_state(self):
         """Write current state to debug JSON file (thread-safe)."""
@@ -130,62 +141,71 @@ class ProjectStateManager:
     
     async def initialize_project_state(self, client_session_id: str, project_folder_path: str) -> ProjectState:
         """Initialize project state for a client session."""
-        # Check if this client session already has a project state
-        if client_session_id in self.projects:
-            existing_project = self.projects[client_session_id]
-            # If it's the same folder, return existing state
-            if existing_project.project_folder_path == project_folder_path:
-                logger.info("Returning existing project state for client session: %s", client_session_id)
-                return existing_project
-            else:
-                # Different folder - cleanup old state and create new one
-                logger.info("Client session %s switching projects from %s to %s", 
-                          client_session_id, existing_project.project_folder_path, project_folder_path)
-                self.cleanup_project(client_session_id)
-        
-        # Note: Multiple client sessions can have independent project states for the same folder
-        # Each client session gets its own project state instance
-        
-        logger.info("Initializing project state for client session: %s, folder: %s", client_session_id, project_folder_path)
-        
-        # Initialize Git manager with change callback
-        async def git_change_callback():
-            """Callback when git status changes are detected."""
-            logger.debug("Git change detected, refreshing project state for %s", client_session_id)
-            # Git directory changes only affect git status, not filesystem
-            await self._refresh_project_state(client_session_id, git_only=True)
-        
-        git_manager = GitManager(project_folder_path, change_callback=git_change_callback)
-        self.git_managers[client_session_id] = git_manager
+        lock = self._get_session_lock(client_session_id)
+        async with lock:
+            existing_project = self.projects.get(client_session_id)
+            if existing_project:
+                if existing_project.project_folder_path == project_folder_path:
+                    logger.info("Returning existing project state for client session: %s", client_session_id)
+                    return existing_project
+                logger.info("Client session %s switching projects from %s to %s",
+                            client_session_id, existing_project.project_folder_path, project_folder_path)
+                self._cleanup_project_locked(client_session_id)
+            
+            logger.info("Initializing project state for client session: %s, folder: %s", client_session_id, project_folder_path)
+            
+            # Initialize Git manager with change callback
+            async def git_change_callback():
+                """Callback when git status changes are detected."""
+                logger.info("Git monitor detected status change for session %s", client_session_id)
+                await self._refresh_project_state(client_session_id, git_only=True, reason="git_monitor")
+            
+            git_manager = GitManager(
+                project_folder_path,
+                change_callback=git_change_callback,
+                owner_session_id=client_session_id,
+            )
+            self.git_managers[client_session_id] = git_manager
+            
+            loop = asyncio.get_event_loop()
+            is_git_repo = git_manager.is_git_repo
+            git_branch = await loop.run_in_executor(None, git_manager.get_branch_name)
+            git_status_summary = await loop.run_in_executor(None, git_manager.get_status_summary)
+            git_detailed_status = await loop.run_in_executor(None, git_manager.get_detailed_status)
+            
+            project_state = ProjectState(
+                client_session_id=client_session_id,
+                project_folder_path=project_folder_path,
+                items=[],
+                is_git_repo=is_git_repo,
+                git_branch=git_branch,
+                git_status_summary=git_status_summary,
+                git_detailed_status=git_detailed_status,
+            )
+            
+            await self._initialize_monitored_folders(project_state)
+            await self._sync_all_state_with_monitored_folders(project_state)
+            
+            self.projects[client_session_id] = project_state
+            self._write_debug_state()
+            
+            return project_state
 
-        # Run git operations in executor to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        is_git_repo = git_manager.is_git_repo
-        git_branch = await loop.run_in_executor(None, git_manager.get_branch_name)
-        git_status_summary = await loop.run_in_executor(None, git_manager.get_status_summary)
-        git_detailed_status = await loop.run_in_executor(None, git_manager.get_detailed_status)
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Return aggregate stats for health monitoring."""
+        git_diag = {}
+        for session_id, git_manager in self.git_managers.items():
+            git_diag[session_id] = git_manager.get_diagnostics()
 
-        # Create project state
-        project_state = ProjectState(
-            client_session_id=client_session_id,
-            project_folder_path=project_folder_path,
-            items=[],
-            is_git_repo=is_git_repo,
-            git_branch=git_branch,
-            git_status_summary=git_status_summary,
-            git_detailed_status=git_detailed_status
-        )
-        
-        # Initialize monitored folders with project root and its immediate subdirectories
-        await self._initialize_monitored_folders(project_state)
-        
-        # Sync all dependent state (items, watchdog)
-        await self._sync_all_state_with_monitored_folders(project_state)
-        
-        self.projects[client_session_id] = project_state
-        self._write_debug_state()
-        
-        return project_state
+        watcher_diag = self.file_watcher.get_diagnostics() if self.file_watcher else {}
+
+        return {
+            "projects": len(self.projects),
+            "git_managers": len(self.git_managers),
+            "pending_file_changes": len(self._pending_changes),
+            "watcher": watcher_diag,
+            "git_sessions": git_diag,
+        }
     
     async def _initialize_monitored_folders(self, project_state: ProjectState):
         """Initialize monitored folders with project root (expanded) and its immediate subdirectories (collapsed)."""
@@ -817,8 +837,18 @@ class ProjectStateManager:
     async def _handle_file_change(self, event):
         """Handle file system change events with debouncing."""
         logger.debug("🔍 [TRACE] _handle_file_change called: %s - %s", LogCategory.FILE_SYSTEM, event.event_type, event.src_path)
+        is_git_event = ".git" in Path(event.src_path).parts
+        if is_git_event:
+            logger.info("File watcher event from .git: %s %s", LogCategory.FILE_SYSTEM, event.event_type, event.src_path)
+        else:
+            logger.debug("File watcher event: %s %s", LogCategory.FILE_SYSTEM, event.event_type, event.src_path)
         
         self._pending_changes.add(event.src_path)
+        self._pending_change_sources[event.src_path] = {
+            "event_type": event.event_type,
+            "is_git_event": is_git_event,
+            "timestamp": time.time(),
+        }
         logger.debug("🔍 [TRACE] Added to pending changes: %s (total pending: %d)", LogCategory.FILE_SYSTEM, event.src_path, len(self._pending_changes))
         
         # Cancel existing timer
@@ -850,6 +880,16 @@ class ProjectStateManager:
             return
         
         logger.debug("🔍 [TRACE] Processing %d pending file changes: %s", len(self._pending_changes), list(self._pending_changes))
+        git_events = [path for path in self._pending_changes if self._pending_change_sources.get(path, {}).get("is_git_event")]
+        workspace_events = [path for path in self._pending_changes if path not in git_events]
+        logger.info(
+            "Pending change summary: total=%d git_events=%d workspace_events=%d sample_git=%s",
+            LogCategory.FILE_SYSTEM,
+            len(self._pending_changes),
+            len(git_events),
+            len(workspace_events),
+            git_events[:3],
+        )
         
         # Process changes for each affected project
         affected_projects = set()
@@ -873,13 +913,38 @@ class ProjectStateManager:
         
         # Refresh affected projects
         for client_session_id in affected_projects:
-            logger.debug("🔍 [TRACE] About to refresh project state for session: %s", client_session_id)
-            await self._refresh_project_state(client_session_id)
+            project_state = self.projects.get(client_session_id)
+            if not project_state:
+                continue
+            project_paths = [
+                path for path in self._pending_changes
+                if path.startswith(project_state.project_folder_path)
+            ]
+            git_paths = [
+                path for path in project_paths
+                if self._pending_change_sources.get(path, {}).get("is_git_event")
+            ]
+            is_git_only_batch = bool(project_paths) and len(project_paths) == len(git_paths)
+            logger.info(
+                "Refreshing project %s due to pending changes: total_paths=%d git_paths=%d git_only_batch=%s sample_paths=%s",
+                LogCategory.FILE_SYSTEM,
+                client_session_id,
+                len(project_paths),
+                len(git_paths),
+                is_git_only_batch,
+                project_paths[:3],
+            )
+            await self._refresh_project_state(
+                client_session_id,
+                git_only=is_git_only_batch,
+                reason="filesystem_watch_git_only" if is_git_only_batch else "filesystem_watch",
+            )
         
         self._pending_changes.clear()
+        self._pending_change_sources.clear()
         logger.debug("🔍 [TRACE] ✅ Finished processing file changes")
     
-    async def _refresh_project_state(self, client_session_id: str, git_only: bool = False):
+    async def _refresh_project_state(self, client_session_id: str, git_only: bool = False, reason: str = "unknown"):
         """Refresh project state after file changes.
 
         Args:
@@ -888,8 +953,8 @@ class ProjectStateManager:
                      detecting new directories and syncing file state). Use this for
                      git operations (stage, unstage, revert) to avoid unnecessary work.
         """
-        logger.debug("🔍 [TRACE] _refresh_project_state called for session: %s (git_only=%s)",
-                   client_session_id, git_only)
+        logger.debug("🔍 [TRACE] _refresh_project_state called for session: %s (git_only=%s, reason=%s)",
+                   client_session_id, git_only, reason)
         
         if client_session_id not in self.projects:
             logger.debug("🔍 [TRACE] ❌ Session not found in projects: %s", client_session_id)
@@ -1064,10 +1129,31 @@ class ProjectStateManager:
         except Exception as e:
             logger.error("🔍 [TRACE] ❌ Failed to send project_state_update: %s", e)
     
-    def cleanup_project(self, client_session_id: str):
+    async def cleanup_project(self, client_session_id: str):
         """Clean up project state and resources."""
-        if client_session_id in self.projects:
-            project_state = self.projects[client_session_id]
+        lock = self._get_session_lock(client_session_id)
+        async with lock:
+            self._cleanup_project_locked(client_session_id)
+
+    def _cleanup_project_locked(self, client_session_id: str):
+        """Internal helper to release resources associated with a project state. Lock must be held."""
+        project_state = self.projects.get(client_session_id)
+        
+        if project_state:
+            # Cancel debounce timer to prevent pending refreshes running after cleanup
+            if self._change_debounce_timer and not self._change_debounce_timer.done():
+                try:
+                    self._change_debounce_timer.cancel()
+                except Exception:
+                    pass
+            # Remove pending file change events related to this project
+            if self._pending_changes:
+                removed = [path for path in list(self._pending_changes) if path.startswith(project_state.project_folder_path)]
+                for path in removed:
+                    self._pending_changes.discard(path)
+                    self._pending_change_sources.pop(path, None)
+                if removed:
+                    logger.debug("Removed %d pending change paths for session %s during cleanup", len(removed), client_session_id)
             
             # Stop watching all monitored folders for this project
             for monitored_folder in project_state.monitored_folders:
@@ -1078,34 +1164,36 @@ class ProjectStateManager:
                 git_dir_path = os.path.join(project_state.project_folder_path, '.git')
                 self.file_watcher.stop_watching(git_dir_path)
             
-            # Clean up managers
-            git_manager = self.git_managers.get(client_session_id)
-            if git_manager:
-                git_manager.cleanup()
-            self.git_managers.pop(client_session_id, None)
             self.projects.pop(client_session_id, None)
-            
             logger.info("Cleaned up project state: %s", client_session_id)
-            self._write_debug_state()
+        else:
+            logger.info("No project state found for client session: %s during cleanup", client_session_id)
+        
+        # Clean up associated git manager even if project state was not registered
+        git_manager = self.git_managers.get(client_session_id)
+        if git_manager:
+            git_manager.cleanup()
+        self.git_managers.pop(client_session_id, None)
+        self._write_debug_state()
     
-    def cleanup_projects_by_client_session(self, client_session_id: str):
+    async def cleanup_projects_by_client_session(self, client_session_id: str):
         """Clean up project state for a specific client session when explicitly notified of disconnection."""
         logger.info("Explicitly cleaning up project state for disconnected client session: %s", client_session_id)
         
         # With the new design, each client session has only one project
         if client_session_id in self.projects:
-            self.cleanup_project(client_session_id)
+            await self.cleanup_project(client_session_id)
             logger.info("Cleaned up project state for client session: %s", client_session_id)
         else:
             logger.info("No project state found for client session: %s", client_session_id)
     
-    def cleanup_all_projects(self):
+    async def cleanup_all_projects(self):
         """Clean up all project states. Used for shutdown or reset."""
         logger.info("Cleaning up all project states")
         
         client_session_ids = list(self.projects.keys())
         for client_session_id in client_session_ids:
-            self.cleanup_project(client_session_id)
+            await self.cleanup_project(client_session_id)
         
         logger.info("Cleaned up %d project states", len(client_session_ids))
     
@@ -1122,13 +1210,13 @@ class ProjectStateManager:
                 Path(file_path).relative_to(project_folder)
                 # File is within this project, trigger refresh
                 logger.info(f"Refreshing project state for session {client_session_id} after file change: {file_path}")
-                await self._refresh_project_state(client_session_id)
+                await self._refresh_project_state(client_session_id, reason="manual_file_change")
                 break
             except ValueError:
                 # File is not within this project
                 continue
 
-    def cleanup_orphaned_project_states(self, current_client_sessions: List[str]):
+    async def cleanup_orphaned_project_states(self, current_client_sessions: List[str]):
         """Clean up project states that don't match any current client session."""
         current_sessions_set = set(current_client_sessions)
         orphaned_keys = []
@@ -1140,7 +1228,7 @@ class ProjectStateManager:
         if orphaned_keys:
             logger.info("Found %d orphaned project states, cleaning up: %s", len(orphaned_keys), orphaned_keys)
             for session_id in orphaned_keys:
-                self.cleanup_project(session_id)
+                await self.cleanup_project(session_id)
             logger.info("Cleaned up %d orphaned project states", len(orphaned_keys))
         else:
             logger.debug("No orphaned project states found")
@@ -1182,6 +1270,12 @@ def get_or_create_project_state_manager(context: Dict[str, Any], control_channel
                 logger.debug("No active project states in global manager")
             
             return _global_project_state_manager
+
+
+def get_global_project_state_manager() -> Optional['ProjectStateManager']:
+    """Return the current global project state manager if it exists."""
+    with _manager_lock:
+        return _global_project_state_manager
 
 
 def reset_global_project_state_manager():

@@ -109,7 +109,7 @@ class ClientSessionManager:
         self._write_debug_file()
         return newly_added_sessions
     
-    def cleanup_client_session_explicitly(self, client_session_id: str):
+    async def cleanup_client_session_explicitly(self, client_session_id: str):
         """Explicitly clean up resources for a client session when notified by server."""
         logger.info("Explicitly cleaning up resources for client session: %s", client_session_id)
         
@@ -125,7 +125,7 @@ class ClientSessionManager:
                 if control_channel:
                     project_manager = _get_or_create_project_state_manager(context, control_channel)
                     logger.info("Cleaning up project state for client session: %s", client_session_id)
-                    project_manager.cleanup_projects_by_client_session(client_session_id)
+                    await project_manager.cleanup_projects_by_client_session(client_session_id)
                 else:
                     logger.warning("No control channel available for project state cleanup")
             else:
@@ -174,7 +174,7 @@ class ClientSessionManager:
             for session_id in existing_project_states:
                 if session_id not in current_project_sessions:
                     logger.info(f"Cleaning up project state for session {session_id} (no longer a project session)")
-                    project_manager.cleanup_project(session_id)
+                    await project_manager.cleanup_project(session_id)
             
             # Initialize project states for new project sessions
             for session_name in newly_added_sessions:
@@ -186,6 +186,9 @@ class ClientSessionManager:
                 project_folder_path = session.get('project_folder_path')
                 
                 if project_id is not None and project_folder_path:
+                    if session_name in project_manager.projects:
+                        logger.info("Project state already exists for session %s, skipping re-init", session_name)
+                        continue
                     logger.info(f"Initializing project state for new project session {session_name}: {project_folder_path}")
                     
                     try:
@@ -198,7 +201,6 @@ class ClientSessionManager:
                         
                     except Exception as e:
                         logger.error(f"Failed to initialize project state for {session_name}: {e}")
-                
         except Exception as e:
             logger.error("Error managing project states for session changes: %s", e)
     
@@ -217,7 +219,7 @@ class ClientSessionManager:
                     control_channel = getattr(self._terminal_manager, '_control_channel', None)
                     if control_channel:
                         project_manager = _get_or_create_project_state_manager(context, control_channel)
-                        project_manager.cleanup_orphaned_project_states(current_sessions)
+                        await project_manager.cleanup_orphaned_project_states(current_sessions)
                     else:
                         logger.warning("No control channel available for orphaned project state cleanup")
                 else:

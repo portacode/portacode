@@ -411,7 +411,11 @@ class ProjectStateGitStageHandler(AsyncHandler):
 
         if success:
             # Refresh git status only (no filesystem changes from staging)
-            await manager._refresh_project_state(source_client_session, git_only=True)
+            await manager._refresh_project_state(
+                source_client_session,
+                git_only=True,
+                reason="git_stage",
+            )
         
         # Build response
         response = {
@@ -485,7 +489,11 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
 
         if success:
             # Refresh git status only (no filesystem changes from unstaging)
-            await manager._refresh_project_state(source_client_session, git_only=True)
+            await manager._refresh_project_state(
+                source_client_session,
+                git_only=True,
+                reason="git_unstage",
+            )
         
         # Build response
         response = {
@@ -559,7 +567,10 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         
         if success:
             # Refresh entire project state to ensure consistency
-            await manager._refresh_project_state(source_client_session)
+            await manager._refresh_project_state(
+                source_client_session,
+                reason="git_revert",
+            )
         
         # Build response
         response = {
@@ -622,7 +633,11 @@ class ProjectStateGitCommitHandler(AsyncHandler):
                 commit_hash = git_manager.get_head_commit_hash()
 
                 # Refresh git status only (no filesystem changes from commit)
-                await manager._refresh_project_state(source_client_session, git_only=True)
+                await manager._refresh_project_state(
+                    source_client_session,
+                    git_only=True,
+                    reason="git_commit",
+                )
         except Exception as e:
             error_message = str(e)
             logger.error("Error during commit: %s", error_message)
@@ -656,7 +671,7 @@ async def handle_client_session_cleanup(handler, payload: Dict[str, Any], source
     manager = get_or_create_project_state_manager(handler.context, handler.control_channel)
     
     # Clean up the client session's project state
-    manager.cleanup_projects_by_client_session(client_session_id)
+    await manager.cleanup_projects_by_client_session(client_session_id)
     
     logger.info("Client session cleanup completed: %s", client_session_id)
     
