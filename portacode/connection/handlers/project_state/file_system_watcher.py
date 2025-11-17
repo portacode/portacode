@@ -207,3 +207,11 @@ class FileSystemWatcher:
             self.observer.join()
             self.watched_paths.clear()
             self.watch_handles.clear()
+
+    def get_diagnostics(self) -> dict:
+        """Return lightweight stats for health monitoring."""
+        return {
+            "watched_paths": len(self.watched_paths),
+            "git_watched_paths": len([path for path in self.watched_paths if path.endswith(".git")]),
+            "observer_alive": bool(self.observer and self.observer.is_alive()),
+        }

@@ -55,11 +55,12 @@ except ImportError:
 class GitManager:
     """Manages Git operations for project state."""
     
-    def __init__(self, project_path: str, change_callback: Optional[Callable] = None):
+    def __init__(self, project_path: str, change_callback: Optional[Callable] = None, owner_session_id: Optional[str] = None):
         self.project_path = project_path
         self.repo: Optional[Repo] = None
         self.is_git_repo = False
         self._change_callback = change_callback
+        self.owner_session_id = owner_session_id
         
         # Track git processes spawned by this specific GitManager instance
         self._tracked_git_processes = set()
@@ -1832,7 +1833,7 @@ class GitManager:
             logger.debug("Git monitoring already running for %s", self.project_path)
             return
         
-        logger.info("Starting periodic git monitoring for %s", self.project_path)
+        logger.info("Starting periodic git monitoring for %s (session=%s)", self.project_path, self.owner_session_id)
         self._monitoring_enabled = True
         
         # Initialize cached status
@@ -1845,10 +1846,23 @@ class GitManager:
         """Stop periodic monitoring of git status changes."""
         self._monitoring_enabled = False
         
-        if self._monitoring_task and not self._monitoring_task.done():
+        task = self._monitoring_task
+        if task and not task.done():
             logger.info("Stopping periodic git monitoring for %s", self.project_path)
-            self._monitoring_task.cancel()
-            self._monitoring_task = None
+            task.cancel()
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._await_monitor_stop(task))
+            except Exception:
+                pass
+        self._monitoring_task = None
+
+    async def _await_monitor_stop(self, task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.debug("Git monitoring task cancelled for %s", self.project_path)
     
     def _update_cached_status(self):
         """Update cached git status for comparison."""
@@ -1886,8 +1900,10 @@ class GitManager:
                         self._detailed_status_changed(current_detailed_status, self._cached_detailed_status)
                     )
                     
+                    if not self._monitoring_enabled:
+                        continue
                     if status_changed:
-                        logger.info("Git status change detected for %s", self.project_path)
+                        logger.info("Git status change detected for %s (session=%s)", self.project_path, self.owner_session_id)
                         logger.debug("Status summary: %s -> %s", self._cached_status_summary, current_status_summary)
                         logger.debug("Branch: %s -> %s", self._cached_branch, current_branch)
                         
@@ -1955,7 +1971,7 @@ class GitManager:
     
     def cleanup(self):
         """Cleanup resources when GitManager is being destroyed."""
-        logger.info("Cleaning up GitManager for %s", self.project_path)
+        logger.info("Cleaning up GitManager for %s (session=%s)", self.project_path, self.owner_session_id)
         self.stop_periodic_monitoring()
         
         # CRITICAL: Close GitPython repo to cleanup git cat-file processes
@@ -1996,3 +2012,18 @@ class GitManager:
         
         # Clear the tracking set
         self._tracked_git_processes.clear()
+
+    def get_tracked_git_process_count(self) -> int:
+        """Return how many git helper processes this manager is tracking."""
+        return len(self._tracked_git_processes)
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Expose lightweight stats for health monitoring."""
+        return {
+            "project_path": self.project_path,
+            "is_git_repo": self.is_git_repo,
+            "tracked_git_processes": self.get_tracked_git_process_count(),
+            "monitoring_enabled": self._monitoring_enabled,
+            "monitoring_task_active": bool(self._monitoring_task and not self._monitoring_task.done()),
+            "session_id": self.owner_session_id,
+        }
