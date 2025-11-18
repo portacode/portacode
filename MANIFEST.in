@@ -1,3 +1,4 @@
 prune server
 exclude .pypirc
 recursive-include portacode/static *.js *.html
+recursive-include examples *

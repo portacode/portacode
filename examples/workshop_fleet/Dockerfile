@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+# Git is required so GitPython can interact with repositories from inside the container
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir portacode===1.3.39
+
+# Bake the instructor-provided starter code into the image
+COPY initial_content/ /opt/initial_content/

@@ -11,11 +11,11 @@ This folder contains a minimal Docker Compose setup that runs the Portacode CLI 
 
 1. **Request a pairing code**  
    Log in to the dashboard and press **Pair Device**.  
-   ![Pair Device button](../docs/images/pair-device-button.png)
+   ![Pair Device button](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pair-device-button.png)
 
 2. **Start the container**  
    ```bash
-   cd simple_device
+   cd examples/simple_device
    export PORTACODE_PAIRING_CODE=1234   # replace with your code
    docker compose up
    ```
@@ -25,13 +25,11 @@ This folder contains a minimal Docker Compose setup that runs the Portacode CLI 
 
 3. **Approve the pairing request**  
    As soon as the container starts, the device appears in the dashboard with the name “Device 01” and project path `/root/workspace`.  
-   ![Pairing request card](../docs/images/pairing-request.png)
+   ![Pairing request card](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pairing-request.png)
    Once approved, the RSA keypair remains in the mounted `.local/share/portacode` folder. Future `docker compose up` runs reconnect automatically without a new pairing code.
 
 
 ## Customizing
 
 - Override `PORTACODE_DEVICE_NAME` before `docker compose up` to change the label.
-- Edit `simple_device/docker-compose.yaml` to add more `--project-path` flags or bind additional folders.
-
-
+- Edit `examples/simple_device/docker-compose.yaml` to add more `--project-path` flags or bind additional folders.

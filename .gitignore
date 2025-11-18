@@ -8,4 +8,7 @@ _version.py
 client_sessions.json
 project_state_debug.json
 test_results
-simple_device/data
+
+# Example-generated volumes
+examples/simple_device/data/
+examples/workshop_fleet/data/

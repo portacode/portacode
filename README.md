@@ -43,6 +43,8 @@ Once connected, you can:
 - Monitor system status
 - Access your development environment from any device
 
+Want to see Portacode running inside containers or powering classrooms? Browse the [`examples/` directory](https://github.com/portacode/portacode/tree/master/examples) (also bundled in the PyPI source) for copy-paste Docker Compose setups ranging from a single-device sandbox to a ten-seat workshop fleet.
+
 ## 🔑 Pair Devices with Zero-Touch Codes
 
 The fastest way to bring a new machine online is with a short-lived pairing code:
@@ -193,7 +195,7 @@ services:
 Alternatively, set `XDG_DATA_HOME=/root/.portacode` before running `portacode connect` and mount that directory from the host. The rule of thumb: **persist whichever folder contains `.local/share/portacode/keys/`** so your device fingerprint sticks around.
 
 #### Minimal Docker Example
-If you want a plug-and-play container, check the `simple_device/` folder that ships with this repo and the PyPI source distribution. It contains a tiny `Dockerfile` and `docker-compose.yaml` you can copy as-is. The Dockerfile installs `git` before `pip install portacode` so GitPython can interact with repositories—remember to do the same in your own images if you expect to work inside version-controlled projects.
+If you want a plug-and-play container, check the `examples/simple_device/` folder that ships with this repo and the PyPI source distribution. It contains a tiny `Dockerfile` and `docker-compose.yaml` you can copy as-is. The Dockerfile installs `git` before `pip install portacode` so GitPython can interact with repositories—remember to do the same in your own images if you expect to work inside version-controlled projects.
 
 The accompanying Compose file demonstrates how to:
 - run `portacode connect --non-interactive` with a predefined `--device-name` and `--project-path`
@@ -201,6 +203,14 @@ The accompanying Compose file demonstrates how to:
 - bind-mount your workspace plus `/root/.local/share/portacode` for key persistence
 
 Together, those 10 lines illustrate the complete flow for remotely accessing a Docker-hosted machine with Portacode.
+
+#### Workshop Fleet Example
+Training a group? `examples/workshop_fleet/` spins up ten identical containers—one per student—with their own workspace bind mounts plus a shared read-only `instructions/` folder. The Dockerfile in that folder copies everything from `initial_content/` into the image (`COPY initial_content/ /opt/initial_content/`), and the compose command seeds each student workspace on boot via `cp -an /opt/initial_content/. /root/workspace/`. That means:
+- Instructors drop starter code into `initial_content/` before `docker compose up` and every container gets the same seed files without overwriting student changes after the first sync.
+- The host `instructions/` directory is mounted at `/root/workspace/instructions` in **read-only** mode, so you can update agendas or hints live while students can only view them.
+- Each seat persists its Portacode identity in `data/student-XX/.local/share/portacode`, so reconnecting after a restart does not need new pairing codes.
+
+See the full walkthrough and assets in [`examples/workshop_fleet/`](https://github.com/portacode/portacode/tree/master/examples/workshop_fleet), which is also shipped inside the PyPI source tarball for offline access.
 
 ## 🌱 Early Stage Project
 

@@ -1,0 +1,123 @@
+x-workshop-service: &workshop-service
+  build: "."
+  restart: unless-stopped
+  command: >-
+    bash -lc "set -euo pipefail
+    mkdir -p /root/workspace &&
+    cp -an /opt/initial_content/. /root/workspace/ &&
+    portacode connect --non-interactive \
+      --device-name \"${PORTACODE_DEVICE_NAME:-Workshop Seat}\" \
+      --project-path /root/workspace"
+  environment: &workshop-env
+    PORTACODE_PAIRING_CODE: "${PORTACODE_PAIRING_CODE:-}"
+
+services:
+  student-01:
+    <<: *workshop-service
+    hostname: student-01
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 01"
+    volumes:
+      - ./data/student-01/workspace:/root/workspace
+      - ./data/student-01/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-02:
+    <<: *workshop-service
+    hostname: student-02
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 02"
+    volumes:
+      - ./data/student-02/workspace:/root/workspace
+      - ./data/student-02/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-03:
+    <<: *workshop-service
+    hostname: student-03
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 03"
+    volumes:
+      - ./data/student-03/workspace:/root/workspace
+      - ./data/student-03/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-04:
+    <<: *workshop-service
+    hostname: student-04
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 04"
+    volumes:
+      - ./data/student-04/workspace:/root/workspace
+      - ./data/student-04/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-05:
+    <<: *workshop-service
+    hostname: student-05
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 05"
+    volumes:
+      - ./data/student-05/workspace:/root/workspace
+      - ./data/student-05/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-06:
+    <<: *workshop-service
+    hostname: student-06
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 06"
+    volumes:
+      - ./data/student-06/workspace:/root/workspace
+      - ./data/student-06/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-07:
+    <<: *workshop-service
+    hostname: student-07
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 07"
+    volumes:
+      - ./data/student-07/workspace:/root/workspace
+      - ./data/student-07/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-08:
+    <<: *workshop-service
+    hostname: student-08
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 08"
+    volumes:
+      - ./data/student-08/workspace:/root/workspace
+      - ./data/student-08/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-09:
+    <<: *workshop-service
+    hostname: student-09
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 09"
+    volumes:
+      - ./data/student-09/workspace:/root/workspace
+      - ./data/student-09/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
+
+  student-10:
+    <<: *workshop-service
+    hostname: student-10
+    environment:
+      <<: *workshop-env
+      PORTACODE_DEVICE_NAME: "Workshop Seat 10"
+    volumes:
+      - ./data/student-10/workspace:/root/workspace
+      - ./data/student-10/.local/share/portacode:/root/.local/share/portacode
+      - ./instructions:/root/workspace/instructions:ro
