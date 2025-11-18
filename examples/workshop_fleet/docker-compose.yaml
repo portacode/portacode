@@ -1,13 +1,11 @@
 x-workshop-service: &workshop-service
   build: "."
   restart: unless-stopped
-  command: >-
+  command: |
     bash -lc "set -euo pipefail
     mkdir -p /root/workspace &&
     cp -an /opt/initial_content/. /root/workspace/ &&
-    portacode connect --non-interactive \
-      --device-name \"${PORTACODE_DEVICE_NAME:-Workshop Seat}\" \
-      --project-path /root/workspace"
+    portacode connect --non-interactive --project-path /root/workspace" --device-name \"${PORTACODE_DEVICE_NAME:-Workshop Seat}\"
   environment: &workshop-env
     PORTACODE_PAIRING_CODE: "${PORTACODE_PAIRING_CODE:-}"
 
