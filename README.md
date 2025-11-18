@@ -48,7 +48,7 @@ Once connected, you can:
 The fastest way to bring a new machine online is with a short-lived pairing code:
 
 1. Log in to [https://portacode.com](https://portacode.com) and press **Pair Device** on the dashboard:  
-   ![Pair Device button](docs/images/pair-device-button.png)
+   ![Pair Device button](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pair-device-button.png)
 2. A four-digit code appears (valid for 15 minutes). This code only authorizes a pairing **request**—no device can reach your account until you approve it.
 3. On the device, run Portacode with the code:
    ```bash
@@ -61,7 +61,7 @@ The fastest way to bring a new machine online is with a short-lived pairing code
    - Repeat `--project-path /abs/path` to register up to ten Projects automatically once the request is approved.
    - Automating inside Docker? Export your own `PORTACODE_PROJECT_PATHS=/srv/a:/srv/b` and convert it into repeated `--project-path` switches before invoking the CLI—see `portacode_for_school/persistent_workspace/entrypoint.sh` for a reference implementation.
 4. Because the device has no fingerprint yet, the CLI bootstraps an in-memory keypair and announces a pending request to the dashboard. You immediately see the card with the supplied metadata:  
-   ![Pairing request card](docs/images/pairing-request.png)
+   ![Pairing request card](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pairing-request.png)
 5. Click **Approve**. The CLI persists the keypair on disk and transitions into a normal authenticated connection. Future `portacode connect` runs reuse the stored RSA keys—no additional codes required unless you revoke the device.
 
 Need to pair multiple machines at once? A single pairing code can be reused concurrently: every device that launches `portacode connect` with that code shows up as its own approval card until you accept or decline it.
@@ -192,6 +192,16 @@ services:
 
 Alternatively, set `XDG_DATA_HOME=/root/.portacode` before running `portacode connect` and mount that directory from the host. The rule of thumb: **persist whichever folder contains `.local/share/portacode/keys/`** so your device fingerprint sticks around.
 
+#### Minimal Docker Example
+If you want a plug-and-play container, check the `simple_device/` folder that ships with this repo and the PyPI source distribution. It contains a tiny `Dockerfile` and `docker-compose.yaml` you can copy as-is. The Dockerfile installs `git` before `pip install portacode` so GitPython can interact with repositories—remember to do the same in your own images if you expect to work inside version-controlled projects.
+
+The accompanying Compose file demonstrates how to:
+- run `portacode connect --non-interactive` with a predefined `--device-name` and `--project-path`
+- pass `PORTACODE_PAIRING_CODE` via environment variables
+- bind-mount your workspace plus `/root/.local/share/portacode` for key persistence
+
+Together, those 10 lines illustrate the complete flow for remotely accessing a Docker-hosted machine with Portacode.
+
 ## 🌱 Early Stage Project
 
 **Portacode is a young project with big dreams.** We're building the future of remote development and mobile-first coding experiences. As a new project, we're actively seeking:
@@ -222,7 +232,7 @@ Check out our [GitHub repository](https://github.com/portacode/portacode) to get
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](https://github.com/portacode/portacode/blob/master/LICENSE) file for details.
 
 ---
 
