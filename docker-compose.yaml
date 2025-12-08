@@ -14,6 +14,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"   # rotate when log hits 50 MB
+          max-file: "3"     # keep 3 old files
 
   django:
     build:
@@ -31,6 +36,11 @@ services:
       - "8001:8001"
     volumes:
       - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"   # rotate when log hits 50 MB
+          max-file: "3"     # keep 3 old files
 
   unibot-worker:
     build:
@@ -47,6 +57,11 @@ services:
       - ./server/portacode_django:/app
     deploy:
       replicas: 3
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"   # rotate when log hits 50 MB
+          max-file: "3"     # keep 3 old files
 
   imap-worker:
     build:
@@ -62,6 +77,11 @@ services:
         condition: service_healthy
     volumes:
       - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"   # rotate when log hits 50 MB
+          max-file: "3"     # keep 3 old files
   reacher:
     image: reacherhq/backend:latest
     env_file:
@@ -69,5 +89,10 @@ services:
     ports:
       - "8080:8080"
     restart: always
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"   # rotate when log hits 50 MB
+          max-file: "3"     # keep 3 old files
 volumes:
   pgdata: 
