@@ -72,6 +72,12 @@ class PlaywrightManager:
             env_headless = os.getenv('TEST_HEADLESS', 'false').lower() in ('true', '1', 'yes')
             env_video_width = int(os.getenv('TEST_VIDEO_WIDTH', '1920'))
             env_video_height = int(os.getenv('TEST_VIDEO_HEIGHT', '1080'))
+            env_viewport_width = os.getenv('TEST_VIEWPORT_WIDTH')
+            env_viewport_height = os.getenv('TEST_VIEWPORT_HEIGHT')
+            env_device_scale = os.getenv('TEST_DEVICE_SCALE_FACTOR')
+            env_is_mobile = os.getenv('TEST_IS_MOBILE')
+            env_has_touch = os.getenv('TEST_HAS_TOUCH')
+            env_user_agent = os.getenv('TEST_USER_AGENT')
             automation_token = os.getenv('TEST_RUNNER_BYPASS_TOKEN')
             
             # Use provided values or fall back to environment
@@ -126,15 +132,43 @@ class PlaywrightManager:
                 raise Exception(f"Failed to launch {browser_type} browser: {e}")
 
             # Create context with recording enabled and proper viewport
+            viewport_size = {
+                "width": int(env_viewport_width) if env_viewport_width else env_video_width,
+                "height": int(env_viewport_height) if env_viewport_height else env_video_height
+            }
             video_size = {"width": env_video_width, "height": env_video_height}
             context_kwargs = {
                 "record_video_dir": str(self.test_recordings_dir),
                 "record_video_size": video_size,
                 "record_har_path": str(self.har_path),
                 "record_har_omit_content": False,
-                "viewport": video_size
+                "viewport": viewport_size
             }
+
+            if env_device_scale:
+                try:
+                    context_kwargs["device_scale_factor"] = float(env_device_scale)
+                except ValueError:
+                    self.logger.warning(f"Invalid TEST_DEVICE_SCALE_FACTOR '{env_device_scale}' - ignoring")
+
+            if env_is_mobile:
+                context_kwargs["is_mobile"] = env_is_mobile.lower() in ('true', '1', 'yes')
+
+            if env_has_touch:
+                context_kwargs["has_touch"] = env_has_touch.lower() in ('true', '1', 'yes')
+
+            if env_user_agent:
+                context_kwargs["user_agent"] = env_user_agent
+
             self.context = await self.browser.new_context(**context_kwargs)
+            self.logger.info(
+                "Viewport configured: %sx%s (device scale: %s, mobile: %s, touch: %s)",
+                viewport_size["width"],
+                viewport_size["height"],
+                context_kwargs.get("device_scale_factor", 1.0),
+                context_kwargs.get("is_mobile", False),
+                context_kwargs.get("has_touch", False),
+            )
             if automation_token:
                 parsed_base = urlparse(self.base_url)
                 target_host = parsed_base.hostname
