@@ -226,7 +226,69 @@ class PlayStoreTabletScreenshotTest(BaseTest):
         await self.logic.apply_zoom(self.playwright_manager.page)
 
     async def run(self) -> TestResult:
-        return await self.logic.capture(self)
+        return await self.logic.capture(self, self._capture_tablet_views)
 
     async def teardown(self):
         pass
+
+    async def _capture_tablet_views(self, page, manager) -> TestResult:
+        async def click_and_wait(locator, description: str, screenshot_name: str = None):
+            try:
+                await locator.wait_for(timeout=5000)
+                await locator.click()
+            except Exception as exc:
+                return TestResult(self.name, False, f"Failed to interact with {description}: {exc}")
+            if screenshot_name:
+                await page.wait_for_timeout(500)
+                await manager.take_screenshot(f"{self.logic.device_name}_{screenshot_name}")
+            return None
+
+        # Helper locators
+        def divider_lid(title_text):
+            return page.locator(f'.divider-lid[title="Toggle {title_text}"]').first
+
+        def persistent_toggle(title_text):
+            return page.locator(
+                f'.persistent-toggle[title="Show {title_text}"], '
+                f'.persistent-toggle[title="Hide {title_text}"]'
+            ).first
+
+        # 1. Close terminal, expand git, open diff, capture
+        result = await click_and_wait(divider_lid("Terminal"), "Terminal divider")
+        if result:
+            return result
+        git_info = page.locator(".git-branch-info").first
+        result = await click_and_wait(git_info, "Git branch info", "git_status")
+        if result:
+            return result
+        git_diff_btn = page.locator(".git-action-btn.diff").first
+        result = await click_and_wait(git_diff_btn, "Git diff button", "git_version_control")
+        if result:
+            return result
+
+        # 2. Expand AI chat and open first chat
+        ai_chat_toggle = page.locator('.persistent-toggle.ai-chat-toggle')
+        result = await click_and_wait(ai_chat_toggle, "AI Chat toggle")
+        if result:
+            return result
+        chat_item = page.locator(".chat-item").first
+        result = await click_and_wait(chat_item, "AI chat conversation", "ai_chat_thread_tablet")
+        if result:
+            return result
+
+        # 3. Expand terminal, collapse file explorer, capture
+        terminal_tab = page.locator('.persistent-toggle.terminal-toggle-center')
+        result = await click_and_wait(terminal_tab, "Terminal toggle")
+        if result:
+            return result
+        explorer_divider = page.locator('.divider-lid.horizontal[title="Toggle File Explorer"]').first
+        result = await click_and_wait(explorer_divider, "Explorer divider", "terminal_focus")
+        if result:
+            return result
+
+        # 4. Collapse AI chat and expand file explorer to reset
+        return TestResult(
+            self.name,
+            True,
+            "Tablet screenshots captured across Git, diff, terminal, and AI chat views",
+        )
