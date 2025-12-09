@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT_DIR/test_results/screenshot_runs"
+STATIC_DIR="$ROOT_DIR/server/portacode_django/static/images/marketing"
 
 ENV_FILE="$ROOT_DIR/.env.play_store"
 if [[ -f "$ENV_FILE" ]]; then
@@ -20,6 +21,9 @@ fi
 echo "🧹 Resetting test_results directory..."
 rm -rf "$ROOT_DIR/test_results"
 mkdir -p "$OUT_DIR"
+echo "🧽 Refreshing marketing static assets..."
+rm -rf "$STATIC_DIR"
+mkdir -p "$STATIC_DIR"
 
 run_profile() {
     local profile_name=$1
@@ -46,6 +50,12 @@ run_profile() {
     mkdir -p "$profile_dir"
     cp "$recording_dir"/screenshots/*.png "$profile_dir"/
     echo "Stored screenshots for ${profile_name} in $profile_dir"
+
+    local static_target="$STATIC_DIR/${profile_name}"
+    rm -rf "$static_target"
+    mkdir -p "$static_target"
+    cp "$profile_dir"/*.png "$static_target"/
+    echo "Synced ${profile_name} screenshots to $static_target"
 }
 
 GALAXY_UA="Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-S908U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
