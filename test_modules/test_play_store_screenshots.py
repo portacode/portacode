@@ -24,7 +24,7 @@ class PlayStoreScreenshotLogic:
                 f"document.body.style.zoom='{percent}%'"
             )
 
-    async def capture(self, test_instance) -> TestResult:
+    async def capture(self, test_instance, post_editor_steps=None) -> TestResult:
         page = test_instance.playwright_manager.page
         base_url = test_instance.playwright_manager.base_url
 
@@ -57,7 +57,16 @@ class PlayStoreScreenshotLogic:
         # Open the editor from this device card
         editor_button = device_card.get_by_text("Editor")
         await editor_button.wait_for(timeout=5000)
-        await editor_button.click()
+        await editor_button.scroll_into_view_if_needed()
+        await page.wait_for_timeout(200)
+        try:
+            await editor_button.click(force=True)
+        except Exception as exc:
+            return TestResult(
+                test_instance.name,
+                False,
+                f"Failed to open editor for {self.device_label}: {exc}",
+            )
 
         # Select the first project in the modal
         await page.wait_for_selector("#projectSelectorModal.show", timeout=10000)
@@ -95,6 +104,11 @@ class PlayStoreScreenshotLogic:
             f"{self.device_name}_editor"
         )
 
+        if post_editor_steps:
+            result = await post_editor_steps(page, test_instance.playwright_manager)
+            if result:
+                return result
+
         return TestResult(
             test_instance.name,
             True,
@@ -120,11 +134,79 @@ class PlayStorePhoneScreenshotTest(BaseTest):
         await self.logic.apply_zoom(self.playwright_manager.page)
 
     async def run(self) -> TestResult:
-        return await self.logic.capture(self)
+        return await self.logic.capture(self, self._capture_phone_views)
 
     async def teardown(self):
         pass
 
+    async def _capture_phone_views(self, page, manager) -> TestResult:
+        async def take(name: str):
+            await page.wait_for_timeout(500)
+            await manager.take_screenshot(f"{self.logic.device_name}_{name}")
+
+        def locator_by_text(selector: str, text: str):
+            return page.locator(selector).filter(has_text=text).first
+
+        # Explorer tab
+        explorer_tab = locator_by_text(".mobile-nav-item", "Explorer")
+        try:
+            await explorer_tab.wait_for(timeout=5000)
+            await explorer_tab.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"Explorer tab not accessible: {exc}")
+        await take("explorer")
+
+        # Git status expansion
+        git_info = page.locator(".git-branch-info").first
+        try:
+            await git_info.wait_for(timeout=5000)
+            await git_info.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"Git status section unavailable: {exc}")
+        await take("git_status")
+
+        # Diff button
+        diff_btn = page.locator(".git-action-btn.diff").first
+        try:
+            await diff_btn.wait_for(timeout=5000)
+            await diff_btn.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"Diff action unavailable: {exc}")
+        await page.wait_for_timeout(1000)
+        await take("git_diff")
+
+        # Terminal tab
+        terminal_tab = locator_by_text(".mobile-nav-item", "Terminal")
+        try:
+            await terminal_tab.wait_for(timeout=5000)
+            await terminal_tab.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"Terminal tab not accessible: {exc}")
+        await take("terminal")
+
+        # AI Chat tab
+        ai_chat_tab = locator_by_text(".mobile-nav-item", "AI Chat")
+        try:
+            await ai_chat_tab.wait_for(timeout=5000)
+            await ai_chat_tab.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"AI Chat tab not accessible: {exc}")
+        await take("ai_chat")
+
+        # First chat item
+        chat_item = page.locator(".chat-item").first
+        try:
+            await chat_item.wait_for(timeout=5000)
+            await chat_item.click()
+        except Exception as exc:
+            return TestResult(self.name, False, f"No AI chat history available: {exc}")
+        await take("ai_chat_thread")
+
+        return TestResult(
+            self.name,
+            True,
+            "Phone screenshots captured across Explorer, Git, Diff, Terminal, and AI Chat",
+        )
 
 class PlayStoreTabletScreenshotTest(BaseTest):
     """Capture tablet-friendly screenshots for Play Store listing."""
