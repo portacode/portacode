@@ -1,0 +1,1 @@
+"""Galactic Bakeshop Django project."""

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cosmic Cupcake Stand</title>
+    <style>
+      body {
+        background: #080a1c;
+        color: #f7f7ff;
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        margin: 0;
+        padding: 2rem;
+      }
+      .card {
+        background: #11142d;
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        max-width: 760px;
+        margin: auto;
+      }
+      h1 {
+        font-size: 2.5rem;
+        margin-top: 0;
+      }
+      .featured {
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+        background: linear-gradient(135deg, #ff7eb3, #6229ff);
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+      }
+      li {
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      footer {
+        margin-top: 2rem;
+        font-size: 0.85rem;
+        text-align: center;
+        color: rgba(255, 255, 255, 0.65);
+      }
+      a {
+        color: #ffdc7b;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Cosmic Cupcake Stand</h1>
+      <p>
+        Welcome to the Galactic Bakeshop pop up! Each refresh beams down a
+        featured cupcake. Make it your own by editing
+        <code>treats/views.py</code>, <code>treats/menu.py</code>, and
+        <code>treats/templates/treats/home.html</code>.
+      </p>
+
+      <section class="featured">
+        <h2>{{ featured.emoji }} Featured Treat: {{ featured.name }}</h2>
+        <p>{{ featured.flavor_notes|title }}</p>
+        <p><strong>${{ featured.price }}</strong></p>
+      </section>
+
+      <h3>Full Menu</h3>
+      <ul>
+        {% for cupcake in cupcakes %}
+        <li>
+          <strong>{{ cupcake.emoji }} {{ cupcake.name }}</strong><br />
+          {{ cupcake.flavor_notes }} — <em>${{ cupcake.price }}</em>
+        </li>
+        {% endfor %}
+      </ul>
+
+      <footer>
+        Page generated at {{ generated_at }} UTC ·
+        <a href="https://docs.djangoproject.com/">Powered by Django</a>
+      </footer>
+    </main>
+  </body>
+</html>
