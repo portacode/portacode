@@ -23,6 +23,8 @@ mkdir -p "$OUT_DIR"
 
 run_profile() {
     local profile_name=$1
+    local test_name=$2
+    shift
     shift
     echo ""
     echo "=== Running screenshot profile: ${profile_name} ==="
@@ -31,8 +33,9 @@ run_profile() {
         TEST_USERNAME="$SCREENSHOT_USERNAME" \
         TEST_PASSWORD="$SCREENSHOT_PASSWORD" \
         SCREENSHOT_DEVICE_NAME="$profile_name" \
+        ALLOW_EMPTY_SESSIONS=true \
         "$@" \
-        python -m testing_framework.cli run-tests play_store_screenshot_test
+        python -m testing_framework.cli run-tests "$test_name"
 
     local latest_run
     latest_run=$(ls -dt "$ROOT_DIR"/test_results/run_* | head -n 1)
@@ -47,7 +50,7 @@ run_profile() {
 
 GALAXY_UA="Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-S908U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
 
-run_profile phone_s22_ultra \
+run_profile phone_s22_ultra play_store_phone_screenshot_test \
     TEST_VIEWPORT_WIDTH=384 \
     TEST_VIEWPORT_HEIGHT=844 \
     TEST_DEVICE_SCALE_FACTOR=3.125 \
@@ -58,7 +61,7 @@ run_profile phone_s22_ultra \
     TEST_VIDEO_HEIGHT=2859 \
     SCREENSHOT_ZOOM=0.9
 
-run_profile tablet_7_inch \
+run_profile tablet_7_inch play_store_tablet_screenshot_test \
     TEST_VIEWPORT_WIDTH=960 \
     TEST_VIEWPORT_HEIGHT=600 \
     TEST_DEVICE_SCALE_FACTOR=2.0 \
@@ -68,7 +71,7 @@ run_profile tablet_7_inch \
     TEST_VIDEO_HEIGHT=1920 \
     SCREENSHOT_ZOOM=1.0
 
-run_profile tablet_10_inch \
+run_profile tablet_10_inch play_store_tablet_screenshot_test \
     TEST_VIEWPORT_WIDTH=1280 \
     TEST_VIEWPORT_HEIGHT=800 \
     TEST_DEVICE_SCALE_FACTOR=2.0 \

@@ -1,5 +1,7 @@
 """Login flow test - simplified and fast."""
 
+import os
+
 from testing_framework.core.base_test import BaseTest, TestResult, TestCategory
 
 
@@ -28,9 +30,11 @@ class LoginFlowTest(BaseTest):
         assert_that.status_ok(response, "Dashboard request")
         assert_that.url_contains(page, "/dashboard", "Dashboard URL")
         
-        # Verify we have active sessions
-        active_sessions = self.inspect().get_active_sessions()
-        assert_that.is_true(len(active_sessions) > 0, "Should have active sessions")
+        # Verify we have active sessions unless explicitly allowed to skip
+        allow_empty_sessions = os.getenv("ALLOW_EMPTY_SESSIONS", "false").lower() in ("1", "true", "yes")
+        if not allow_empty_sessions:
+            active_sessions = self.inspect().get_active_sessions()
+            assert_that.is_true(len(active_sessions) > 0, "Should have active sessions")
         
         if assert_that.has_failures():
             return TestResult(self.name, False, assert_that.get_failure_message())

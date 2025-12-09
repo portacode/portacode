@@ -1,4 +1,4 @@
-"""Play Store screenshot capture test."""
+"""Play Store screenshot tests for phone and tablet layouts."""
 
 import os
 from urllib.parse import urljoin
@@ -6,60 +6,55 @@ from urllib.parse import urljoin
 from testing_framework.core.base_test import BaseTest, TestResult, TestCategory
 
 
-class PlayStoreScreenshotTest(BaseTest):
-    """Capture curated UI screenshots for store listings."""
+DEVICE_LABEL = os.getenv("PLAY_STORE_DEVICE_LABEL", "Workshop Seat 01")
+
+
+class PlayStoreScreenshotLogic:
+    """Shared workflow for capturing dashboard and editor screenshots."""
 
     def __init__(self):
+        self.device_label = DEVICE_LABEL
         self.device_name = os.getenv("SCREENSHOT_DEVICE_NAME", "default")
         self.dashboard_zoom = float(os.getenv("SCREENSHOT_ZOOM", "1.0"))
-        super().__init__(
-            name="play_store_screenshot_test",
-            category=TestCategory.UI,
-            description="Capture dashboard and editor screenshots for store listings",
-            tags=["screenshots", "store", "ui"],
-            depends_on=["login_flow_test"],
-            start_url="/dashboard/",
-        )
 
-    async def setup(self):
-        """Apply optional zoom before interactions."""
+    async def apply_zoom(self, page):
         if self.dashboard_zoom != 1.0:
             percent = int(self.dashboard_zoom * 100)
-            await self.playwright_manager.page.evaluate(
+            await page.evaluate(
                 f"document.body.style.zoom='{percent}%'"
             )
 
-    async def run(self) -> TestResult:
-        page = self.playwright_manager.page
-        base_url = self.playwright_manager.base_url
+    async def capture(self, test_instance) -> TestResult:
+        page = test_instance.playwright_manager.page
+        base_url = test_instance.playwright_manager.base_url
 
         # Ensure dashboard is loaded
         await page.goto(urljoin(base_url, "/dashboard/"))
         await page.wait_for_load_state("networkidle")
 
-        # Locate ubuntu-01 card and ensure online
+        # Locate specific device card and ensure it's online
         device_card = (
             page.locator(".device-card.online")
-            .filter(has_text="ubuntu-01")
+            .filter(has_text=self.device_label)
             .first
         )
         try:
             await device_card.wait_for(timeout=10000)
         except Exception:
             return TestResult(
-                self.name,
+                test_instance.name,
                 False,
-                "Device ubuntu-01 is not online or not visible",
+                f"Device '{self.device_label}' is not online or not visible",
             )
 
-        # Scroll past the navbar (66px) and capture dashboard screenshot
+        # Scroll past navbar and capture dashboard screenshot
         await page.evaluate("window.scrollTo(0, 66)")
         await page.wait_for_timeout(500)
-        await self.playwright_manager.take_screenshot(
+        await test_instance.playwright_manager.take_screenshot(
             f"{self.device_name}_dashboard"
         )
 
-        # Open the editor from the ubuntu-01 card
+        # Open the editor from this device card
         editor_button = device_card.get_by_text("Editor")
         await editor_button.wait_for(timeout=5000)
         await editor_button.click()
@@ -75,21 +70,81 @@ class PlayStoreScreenshotTest(BaseTest):
             timeout=10000,
         )
 
-        # Wait for IDE to appear with device online indicator
-        await page.locator(".system-resources").wait_for(timeout=10000)
-
+        # Handle LitElement/Shadow DOM editor readiness
+        try:
+            await page.wait_for_selector("ace-editor", timeout=15000)
+            await page.wait_for_function(
+                """
+                () => {
+                    const el = document.querySelector('ace-editor');
+                    if (!el) return false;
+                    const shadow = el.shadowRoot;
+                    if (shadow && shadow.querySelector('.ace_editor')) return true;
+                    return !!el.querySelector('.ace_editor');
+                }
+                """,
+                timeout=20000,
+            )
+        except Exception:
+            test_instance.logger.warning(
+                "ACE editor shadow DOM not detected, proceeding with screenshot"
+            )
 
         await page.wait_for_timeout(1000)
-        await self.playwright_manager.take_screenshot(
+        await test_instance.playwright_manager.take_screenshot(
             f"{self.device_name}_editor"
         )
 
         return TestResult(
-            self.name,
+            test_instance.name,
             True,
             f"Screenshots captured for {self.device_name}",
         )
 
+
+class PlayStorePhoneScreenshotTest(BaseTest):
+    """Capture phone-friendly screenshots for Play Store listing."""
+
+    def __init__(self):
+        self.logic = PlayStoreScreenshotLogic()
+        super().__init__(
+            name="play_store_phone_screenshot_test",
+            category=TestCategory.UI,
+            description="Capture phone-friendly screenshots for Play Store listing",
+            tags=["screenshots", "store", "phone"],
+            depends_on=["login_flow_test"],
+            start_url="/dashboard/",
+        )
+
+    async def setup(self):
+        await self.logic.apply_zoom(self.playwright_manager.page)
+
+    async def run(self) -> TestResult:
+        return await self.logic.capture(self)
+
     async def teardown(self):
-        """No teardown actions required."""
+        pass
+
+
+class PlayStoreTabletScreenshotTest(BaseTest):
+    """Capture tablet-friendly screenshots for Play Store listing."""
+
+    def __init__(self):
+        self.logic = PlayStoreScreenshotLogic()
+        super().__init__(
+            name="play_store_tablet_screenshot_test",
+            category=TestCategory.UI,
+            description="Capture tablet-friendly screenshots for Play Store listing",
+            tags=["screenshots", "store", "tablet"],
+            depends_on=["login_flow_test"],
+            start_url="/dashboard/",
+        )
+
+    async def setup(self):
+        await self.logic.apply_zoom(self.playwright_manager.page)
+
+    async def run(self) -> TestResult:
+        return await self.logic.capture(self)
+
+    async def teardown(self):
         pass
