@@ -43,7 +43,7 @@ IMPORT_PATTERN = re.compile(r'^(\s*)import\s+(.+?)\s+from\s+[\'"](.+?)[\'"];?\s*
 
 DEFAULT_FRAME_WIDTH = (0.78, 1400)  # ratio of viewport width, max pixels
 DEVICE_FRAME_WIDTH = {
-    "phone": (0.78, 1400),
+    "phone": (0.72, 1400),
     "tablet7": (0.82, 1800),
     "tablet10": (0.82, 2000),
 }
@@ -364,16 +364,21 @@ def build_html_document(
     if orientation == "landscape":
         styles = dedent(
             """
-            :root {
-                font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                color: #f8fafc;
-                --night: #01050f;
-                --deep: #031126;
-            }
+        :root {
+            font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: #f8fafc;
+            --night: #01050f;
+            --deep: #031126;
+        }
 
-            * {
-                box-sizing: border-box;
-            }
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
 
             body {
                 margin: 0;
@@ -447,6 +452,11 @@ def build_html_document(
 
             * {
                 box-sizing: border-box;
+            }
+
+            html,
+            body {
+                height: 100%;
             }
 
             body {
@@ -749,7 +759,7 @@ async def render_assets(
 
         filename = f"{item.device}_{index:02d}_{slugify(item.caption)}.png"
         target = output_dir / filename
-        await page.screenshot(path=str(target), full_page=True, timeout=60000)
+        await page.screenshot(path=str(target), full_page=False, timeout=60000)
         saved_paths.append(target)
         print(f"[+] Saved {target}")
         await page.close()
