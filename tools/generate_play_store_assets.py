@@ -19,6 +19,7 @@ import base64
 import re
 import sys
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from textwrap import dedent
 from typing import Dict, Iterable, List, Sequence
@@ -61,6 +62,14 @@ DEVICE_VIEWPORT = {
     "tablet10": (2880, 1620),
 }
 
+FEATURE_GRAPHIC_SIZE = (1024, 500)
+FEATURE_DEFAULT_CAPTION = "Operate labs and copilots from any screen."
+FEATURE_DEFAULT_SELECTION = [
+    ("phone", 1),
+    ("tablet7", 2),
+    ("tablet10", 4),
+]
+
 
 @dataclass
 class ShowcaseItem:
@@ -77,12 +86,43 @@ class DeviceMeta:
     component: str
 
 
+@dataclass
+class FeatureCandidate:
+    index: int
+    device: str
+    device_label: str
+    device_ordinal: int
+    filename: str
+    caption: str
+    description: str
+    alt: str
+    component: str
+    asset_path: Path
+
+
+@dataclass
+class FeatureGraphicShot:
+    device: str
+    device_label: str
+    caption: str
+    alt: str
+    component: str
+    image_data: str
+
+
+@dataclass
+class FeatureGraphicInput:
+    caption: str
+    subline: str
+    shots: List[FeatureCandidate]
+
+
 class HomeShowcaseParser:
     """Extract showcaseData/deviceConfig objects directly from the homepage template."""
 
     SHOWCASE_RE = re.compile(r"const\s+showcaseData\s*=\s*\{(?P<body>.*?)\}\s*;", re.S)
     DEVICE_BLOCK_RE = re.compile(
-        r"(?P<key>\w+)\s*:\s*\[(?P<body>.*?)\](?=,\s*\w+\s*:|\s*\})",
+        r"(?P<key>\w+)\s*:\s*\[(?P<body>.*?)\](?=,\s*\w+\s*:|\s*\}|\s*$)",
         re.S,
     )
     ITEM_RE = re.compile(
@@ -167,6 +207,144 @@ def slugify(value: str) -> str:
     return value or "screenshot"
 
 
+def collect_feature_candidates(parser: HomeShowcaseParser) -> List[FeatureCandidate]:
+    order = ["phone", "tablet7", "tablet10"]
+    candidates: List[FeatureCandidate] = []
+    index = 1
+    for device in order:
+        items = parser.showcase_data.get(device, [])
+        if not items:
+            continue
+        meta = parser.device_meta.get(device)
+        device_label = meta.label if meta else device.title()
+        component = meta.component if meta else "pc-screenshot-frame"
+        for ordinal, item in enumerate(items, start=1):
+            asset_path = parser.resolve_static_path(item.src)
+            candidates.append(
+                FeatureCandidate(
+                    index=index,
+                    device=device,
+                    device_label=device_label,
+                    device_ordinal=ordinal,
+                    filename=asset_path.name,
+                    caption=item.caption,
+                    description=item.description,
+                    alt=item.alt,
+                    component=component,
+                    asset_path=asset_path,
+                )
+            )
+            index += 1
+    return candidates
+
+
+def compute_default_feature_indices(candidates: Sequence[FeatureCandidate]) -> List[int]:
+    resolved: List[int] = []
+    for device, ordinal in FEATURE_DEFAULT_SELECTION:
+        for candidate in candidates:
+            if candidate.device == device and candidate.device_ordinal == ordinal:
+                resolved.append(candidate.index)
+                break
+    for candidate in candidates:
+        if len(resolved) >= 3:
+            break
+        if candidate.index not in resolved:
+            resolved.append(candidate.index)
+    return resolved[:3]
+
+
+def display_feature_candidates(candidates: Sequence[FeatureCandidate]) -> None:
+    if not candidates:
+        print("No screenshots are available for feature graphic generation.")
+        return
+    print("\nAvailable screenshots for feature graphic:\n")
+    for candidate in candidates:
+        print(
+            f"[{candidate.index:02d}] "
+            f"{candidate.device_label:<12} "
+            f"{candidate.filename:<40} "
+            f"- {candidate.caption}"
+        )
+    print()
+
+
+def parse_feature_pick_string(raw: str, total: int) -> List[int] | None:
+    tokens = [token for token in re.split(r"[,\s]+", raw.strip()) if token]
+    if not tokens:
+        return None
+    picks: List[int] = []
+    for token in tokens:
+        if not token.isdigit():
+            return None
+        value = int(token)
+        if value < 1 or value > total:
+            return None
+        if value not in picks:
+            picks.append(value)
+    if len(picks) != 3:
+        return None
+    return picks
+
+
+def determine_feature_indices(
+    candidates: Sequence[FeatureCandidate],
+    picks_arg: str | None,
+    interactive: bool,
+) -> List[int]:
+    total = len(candidates)
+    if total < 3:
+        raise RuntimeError("Need at least three screenshots to build a feature graphic.")
+    defaults = compute_default_feature_indices(candidates)
+    if picks_arg:
+        parsed = parse_feature_pick_string(picks_arg, total)
+        if not parsed:
+            raise ValueError(f"Invalid --feature-picks value '{picks_arg}'. Expected three indexes within 1-{total}.")
+        return parsed
+    if interactive:
+        default_str = ", ".join(str(idx) for idx in defaults)
+        raw = input(f"Select 3 screenshots by number [{default_str}]: ").strip()
+        if raw:
+            parsed = parse_feature_pick_string(raw, total)
+            if parsed:
+                return parsed
+            print("Invalid selection, falling back to defaults.")
+    return defaults
+
+
+def resolve_feature_caption(args: argparse.Namespace, interactive: bool) -> str:
+    default_caption = FEATURE_DEFAULT_CAPTION
+    if getattr(args, "feature_caption", None):
+        return args.feature_caption.strip()
+    if interactive:
+        raw = input(f"Feature caption [{default_caption}]: ").strip()
+        if raw:
+            return raw
+    return default_caption
+
+
+def prepare_feature_graphic_input(
+    parser: HomeShowcaseParser,
+    args: argparse.Namespace,
+) -> FeatureGraphicInput:
+    candidates = collect_feature_candidates(parser)
+    if len(candidates) < 3:
+        raise RuntimeError("At least three showcase screenshots are required to generate a feature graphic.")
+    display_feature_candidates(candidates)
+    interactive = sys.stdin.isatty()
+    indices = determine_feature_indices(candidates, getattr(args, "feature_picks", None), interactive)
+    order_map = {idx: position for position, idx in enumerate(indices)}
+    selected = [candidate for candidate in candidates if candidate.index in order_map]
+    selected.sort(key=lambda candidate: order_map[candidate.index])
+    caption = resolve_feature_caption(args, interactive)
+    device_labels = [shot.device_label for shot in selected]
+    subline = " + ".join(device_labels) + " ready"
+    print("Selected screenshots:")
+    for shot in selected:
+        print(f" - #{shot.index:02d} {shot.device_label} / {shot.filename} — {shot.caption}")
+    print(f"Feature caption: {caption}\n")
+    return FeatureGraphicInput(caption=caption, subline=subline, shots=selected)
+
+
 def resolve_frame_width(device: str, viewport_width: int, override: str | None) -> str:
     if override:
         return override
@@ -214,7 +392,8 @@ def build_html_document(
 
             .frame-canvas {
                 width: 100%;
-                height: 100%;
+                height: 100vh;
+                overflow: hidden;
                 padding: 70px 100px;
                 display: flex;
                 justify-content: space-between;
@@ -242,6 +421,7 @@ def build_html_document(
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                height: calc(100% - 150px);
             }
 
             .frame-area pc-screenshot-frame,
@@ -361,6 +541,164 @@ def build_html_document(
     return html
 
 
+def compute_feature_shot_width(device: str, slot_index: int) -> int:
+    base = 230 if device == "phone" else 330
+    if slot_index == 1:
+        base += 30
+    elif slot_index == 0:
+        base -= 10
+    return base
+
+
+def build_feature_graphic_document(
+    caption: str,
+    subline: str,
+    shots: Sequence[FeatureGraphicShot],
+    component_source: str,
+) -> str:
+    safe_caption = escape(caption)
+    safe_subline = escape(subline)
+    shot_markup: List[str] = []
+    for idx, shot in enumerate(shots):
+        slot_class = f"slot-{idx + 1}"
+        width = compute_feature_shot_width(shot.device, idx)
+        time_attr = ' time="12:30"' if shot.component == "pc-screenshot-frame" else ""
+        shot_markup.append(
+            dedent(
+                f"""
+                <div class="feature-shot {slot_class} device-{shot.device}" style="--shot-frame-width: {width}px;">
+                    <{shot.component} src="{shot.image_data}" alt="{escape(shot.alt)}"{time_attr} style="--frame-width: var(--shot-frame-width);"></{shot.component}>
+                </div>
+                """
+            ).strip()
+        )
+    shots_html = "\n".join(shot_markup)
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{safe_caption}</title>
+    <style>
+        :root {{
+            font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: #f8fafc;
+        }}
+
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            width: {FEATURE_GRAPHIC_SIZE[0]}px;
+            height: {FEATURE_GRAPHIC_SIZE[1]}px;
+            background:
+                radial-gradient(circle at 10% 10%, rgba(0,255,136,0.15), transparent 50%),
+                radial-gradient(circle at 80% 0%, rgba(56,189,248,0.18), transparent 40%),
+                linear-gradient(130deg, #01030c, #041129 60%, #050a18);
+        }}
+
+        .feature-canvas {{
+            width: 100%;
+            height: 100%;
+            padding: 40px 50px;
+            display: flex;
+            align-items: stretch;
+            justify-content: space-between;
+            gap: 30px;
+        }}
+
+        .copy-block {{
+            flex: 0 0 40%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 16px;
+        }}
+
+        .copy-block .eyebrow {{
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            color: rgba(248, 250, 252, 0.7);
+        }}
+
+        .copy-block h1 {{
+            font-size: 3rem;
+            line-height: 1.1;
+            margin: 0;
+        }}
+
+        .copy-block .subline {{
+            font-size: 1.05rem;
+            color: rgba(248, 250, 252, 0.75);
+        }}
+
+        .shots {{
+            flex: 1;
+            position: relative;
+            height: 100%;
+            max-width: 660px;
+        }}
+
+        .feature-shot {{
+            position: absolute;
+            width: var(--shot-frame-width, 280px);
+            padding: 14px;
+            border-radius: 32px;
+            background: rgba(2, 6, 20, 0.92);
+            box-shadow:
+                0 35px 90px rgba(0, 0, 0, 0.65),
+                0 12px 35px rgba(15, 118, 110, 0.24);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }}
+
+        .feature-shot pc-screenshot-frame,
+        .feature-shot pc-tablet-frame {{
+            width: 100%;
+            display: block;
+        }}
+
+        .feature-shot.slot-1 {{
+            top: 90px;
+            left: 20px;
+            transform: rotate(-8deg);
+        }}
+
+        .feature-shot.slot-2 {{
+            top: 20px;
+            left: 210px;
+            transform: rotate(1.5deg);
+            z-index: 3;
+        }}
+
+        .feature-shot.slot-3 {{
+            top: 120px;
+            left: 360px;
+            transform: rotate(9deg);
+        }}
+    </style>
+</head>
+<body>
+    <div class="feature-canvas">
+        <div class="copy-block">
+            <span class="eyebrow">Portacode</span>
+            <h1>{safe_caption}</h1>
+            <p class="subline">{safe_subline}</p>
+        </div>
+        <div class="shots">
+            {shots_html}
+        </div>
+    </div>
+    <script type="module">
+{component_source}
+    </script>
+</body>
+</html>
+"""
+    return html
+
+
 async def render_assets(
     browser: Browser,
     items: Sequence[ShowcaseItem],
@@ -399,6 +737,54 @@ async def render_assets(
         print(f"[+] Saved {target}")
         await page.close()
     return saved_paths
+
+
+def build_feature_shots_payload(selection: FeatureGraphicInput) -> tuple[List[FeatureGraphicShot], str]:
+    shots: List[FeatureGraphicShot] = []
+    ordered_components: List[str] = []
+    seen: set[str] = set()
+    for shot in selection.shots:
+        data_url = image_to_data_url(shot.asset_path)
+        shots.append(
+            FeatureGraphicShot(
+                device=shot.device,
+                device_label=shot.device_label,
+                caption=shot.caption,
+                alt=shot.alt,
+                component=shot.component,
+                image_data=data_url,
+            )
+        )
+        if shot.component not in seen:
+            seen.add(shot.component)
+            ordered_components.append(shot.component)
+    component_source = "\n\n".join(load_component_source(tag) for tag in ordered_components)
+    return shots, component_source
+
+
+async def render_feature_graphic(
+    browser: Browser,
+    selection: FeatureGraphicInput,
+    output_dir: Path,
+    scale: float,
+) -> List[Path]:
+    width, height = FEATURE_GRAPHIC_SIZE
+    shots, component_source = build_feature_shots_payload(selection)
+    html = build_feature_graphic_document(selection.caption, selection.subline, shots, component_source)
+    page: Page = await browser.new_page(
+        viewport={"width": width, "height": height},
+        device_scale_factor=scale,
+    )
+    await page.set_content(html, wait_until="load")
+    await page.wait_for_timeout(400)
+    feature_dir = output_dir / "feature_graphic"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"feature_graphic_{slugify(selection.caption)}.png"
+    target = feature_dir / filename
+    await page.screenshot(path=str(target), full_page=True, timeout=60000)
+    await page.close()
+    print(f"[+] Saved {target}")
+    return [target]
 
 
 def inline_module_source(path: Path, root: bool = True, visited=None) -> str:
@@ -462,6 +848,19 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store generated screenshots.",
     )
     parser.add_argument(
+        "--feature-graphic",
+        action="store_true",
+        help="Generate the feature graphic (1024x500) instead of device screenshots.",
+    )
+    parser.add_argument(
+        "--feature-picks",
+        help="Comma-separated screenshot indexes to include in the feature graphic (only used with --feature-graphic).",
+    )
+    parser.add_argument(
+        "--feature-caption",
+        help="Override caption text for the generated feature graphic.",
+    )
+    parser.add_argument(
         "--width",
         type=int,
         default=1440,
@@ -503,8 +902,12 @@ async def main_async(args: argparse.Namespace) -> List[Path]:
     if not devices:
         raise RuntimeError("No showcase data found in homepage template.")
 
-    if args.device == "all":
-        targets: Iterable[str] = parser.showcase_data.keys()
+    feature_selection: FeatureGraphicInput | None = None
+    if args.feature_graphic:
+        feature_selection = prepare_feature_graphic_input(parser, args)
+        targets: Iterable[str] = []
+    elif args.device == "all":
+        targets = parser.showcase_data.keys()
     else:
         targets = [args.device]
 
@@ -513,49 +916,60 @@ async def main_async(args: argparse.Namespace) -> List[Path]:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=args.headless)
         try:
-            for device in targets:
-                if device not in parser.showcase_data:
-                    print(f"[!] Skipping unknown device '{device}' (not in template)")
-                    continue
-                device_meta = parser.device_meta.get(device)
-                if not device_meta:
-                    print(f"[!] Missing device config for '{device}', skipping.")
-                    continue
-                component_source = load_component_source(device_meta.component)
-
-                processed_items: List[ShowcaseItem] = []
-                for item in parser.showcase_data[device]:
-                    asset_path = parser.resolve_static_path(item.src)
-                    processed_items.append(
-                        ShowcaseItem(
-                            device=item.device,
-                            src=image_to_data_url(asset_path),
-                            alt=item.alt,
-                            caption=item.caption,
-                            description=item.description,
-                        )
-                    )
-
-                viewport_width, viewport_height = DEVICE_VIEWPORT.get(
-                    device,
-                    (args.width, args.height),
-                )
-                frame_width_expr = resolve_frame_width(device, viewport_width, args.frame_width)
-                orientation = DEVICE_ORIENTATION.get(device, DEFAULT_ORIENTATION)
-                device_dir = args.output_dir / device
-                saved = await render_assets(
+            if args.feature_graphic:
+                if not feature_selection:
+                    raise RuntimeError("Feature graphic selection could not be prepared.")
+                saved = await render_feature_graphic(
                     browser=browser,
-                    items=processed_items,
-                    meta=device_meta,
-                    output_dir=device_dir,
-                    component_source=component_source,
-                    width=viewport_width,
-                    height=viewport_height,
+                    selection=feature_selection,
+                    output_dir=args.output_dir,
                     scale=args.scale,
-                    frame_width_expr=frame_width_expr,
-                    orientation=orientation,
                 )
                 generated.extend(saved)
+            else:
+                for device in targets:
+                    if device not in parser.showcase_data:
+                        print(f"[!] Skipping unknown device '{device}' (not in template)")
+                        continue
+                    device_meta = parser.device_meta.get(device)
+                    if not device_meta:
+                        print(f"[!] Missing device config for '{device}', skipping.")
+                        continue
+                    component_source = load_component_source(device_meta.component)
+
+                    processed_items: List[ShowcaseItem] = []
+                    for item in parser.showcase_data[device]:
+                        asset_path = parser.resolve_static_path(item.src)
+                        processed_items.append(
+                            ShowcaseItem(
+                                device=item.device,
+                                src=image_to_data_url(asset_path),
+                                alt=item.alt,
+                                caption=item.caption,
+                                description=item.description,
+                            )
+                        )
+
+                    viewport_width, viewport_height = DEVICE_VIEWPORT.get(
+                        device,
+                        (args.width, args.height),
+                    )
+                    frame_width_expr = resolve_frame_width(device, viewport_width, args.frame_width)
+                    orientation = DEVICE_ORIENTATION.get(device, DEFAULT_ORIENTATION)
+                    device_dir = args.output_dir / device
+                    saved = await render_assets(
+                        browser=browser,
+                        items=processed_items,
+                        meta=device_meta,
+                        output_dir=device_dir,
+                        component_source=component_source,
+                        width=viewport_width,
+                        height=viewport_height,
+                        scale=args.scale,
+                        frame_width_expr=frame_width_expr,
+                        orientation=orientation,
+                    )
+                    generated.extend(saved)
         finally:
             await browser.close()
 
