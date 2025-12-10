@@ -64,11 +64,7 @@ DEVICE_VIEWPORT = {
 
 FEATURE_GRAPHIC_SIZE = (1024, 500)
 FEATURE_DEFAULT_CAPTION = "Operate labs and copilots from any screen."
-FEATURE_DEFAULT_SELECTION = [
-    ("phone", 1),
-    ("tablet7", 2),
-    ("tablet10", 4),
-]
+FEATURE_DEFAULT_SELECTION = [2, 6, 13]
 
 
 @dataclass
@@ -113,7 +109,6 @@ class FeatureGraphicShot:
 @dataclass
 class FeatureGraphicInput:
     caption: str
-    subline: str
     shots: List[FeatureCandidate]
 
 
@@ -240,11 +235,18 @@ def collect_feature_candidates(parser: HomeShowcaseParser) -> List[FeatureCandid
 
 def compute_default_feature_indices(candidates: Sequence[FeatureCandidate]) -> List[int]:
     resolved: List[int] = []
-    for device, ordinal in FEATURE_DEFAULT_SELECTION:
-        for candidate in candidates:
-            if candidate.device == device and candidate.device_ordinal == ordinal:
-                resolved.append(candidate.index)
-                break
+    for entry in FEATURE_DEFAULT_SELECTION:
+        if isinstance(entry, tuple):
+            device, ordinal = entry
+            for candidate in candidates:
+                if candidate.device == device and candidate.device_ordinal == ordinal:
+                    if candidate.index not in resolved:
+                        resolved.append(candidate.index)
+                    break
+        else:
+            idx = int(entry)
+            if 1 <= idx <= len(candidates) and idx not in resolved:
+                resolved.append(idx)
     for candidate in candidates:
         if len(resolved) >= 3:
             break
@@ -336,13 +338,11 @@ def prepare_feature_graphic_input(
     selected = [candidate for candidate in candidates if candidate.index in order_map]
     selected.sort(key=lambda candidate: order_map[candidate.index])
     caption = resolve_feature_caption(args, interactive)
-    device_labels = [shot.device_label for shot in selected]
-    subline = " + ".join(device_labels) + " ready"
     print("Selected screenshots:")
     for shot in selected:
         print(f" - #{shot.index:02d} {shot.device_label} / {shot.filename} — {shot.caption}")
     print(f"Feature caption: {caption}\n")
-    return FeatureGraphicInput(caption=caption, subline=subline, shots=selected)
+    return FeatureGraphicInput(caption=caption, shots=selected)
 
 
 def resolve_frame_width(device: str, viewport_width: int, override: str | None) -> str:
@@ -542,33 +542,61 @@ def build_html_document(
 
 
 def compute_feature_shot_width(device: str, slot_index: int) -> int:
-    base = 230 if device == "phone" else 330
+    if device == "phone":
+        return 154
+    if device == "tablet7":
+        return 385
+    return 511
+
+
+def compute_feature_shot_scale(device: str, slot_index: int) -> float:
+    base = 1.0
+    if device == "tablet7":
+        base = 1.08
+    elif device == "tablet10":
+        base = 1.14
     if slot_index == 1:
-        base += 30
-    elif slot_index == 0:
-        base -= 10
+        base += 0.02
     return base
+
+
+def generate_component_scripts(sources: Sequence[str]) -> str:
+    blocks: List[str] = []
+    for source in sources:
+        blocks.append(
+            "\n".join(
+                [
+                    '<script type="module">',
+                    source,
+                    "</script>",
+                ]
+            )
+        )
+    return "\n".join(blocks)
 
 
 def build_feature_graphic_document(
     caption: str,
-    subline: str,
     shots: Sequence[FeatureGraphicShot],
-    component_source: str,
+    component_sources: Sequence[str],
 ) -> str:
     safe_caption = escape(caption)
-    safe_subline = escape(subline)
     shot_markup: List[str] = []
     for idx, shot in enumerate(shots):
         slot_class = f"slot-{idx + 1}"
         width = compute_feature_shot_width(shot.device, idx)
+        scale = compute_feature_shot_scale(shot.device, idx)
         time_attr = ' time="12:30"' if shot.component == "pc-screenshot-frame" else ""
         shot_markup.append(
             dedent(
                 f"""
-                <div class="feature-shot {slot_class} device-{shot.device}" style="--shot-frame-width: {width}px;">
-                    <{shot.component} src="{shot.image_data}" alt="{escape(shot.alt)}"{time_attr} style="--frame-width: var(--shot-frame-width);"></{shot.component}>
-                </div>
+                <{shot.component}
+                    class="shot {slot_class} device-{shot.device}"
+                    src="{shot.image_data}"
+                    alt="{escape(shot.alt)}"
+                    style="--shot-frame-width: {width}px; --frame-width: var(--shot-frame-width); --shot-scale: {scale:.2f};"
+                    {time_attr}>
+                </{shot.component}>
                 """
             ).strip()
         )
@@ -592,107 +620,96 @@ def build_feature_graphic_document(
             margin: 0;
             width: {FEATURE_GRAPHIC_SIZE[0]}px;
             height: {FEATURE_GRAPHIC_SIZE[1]}px;
+            overflow: hidden;
             background:
-                radial-gradient(circle at 10% 10%, rgba(0,255,136,0.15), transparent 50%),
-                radial-gradient(circle at 80% 0%, rgba(56,189,248,0.18), transparent 40%),
-                linear-gradient(130deg, #01030c, #041129 60%, #050a18);
+                radial-gradient(circle at 12% 20%, rgba(0,255,136,0.22), transparent 55%),
+                radial-gradient(circle at 85% -10%, rgba(56,189,248,0.2), transparent 45%),
+                linear-gradient(140deg, #01030c, #041129 60%, #050a18);
         }}
 
         .feature-canvas {{
             width: 100%;
             height: 100%;
-            padding: 40px 50px;
-            display: flex;
-            align-items: stretch;
-            justify-content: space-between;
-            gap: 30px;
-        }}
-
-        .copy-block {{
-            flex: 0 0 40%;
+            padding: 24px 36px;
             display: flex;
             flex-direction: column;
-            justify-content: center;
-            gap: 16px;
+            align-items: flex-start;
+            justify-content: flex-start;
+            gap: 12px;
         }}
 
-        .copy-block .eyebrow {{
-            letter-spacing: 0.3em;
-            text-transform: uppercase;
-            font-size: 0.85rem;
-            color: rgba(248, 250, 252, 0.7);
+        .caption-block {{
+            width: 100%;
+            max-width: none;
+            color: rgba(248, 250, 252, 0.9);
+            line-height: 1.2;
         }}
 
-        .copy-block h1 {{
-            font-size: 3rem;
-            line-height: 1.1;
+        .caption-block h1 {{
+            font-size: 2.3rem;
             margin: 0;
-        }}
-
-        .copy-block .subline {{
-            font-size: 1.05rem;
-            color: rgba(248, 250, 252, 0.75);
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
         }}
 
         .shots {{
-            flex: 1;
             position: relative;
+            width: 100%;
             height: 100%;
-            max-width: 660px;
+            max-width: 920px;
         }}
 
-        .feature-shot {{
+        .shot {{
             position: absolute;
-            width: var(--shot-frame-width, 280px);
-            padding: 14px;
-            border-radius: 32px;
-            background: rgba(2, 6, 20, 0.92);
+            width: var(--shot-frame-width, 320px);
+            padding: 0;
+            border-radius: 50px;
+            background: transparent;
             box-shadow:
-                0 35px 90px rgba(0, 0, 0, 0.65),
-                0 12px 35px rgba(15, 118, 110, 0.24);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+                0 45px 110px rgba(0, 0, 0, 0.75),
+                0 18px 45px rgba(15, 118, 110, 0.35);
+            border: none;
         }}
 
-        .feature-shot pc-screenshot-frame,
-        .feature-shot pc-tablet-frame {{
+        .shot pc-screenshot-frame,
+        .shot pc-tablet-frame {{
             width: 100%;
             display: block;
         }}
 
-        .feature-shot.slot-1 {{
-            top: 90px;
-            left: 20px;
-            transform: rotate(-8deg);
+        .shot.slot-1 {{
+            bottom: 20px;
+            left: 30px;
+            transform: rotate(-6deg) scale(var(--shot-scale, 1));
+            z-index: 2;
         }}
 
-        .feature-shot.slot-2 {{
-            top: 20px;
-            left: 210px;
-            transform: rotate(1.5deg);
+        .shot.slot-2 {{
+            bottom: 18px;
+            left: 200px;
+            transform: scale(var(--shot-scale, 1));
             z-index: 3;
         }}
 
-        .feature-shot.slot-3 {{
-            top: 120px;
-            left: 360px;
-            transform: rotate(9deg);
+        .shot.slot-3 {{
+            bottom: 12px;
+            right: 20px;
+            transform: scale(var(--shot-scale, 1));
+            z-index: 1;
         }}
     </style>
 </head>
 <body>
     <div class="feature-canvas">
-        <div class="copy-block">
-            <span class="eyebrow">Portacode</span>
+        <div class="caption-block">
             <h1>{safe_caption}</h1>
-            <p class="subline">{safe_subline}</p>
         </div>
         <div class="shots">
             {shots_html}
         </div>
     </div>
-    <script type="module">
-{component_source}
-    </script>
+{generate_component_scripts(component_sources)}
 </body>
 </html>
 """
@@ -739,7 +756,7 @@ async def render_assets(
     return saved_paths
 
 
-def build_feature_shots_payload(selection: FeatureGraphicInput) -> tuple[List[FeatureGraphicShot], str]:
+def build_feature_shots_payload(selection: FeatureGraphicInput) -> tuple[List[FeatureGraphicShot], List[str]]:
     shots: List[FeatureGraphicShot] = []
     ordered_components: List[str] = []
     seen: set[str] = set()
@@ -758,8 +775,8 @@ def build_feature_shots_payload(selection: FeatureGraphicInput) -> tuple[List[Fe
         if shot.component not in seen:
             seen.add(shot.component)
             ordered_components.append(shot.component)
-    component_source = "\n\n".join(load_component_source(tag) for tag in ordered_components)
-    return shots, component_source
+    component_sources = [load_component_source(tag) for tag in ordered_components]
+    return shots, component_sources
 
 
 async def render_feature_graphic(
@@ -769,8 +786,8 @@ async def render_feature_graphic(
     scale: float,
 ) -> List[Path]:
     width, height = FEATURE_GRAPHIC_SIZE
-    shots, component_source = build_feature_shots_payload(selection)
-    html = build_feature_graphic_document(selection.caption, selection.subline, shots, component_source)
+    shots, component_sources = build_feature_shots_payload(selection)
+    html = build_feature_graphic_document(selection.caption, shots, component_sources)
     page: Page = await browser.new_page(
         viewport={"width": width, "height": height},
         device_scale_factor=scale,
@@ -781,7 +798,7 @@ async def render_feature_graphic(
     feature_dir.mkdir(parents=True, exist_ok=True)
     filename = f"feature_graphic_{slugify(selection.caption)}.png"
     target = feature_dir / filename
-    await page.screenshot(path=str(target), full_page=True, timeout=60000)
+    await page.screenshot(path=str(target), full_page=False, timeout=60000)
     await page.close()
     print(f"[+] Saved {target}")
     return [target]
@@ -879,6 +896,12 @@ def parse_args() -> argparse.Namespace:
         help="Device scale factor for crisp output (default 2.0).",
     )
     parser.add_argument(
+        "--feature-scale",
+        type=float,
+        default=1.0,
+        help="Device scale factor for the feature graphic (default 1.0 to keep 1024×500).",
+    )
+    parser.add_argument(
         "--frame-width",
         default=None,
         help="Override CSS width expression for frames (e.g. 'min(80vw, 1500px)').",
@@ -923,7 +946,7 @@ async def main_async(args: argparse.Namespace) -> List[Path]:
                     browser=browser,
                     selection=feature_selection,
                     output_dir=args.output_dir,
-                    scale=args.scale,
+                    scale=args.feature_scale,
                 )
                 generated.extend(saved)
             else:
