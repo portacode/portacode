@@ -40,6 +40,27 @@ COMPONENT_MODULES = {
 
 IMPORT_PATTERN = re.compile(r'^(\s*)import\s+(.+?)\s+from\s+[\'"](.+?)[\'"];?\s*$')
 
+DEFAULT_FRAME_WIDTH = (0.78, 1400)  # ratio of viewport width, max pixels
+DEVICE_FRAME_WIDTH = {
+    "phone": (0.78, 1400),
+    "tablet7": (0.82, 1800),
+    "tablet10": (0.82, 2000),
+}
+
+DEFAULT_ORIENTATION = "portrait"
+DEVICE_ORIENTATION = {
+    "phone": "portrait",
+    "tablet7": "landscape",
+    "tablet10": "landscape",
+}
+
+DEFAULT_VIEWPORT = (1440, 2560)
+DEVICE_VIEWPORT = {
+    "phone": (1440, 2560),
+    "tablet7": (2560, 1440),
+    "tablet10": (2880, 1620),
+}
+
 
 @dataclass
 class ShowcaseItem:
@@ -146,91 +167,174 @@ def slugify(value: str) -> str:
     return value or "screenshot"
 
 
+def resolve_frame_width(device: str, viewport_width: int, override: str | None) -> str:
+    if override:
+        return override
+    ratio, cap = DEVICE_FRAME_WIDTH.get(device, DEFAULT_FRAME_WIDTH)
+    width = min(int(viewport_width * ratio), cap)
+    return f"{width}px"
+
+
 def build_html_document(
     item: ShowcaseItem,
     component_tag: str,
     component_source: str,
+    frame_width_expr: str,
+    orientation: str,
 ) -> str:
     """Compose a minimal HTML document that renders the framed screenshot."""
-    styles = dedent(
-        """
-        :root {
-            font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            color: #f8fafc;
-            --night: #01050f;
-            --deep: #031126;
-            --accent: #00ff88;
-        }
+    if orientation == "landscape":
+        styles = dedent(
+            """
+            :root {
+                font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                color: #f8fafc;
+                --night: #01050f;
+                --deep: #031126;
+            }
 
-        * {
-            box-sizing: border-box;
-        }
+            * {
+                box-sizing: border-box;
+            }
 
-        body {
-            margin: 0;
-            width: 100%;
-            height: 100%;
-            min-height: 100vh;
-            background:
-                radial-gradient(circle at 15% 10%, rgba(0,255,136,0.2), transparent 55%),
-                radial-gradient(circle at 80% 5%, rgba(56,189,248,0.25), transparent 50%),
-                linear-gradient(180deg, var(--night), var(--deep));
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
+            body {
+                margin: 0;
+                width: 100%;
+                height: 100%;
+                min-height: 100vh;
+                background:
+                    radial-gradient(circle at 20% 35%, rgba(0,255,136,0.16), transparent 55%),
+                    radial-gradient(circle at 85% 10%, rgba(56,189,248,0.25), transparent 50%),
+                    linear-gradient(135deg, var(--night), var(--deep));
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                overflow: hidden;
+            }
 
-        .frame-canvas {
-            width: 100%;
-            height: 100%;
-            padding: 80px 80px 90px;
-            display: flex;
-            flex-direction: column;
-            justify-content: flex-start;
-            align-items: center;
-            gap: 40px;
-            background:
-                linear-gradient(135deg, rgba(2,8,20,0.92), rgba(3,16,36,0.98)),
-                radial-gradient(circle at center, rgba(0,0,0,0.25), transparent 80%);
-        }
+            .frame-canvas {
+                width: 100%;
+                height: 100%;
+                padding: 70px 100px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 80px;
+                background:
+                    linear-gradient(120deg, rgba(1,6,15,0.95), rgba(3,16,36,0.98)),
+                    radial-gradient(circle at 35% 40%, rgba(0,0,0,0.28), transparent 75%);
+            }
 
-        .caption-block {
-            width: 100%;
-            max-width: 1100px;
-            text-align: left;
-            z-index: 2;
-        }
+            .caption-block {
+                flex: 0 0 34%;
+                max-width: 620px;
+            }
 
-        h1 {
-            font-size: 5rem;
-            line-height: 1.05;
-            margin: 0;
-            color: #f8fafc;
-        }
+            h1 {
+                font-size: 4.6rem;
+                line-height: 1.05;
+                margin: 0;
+                color: #f8fafc;
+            }
 
-        .frame-area {
-            flex: 1;
-            width: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding-top: 30px;
-            margin-top: 30px;
-            z-index: 1;
-        }
+            .frame-area {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
 
-        .frame-area pc-screenshot-frame,
-        .frame-area pc-tablet-frame {
-            width: min(78vw, 1400px);
-            filter:
-                drop-shadow(0 40px 120px rgba(0, 0, 0, 0.75))
-                drop-shadow(0 0 60px rgba(0, 255, 136, 0.1));
-            transform: rotate(-2deg);
-            transform-origin: center;
-        }
-        """
-    )
+            .frame-area pc-screenshot-frame,
+            .frame-area pc-tablet-frame {
+                width: FRAME_WIDTH_VALUE;
+                filter:
+                    drop-shadow(0 30px 110px rgba(0, 0, 0, 0.7))
+                    drop-shadow(0 0 45px rgba(0, 255, 136, 0.14));
+                transform: rotate(-1.1deg);
+                transform-origin: center;
+            }
+            """
+        )
+    else:
+        styles = dedent(
+            """
+            :root {
+                font-family: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                color: #f8fafc;
+                --night: #01050f;
+                --deep: #031126;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                width: 100%;
+                height: 100%;
+                min-height: 100vh;
+                background:
+                    radial-gradient(circle at 15% 10%, rgba(0,255,136,0.2), transparent 55%),
+                    radial-gradient(circle at 80% 5%, rgba(56,189,248,0.25), transparent 50%),
+                    linear-gradient(180deg, var(--night), var(--deep));
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                overflow: hidden;
+            }
+
+            .frame-canvas {
+                width: 100%;
+                height: 100%;
+                padding: 80px 80px 90px;
+                display: flex;
+                flex-direction: column;
+                justify-content: flex-start;
+                align-items: center;
+                gap: 40px;
+                background:
+                    linear-gradient(135deg, rgba(2,8,20,0.92), rgba(3,16,36,0.98)),
+                    radial-gradient(circle at center, rgba(0,0,0,0.25), transparent 80%);
+            }
+
+            .caption-block {
+                width: 100%;
+                max-width: 1100px;
+                text-align: left;
+                z-index: 2;
+            }
+
+            h1 {
+                font-size: 5rem;
+                line-height: 1.05;
+                margin: 0;
+                color: #f8fafc;
+            }
+
+            .frame-area {
+                flex: 1;
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding-top: 30px;
+                margin-top: 30px;
+                z-index: 1;
+            }
+
+            .frame-area pc-screenshot-frame,
+            .frame-area pc-tablet-frame {
+                width: FRAME_WIDTH_VALUE;
+                filter:
+                    drop-shadow(0 40px 120px rgba(0, 0, 0, 0.75))
+                    drop-shadow(0 0 60px rgba(0, 255, 136, 0.1));
+                transform: rotate(-2deg);
+                transform-origin: center;
+            }
+            """
+        )
+    styles = styles.replace("FRAME_WIDTH_VALUE", frame_width_expr)
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -245,7 +349,7 @@ def build_html_document(
             <h1>{item.caption}</h1>
         </header>
         <div class="frame-area">
-            <{component_tag} src="{item.src}" alt="{item.alt}" time="12:30" style="--frame-width: min(78vw, 1400px);"></{component_tag}>
+            <{component_tag} src="{item.src}" alt="{item.alt}" time="12:30" style="--frame-width: {frame_width_expr};"></{component_tag}>
         </div>
     </div>
     <script type="module">
@@ -266,6 +370,8 @@ async def render_assets(
     width: int,
     height: int,
     scale: float,
+    frame_width_expr: str,
+    orientation: str,
 ) -> List[Path]:
     """Render each showcase item to a framed screenshot with Playwright."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -276,7 +382,13 @@ async def render_assets(
             viewport={"width": width, "height": height},
             device_scale_factor=scale,
         )
-        html = build_html_document(item, meta.component, component_source)
+        html = build_html_document(
+            item,
+            meta.component,
+            component_source,
+            frame_width_expr,
+            orientation,
+        )
         await page.set_content(html, wait_until="load")
         await page.wait_for_timeout(400)
 
@@ -368,6 +480,11 @@ def parse_args() -> argparse.Namespace:
         help="Device scale factor for crisp output (default 2.0).",
     )
     parser.add_argument(
+        "--frame-width",
+        default=None,
+        help="Override CSS width expression for frames (e.g. 'min(80vw, 1500px)').",
+    )
+    parser.add_argument(
         "--headed",
         dest="headless",
         action="store_false",
@@ -419,6 +536,12 @@ async def main_async(args: argparse.Namespace) -> List[Path]:
                         )
                     )
 
+                viewport_width, viewport_height = DEVICE_VIEWPORT.get(
+                    device,
+                    (args.width, args.height),
+                )
+                frame_width_expr = resolve_frame_width(device, viewport_width, args.frame_width)
+                orientation = DEVICE_ORIENTATION.get(device, DEFAULT_ORIENTATION)
                 device_dir = args.output_dir / device
                 saved = await render_assets(
                     browser=browser,
@@ -426,9 +549,11 @@ async def main_async(args: argparse.Namespace) -> List[Path]:
                     meta=device_meta,
                     output_dir=device_dir,
                     component_source=component_source,
-                    width=args.width,
-                    height=args.height,
+                    width=viewport_width,
+                    height=viewport_height,
                     scale=args.scale,
+                    frame_width_expr=frame_width_expr,
+                    orientation=orientation,
                 )
                 generated.extend(saved)
         finally:
