@@ -67,3 +67,8 @@ menas@portacode-streamer:~/portacode$
 
 
 not showing any errors, however, it got disconnected from the server and is still showing as offline on the server
+
+
+# @ Update 16th of Decemner 2025
+
+Very similar issue has been reported, with pretty much same symptoms, except that the device shows in the dashboard as online, but is irresponsive where it's not even updating CPU usage, not loading initial data when the client connects, no websocket messages at all from the device, yet it's reported as online in the dashboard. It's worth mentioning that when it happens, the only way we managed to restore the connection without killing the sessions running in the device (ie. without restarting the portacode service in the device) was by restarting the server itself, where it has to re-establish the connection. Hopefully restarting the internet connetion as well can fix the issue. That indicates that the issue is mostly that the websocket connection is actually alive but something in its driver is hanging and isn't even restarting
