@@ -45,6 +45,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_read`](#file_read)
     - [`file_search`](#file_search)
     - [`file_write`](#file_write)
+    - [`file_apply_diff`](#file_apply_diff)
     - [`directory_list`](#directory_list)
     - [`file_info`](#file_info)
     - [`file_delete`](#file_delete)
@@ -83,6 +84,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_read_response`](#file_read_response)
     - [`file_search_response`](#file_search_response)
     - [`file_write_response`](#file_write_response)
+    - [`file_apply_diff_response`](#file_apply_diff_response)
     - [`directory_list_response`](#directory_list_response)
     - [`file_info_response`](#file_info_response)
     - [`file_delete_response`](#file_delete_response)
@@ -371,6 +373,31 @@ Writes content to a file. Handled by [`file_write`](./file_handlers.py).
 **Responses:**
 
 *   On success, the device will respond with a [`file_write_response`](#file_write_response) event.
+
+### `file_apply_diff`
+
+Apply one or more unified diff hunks to local files. Handled by [`file_apply_diff`](./diff_handlers.py).
+
+**Request Payload:**
+
+```json
+{
+  "cmd": "file_apply_diff",
+  "diff": "<unified diff string>",
+  "base_path": "<optional base path for relative diff entries>",
+  "project_id": "<server project UUID>",
+  "source_client_session": "<originating session/channel>"
+}
+```
+
+**Behavior:**
+
+* `diff` must be standard unified diff text (like `git diff` output). Multiple files per diff are supported.
+* If `base_path` is omitted the handler will attempt to derive the active project root from `source_client_session`, falling back to the device working directory.
+* Each file hunk is validated before writing; context mismatches or missing files return per-file errors without aborting the rest.
+* `/dev/null` entries are interpreted as file creations/deletions.
+
+*   On completion the device responds with [`file_apply_diff_response`](#file_apply_diff_response).
 *   On error, a generic [`error`](#error) event is sent.
 
 ### `directory_list`
@@ -895,6 +922,27 @@ Confirms that a file has been written successfully in response to a `file_write`
 *   `path` (string, mandatory): The path of the file that was written.
 *   `bytes_written` (integer, mandatory): The number of bytes written to the file.
 *   `success` (boolean, mandatory): Indicates whether the write operation was successful.
+
+### <a name="file_apply_diff_response"></a>`file_apply_diff_response`
+
+Reports the outcome of a [`file_apply_diff`](#file_apply_diff) action.
+
+**Event Fields:**
+
+* `event`: Always `"file_apply_diff_response"`.
+* `success`: Boolean indicating whether all hunks succeeded.
+* `status`: `"success"`, `"partial_failure"`, or `"failed"`.
+* `base_path`: Absolute base path used for relative diff entries.
+* `files_changed`: Number of files successfully updated.
+* `results`: Array containing one object per file with:
+  * `path`: Absolute path on the device.
+  * `status`: `"applied"` or `"error"`.
+  * `action`: `"created"`, `"modified"`, or `"deleted"` (present for successes).
+  * `bytes_written`: Bytes written for the file (0 for deletes).
+  * `error`: Error text when the patch failed for that file.
+  * `line`: Optional line number hint for mismatches.
+
+The response is emitted even if some files fail so the caller can retry with corrected diffs.
 
 ### <a name="directory_list_response"></a>`directory_list_response`
 
