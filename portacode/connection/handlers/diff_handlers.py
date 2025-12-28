@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import time
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,18 @@ from ...utils.diff_apply import (
 )
 
 logger = logging.getLogger(__name__)
+_DEBUG_LOG_PATH = os.path.expanduser("~/portacode_diff_debug.log")
+
+
+def _debug_log(message: str) -> None:
+    """Append debug traces for troubleshooting without affecting runtime."""
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        # Ignore logging errors entirely.
+        pass
 
 
 class FileApplyDiffHandler(AsyncHandler):
@@ -24,6 +37,74 @@ class FileApplyDiffHandler(AsyncHandler):
     @property
     def command_name(self) -> str:
         return "file_apply_diff"
+
+    async def handle(self, message: Dict[str, Any], reply_channel: Optional[str] = None) -> None:
+        """Handle the command by executing it and sending the response to the requesting client session."""
+        logger.info("handler: Processing command %s with reply_channel=%s",
+                   self.command_name, reply_channel)
+        _debug_log(
+            f"handle start cmd={self.command_name} request_id={message.get('request_id')} "
+            f"project_id={message.get('project_id')} base_path={message.get('base_path')} "
+            f"diff_chars={len(message.get('diff') or '')}"
+        )
+
+        try:
+            response = await self.execute(message)
+            logger.info("handler: Command %s executed successfully", self.command_name)
+
+            # Automatically copy request_id if present in the incoming message
+            if "request_id" in message and "request_id" not in response:
+                response["request_id"] = message["request_id"]
+
+            # Get the source client session from the message
+            source_client_session = message.get("source_client_session")
+            project_id = response.get("project_id")
+
+            logger.info("handler: %s response project_id=%s, source_client_session=%s",
+                       self.command_name, project_id, source_client_session)
+
+            # Send response only to the requesting client session
+            if source_client_session:
+                # Add client_sessions field to target only the requesting session
+                response["client_sessions"] = [source_client_session]
+
+                import json
+                logger.info("handler: 📤 SENDING EVENT '%s' (via direct control_channel.send)", response.get("event", "unknown"))
+                logger.info("handler: 📤 FULL EVENT PAYLOAD: %s", json.dumps(response, indent=2, default=str))
+
+                await self.control_channel.send(response)
+            else:
+                # Fallback to original behavior if no source_client_session
+                await self.send_response(response, reply_channel, project_id)
+        except Exception as exc:
+            logger.exception("handler: Error in command %s: %s", self.command_name, exc)
+            _debug_log(
+                f"handle error cmd={self.command_name} request_id={message.get('request_id')} error={exc}"
+            )
+            error_payload = {
+                "event": "file_apply_diff_response",
+                "project_id": message.get("project_id"),
+                "base_path": message.get("base_path") or os.getcwd(),
+                "results": [],
+                "files_changed": 0,
+                "status": "error",
+                "success": False,
+                "error": str(exc),
+            }
+            if "request_id" in message:
+                error_payload["request_id"] = message["request_id"]
+
+            source_client_session = message.get("source_client_session")
+            if source_client_session:
+                error_payload["client_sessions"] = [source_client_session]
+                await self.control_channel.send(error_payload)
+            else:
+                await self.send_response(error_payload, reply_channel, message.get("project_id"))
+        else:
+            _debug_log(
+                f"handle complete cmd={self.command_name} request_id={message.get('request_id')} "
+                f"status={(response or {}).get('status') if response else 'no-response'}"
+            )
 
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         diff_text = message.get("diff")
@@ -56,6 +137,10 @@ class FileApplyDiffHandler(AsyncHandler):
         results: List[Dict[str, Any]] = []
         applied_paths: List[str] = []
         loop = asyncio.get_running_loop()
+        _debug_log(
+            f"execute parsed {len(file_patches)} patches base_path={base_path} "
+            f"source_session={source_client_session}"
+        )
 
         for file_patch in file_patches:
             apply_func = partial(apply_file_patch, file_patch, base_path)
@@ -106,7 +191,7 @@ class FileApplyDiffHandler(AsyncHandler):
         elif failure_count and not success_count:
             overall_status = "failed"
 
-        return {
+        response = {
             "event": "file_apply_diff_response",
             "project_id": project_id,
             "base_path": base_path,
@@ -115,3 +200,8 @@ class FileApplyDiffHandler(AsyncHandler):
             "status": overall_status,
             "success": failure_count == 0,
         }
+        _debug_log(
+            f"execute done request_id={message.get('request_id')} success={response['success']} "
+            f"files_changed={success_count} failures={failure_count}"
+        )
+        return response
