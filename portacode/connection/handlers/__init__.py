@@ -26,7 +26,7 @@ from .file_handlers import (
     FileSearchHandler,
     ContentRequestHandler,
 )
-from .diff_handlers import FileApplyDiffHandler
+from .diff_handlers import FileApplyDiffHandler, FilePreviewDiffHandler
 from .project_state_handlers import (
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
@@ -63,6 +63,7 @@ __all__ = [
     "FileSearchHandler",
     "ContentRequestHandler",
     "FileApplyDiffHandler",
+    "FilePreviewDiffHandler",
     # Project state handlers
     "ProjectStateFolderExpandHandler",
     "ProjectStateFolderCollapseHandler",

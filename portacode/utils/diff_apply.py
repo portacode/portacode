@@ -277,3 +277,34 @@ def apply_file_patch(file_patch: FilePatch, base_path: Optional[str]) -> Tuple[s
     bytes_written = sum(len(chunk.encode("utf-8")) for chunk in updated_lines)
     action = "created" if not file_exists else "modified"
     return target_path, action, bytes_written
+
+
+def preview_file_patch(
+    file_patch: FilePatch, base_path: Optional[str]
+) -> Tuple[str, str, List[str], List[str]]:
+    """Compute the before/after contents for a FilePatch without writing to disk.
+
+    Returns:
+        Tuple[target_path, action, original_lines, updated_lines]
+    """
+    target_rel = file_patch.target_path
+    if not target_rel:
+        raise DiffApplyError("Unable to determine target path for diff preview")
+
+    target_path = _normalize_target_path(target_rel, base_path)
+    original_lines, file_exists = _load_file_lines(target_path)
+
+    if file_patch.is_new_file and file_exists:
+        # Treat as modification to allow previewing changes atop an existing file
+        pass
+    elif not file_patch.is_new_file and not file_exists and not file_patch.is_delete:
+        raise DiffApplyError(f"File does not exist: {target_path}", file_path=target_path)
+
+    if file_patch.is_delete:
+        updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        action = "deleted"
+    else:
+        updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        action = "created" if not file_exists else "modified"
+
+    return target_path, action, original_lines, updated_lines

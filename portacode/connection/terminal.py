@@ -37,6 +37,7 @@ from .handlers import (
     FileRenameHandler,
     ContentRequestHandler,
     FileApplyDiffHandler,
+    FilePreviewDiffHandler,
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
     ProjectStateFileOpenHandler,
@@ -454,6 +455,7 @@ class TerminalManager:
         self._command_registry.register(FileSearchHandler)
         self._command_registry.register(ContentRequestHandler)
         self._command_registry.register(FileApplyDiffHandler)
+        self._command_registry.register(FilePreviewDiffHandler)
         # Project state handlers
         self._command_registry.register(ProjectStateFolderExpandHandler)
         self._command_registry.register(ProjectStateFolderCollapseHandler)

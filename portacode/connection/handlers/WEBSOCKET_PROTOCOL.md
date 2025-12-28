@@ -45,7 +45,8 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_read`](#file_read)
     - [`file_search`](#file_search)
     - [`file_write`](#file_write)
-    - [`file_apply_diff`](#file_apply_diff)
+  - [`file_apply_diff`](#file_apply_diff)
+    - [`file_preview_diff`](#file_preview_diff)
     - [`directory_list`](#directory_list)
     - [`file_info`](#file_info)
     - [`file_delete`](#file_delete)
@@ -85,6 +86,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_search_response`](#file_search_response)
     - [`file_write_response`](#file_write_response)
     - [`file_apply_diff_response`](#file_apply_diff_response)
+    - [`file_preview_diff_response`](#file_preview_diff_response)
     - [`directory_list_response`](#directory_list_response)
     - [`file_info_response`](#file_info_response)
     - [`file_delete_response`](#file_delete_response)
@@ -398,6 +400,30 @@ Apply one or more unified diff hunks to local files. Handled by [`file_apply_dif
 * `/dev/null` entries are interpreted as file creations/deletions.
 
 *   On completion the device responds with [`file_apply_diff_response`](#file_apply_diff_response).
+*   On error, a generic [`error`](#error) event is sent.
+
+### `file_preview_diff`
+
+Validate one or more unified diff hunks and render an HTML preview without mutating any files. Handled by [`file_preview_diff`](./diff_handlers.py).
+
+**Request Payload:**
+
+```json
+{
+  "cmd": "file_preview_diff",
+  "diff": "<unified diff string>",
+  "base_path": "<optional base path for relative diff entries>",
+  "request_id": "req_123456"
+}
+```
+
+**Behavior:**
+
+* Reuses the same parser as `file_apply_diff`, so invalid hunks surface the same errors.
+* Produces HTML snippets per file using the device-side renderer. No files are modified.
+* Returns immediately with an error payload if preview generation fails.
+
+*   On completion the device responds with [`file_preview_diff_response`](#file_preview_diff_response).
 *   On error, a generic [`error`](#error) event is sent.
 
 ### `directory_list`
@@ -943,6 +969,24 @@ Reports the outcome of a [`file_apply_diff`](#file_apply_diff) action.
   * `line`: Optional line number hint for mismatches.
 
 The response is emitted even if some files fail so the caller can retry with corrected diffs.
+
+### <a name="file_preview_diff_response"></a>`file_preview_diff_response`
+
+Reports the outcome of a [`file_preview_diff`](#file_preview_diff) action.
+
+**Event Fields:**
+
+* `event`: Always `"file_preview_diff_response"`.
+* `success`: Boolean indicating whether all previews rendered successfully.
+* `status`: `"success"`, `"partial_failure"`, or `"failed"`.
+* `base_path`: Absolute base path used for relative paths.
+* `previews`: Array containing one entry per file with:
+  * `path`: Absolute path hint (used for syntax highlighting).
+  * `relative_path`: Relative project path if known.
+  * `status`: `"ready"` or `"error"`.
+  * `html`: Rendered diff snippet (when status is `"ready"`).
+  * `error`: Error text (when status is `"error"`).
+* `error`: Optional top-level error string when the entire preview failed (e.g., diff parse error).
 
 ### <a name="directory_list_response"></a>`directory_list_response`
 
