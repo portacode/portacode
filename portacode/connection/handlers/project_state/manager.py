@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from asyncio import Lock
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
@@ -236,18 +237,12 @@ class ProjectStateManager:
         for monitored_folder in project_state.monitored_folders:
             self.file_watcher.start_watching(monitored_folder.folder_path)
         
-        # For git repositories, also watch the .git directory for git status changes
+        # Intentionally avoid watching .git; Git status changes are polled separately
         if project_state.is_git_repo:
             git_dir_path = os.path.join(project_state.project_folder_path, '.git')
-            logger.debug("🔍 [TRACE] Project is git repo, checking .git directory: %s", LogCategory.GIT, git_dir_path)
-            if os.path.exists(git_dir_path):
-                logger.debug("🔍 [TRACE] ✅ Starting to watch .git directory: %s", LogCategory.GIT, git_dir_path)
-                self.file_watcher.start_watching_git_directory(git_dir_path)
-                logger.debug("🔍 [TRACE] ✅ Started monitoring .git directory for git status changes: %s", LogCategory.GIT, git_dir_path)
-            else:
-                logger.error("🔍 [TRACE] ❌ .git directory does not exist: %s", LogCategory.GIT, git_dir_path)
+            logger.debug("🔍 [TRACE] Project is git repo, but skipping .git watcher registration: %s", LogCategory.GIT, git_dir_path)
         else:
-            logger.debug("🔍 [TRACE] Project is NOT a git repo, skipping .git directory monitoring", LogCategory.GIT)
+            logger.debug("🔍 [TRACE] Project is NOT a git repo, no .git watcher needed", LogCategory.GIT)
         
         # Watchdog synchronized
     
@@ -972,19 +967,11 @@ class ProjectStateManager:
             # Git repo was created
             logger.debug("🔍 [TRACE] Git repo detected, reinitializing git manager for session: %s", client_session_id)
             git_manager.reinitialize()
-            
-            # Start watching .git directory for git status changes
-            if git_manager.is_git_repo:
-                logger.debug("🔍 [TRACE] Starting to watch .git directory: %s", git_dir_path)
-                self.file_watcher.start_watching_git_directory(git_dir_path)
         elif git_manager.is_git_repo and not git_dir_exists:
             # Git repo was deleted
             logger.debug("🔍 [TRACE] Git repo removed, updating git manager for session: %s", client_session_id)
             git_manager.repo = None
             git_manager.is_git_repo = False
-            
-            # Stop watching .git directory
-            self.file_watcher.stop_watching(git_dir_path)
         
         # Update Git status
         if git_manager:
