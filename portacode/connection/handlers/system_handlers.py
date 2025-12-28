@@ -143,7 +143,7 @@ class SystemInfoHandler(SyncHandler):
         
         # Add OS information - this is critical for proper shell detection
         info["os_info"] = _get_os_info()
-        logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
+        # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__
 

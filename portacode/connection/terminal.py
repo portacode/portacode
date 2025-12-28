@@ -795,9 +795,9 @@ class TerminalManager:
             terminal_id = payload.get("channel", "unknown")
             logger.info("terminal_manager: Dispatching %s event (terminal_id=%s, data_size=%d bytes) to %d client sessions", 
                        event_type, terminal_id, data_size, len(target_sessions))
-        else:
-            logger.info("terminal_manager: Dispatching %s event to %d client sessions", 
-                       event_type, len(target_sessions))
+        # else:
+        #     logger.info("terminal_manager: Dispatching %s event to %d client sessions", 
+        #                event_type, len(target_sessions))
         
         await self._control_channel.send(enhanced_payload)
 
