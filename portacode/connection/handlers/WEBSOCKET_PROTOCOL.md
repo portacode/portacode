@@ -398,6 +398,7 @@ Apply one or more unified diff hunks to local files. Handled by [`file_apply_dif
 * If `base_path` is omitted the handler will attempt to derive the active project root from `source_client_session`, falling back to the device working directory.
 * Each file hunk is validated before writing; context mismatches or missing files return per-file errors without aborting the rest.
 * `/dev/null` entries are interpreted as file creations/deletions.
+* Inline directives are also supported on their own lines. Use `@@delete:relative/path.py@@` to delete a file directly or `@@move:old/path.py -> new/path.py@@` (alias `@@rename:...@@`) to move/rename a file without crafting a diff. Directives are evaluated before the diff hunks and must point to files inside the project base.
 
 *   On completion the device responds with [`file_apply_diff_response`](#file_apply_diff_response).
 *   On error, a generic [`error`](#error) event is sent.
@@ -421,6 +422,7 @@ Validate one or more unified diff hunks and render an HTML preview without mutat
 
 * Reuses the same parser as `file_apply_diff`, so invalid hunks surface the same errors.
 * Produces HTML snippets per file using the device-side renderer. No files are modified.
+* Inline directives (`@@delete:...@@`, `@@move:src -> dest@@`) use the same syntax as `file_apply_diff`. The handler validates them up front and includes them in the preview output so the user can see deletions or moves before clicking “Apply”.
 * Returns immediately with an error payload if preview generation fails.
 
 *   On completion the device responds with [`file_preview_diff_response`](#file_preview_diff_response).

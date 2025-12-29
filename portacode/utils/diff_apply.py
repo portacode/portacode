@@ -124,11 +124,20 @@ def parse_unified_diff(diff_text: str) -> List[FilePatch]:
 
             hunk_lines: List[PatchLine] = []
             while i < len(lines):
-                prefix = lines[i][:1]
+                current_line = lines[i]
+                prefix = current_line[:1]
+                # Stop if we encounter the start of the next file diff
+                if current_line.startswith("diff --git ") or current_line.startswith("--- "):
+                    break
                 if prefix in {" ", "+", "-"}:
-                    hunk_lines.append(PatchLine(prefix, lines[i][1:]))
+                    # Guard against accidental file headers inside a hunk
+                    if prefix == "-" and current_line.startswith("--- "):
+                        break
+                    if prefix == "+" and current_line.startswith("+++ "):
+                        break
+                    hunk_lines.append(PatchLine(prefix, current_line[1:]))
                     i += 1
-                elif lines[i].startswith("\\ No newline at end of file"):
+                elif current_line.startswith("\\ No newline at end of file"):
                     # Skip metadata line but keep processing
                     i += 1
                 else:
@@ -301,7 +310,9 @@ def preview_file_patch(
         raise DiffApplyError(f"File does not exist: {target_path}", file_path=target_path)
 
     if file_patch.is_delete:
-        updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        # Validate the hunks but the resulting file will be removed entirely
+        _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        updated_lines = []
         action = "deleted"
     else:
         updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)

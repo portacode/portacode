@@ -1,19 +1,22 @@
 """Handlers for applying unified diffs to project files."""
 
 import asyncio
-import difflib
 import logging
 import os
+import re
 import time
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base import AsyncHandler
 from .project_state.manager import get_or_create_project_state_manager
-from .project_state.git_manager import GitManager
+from ...utils import diff_renderer
 from ...utils.diff_apply import (
     DiffApplyError,
     DiffParseError,
+    FilePatch,
+    Hunk,
+    PatchLine,
     apply_file_patch,
     preview_file_patch,
     parse_unified_diff,
@@ -41,6 +44,146 @@ def _resolve_preview_path(base_path: str, relative_path: Optional[str]) -> str:
     if os.path.isabs(relative_path):
         return relative_path
     return os.path.abspath(os.path.join(base_path, relative_path))
+
+
+_DIRECTIVE_LINE_PATTERN = re.compile(r"^@@(?P<cmd>[a-z_]+):(?P<body>.+)@@$", re.IGNORECASE)
+
+
+def _normalize_directive_path(raw: str) -> str:
+    """Normalize relative paths referenced by inline directives."""
+    if raw is None:
+        raise ValueError("Path is required")
+    candidate = os.path.normpath(raw.strip())
+    if candidate in ("", ".", ".."):
+        raise ValueError("Path must reference a file inside the project")
+    if os.path.isabs(candidate):
+        raise ValueError("Absolute paths are not allowed in inline directives")
+    if candidate.startswith(".."):
+        raise ValueError("Path cannot traverse outside the project")
+    return candidate
+
+
+def _extract_inline_directives(diff_text: str) -> Tuple[str, List[Dict[str, str]]]:
+    """Strip inline @@command directives and return (clean_diff, directives)."""
+    if not diff_text:
+        return "", []
+
+    directives: List[Dict[str, str]] = []
+    remaining_lines: List[str] = []
+
+    for line in diff_text.splitlines(keepends=True):
+        stripped = line.strip()
+        match = _DIRECTIVE_LINE_PATTERN.match(stripped)
+        if not match:
+            remaining_lines.append(line)
+            continue
+
+        cmd = match.group("cmd").lower()
+        body = (match.group("body") or "").strip()
+        if not body:
+            raise ValueError(f"Inline directive '{cmd}' is missing required arguments")
+
+        if cmd == "delete":
+            directives.append(
+                {
+                    "type": "delete",
+                    "path": _normalize_directive_path(body),
+                }
+            )
+        elif cmd in {"move", "rename"}:
+            if "->" not in body:
+                raise ValueError("move directive must be formatted as 'source -> destination'")
+            source_raw, dest_raw = body.split("->", 1)
+            source = _normalize_directive_path(source_raw)
+            destination = _normalize_directive_path(dest_raw)
+            if source == destination:
+                raise ValueError("Source and destination paths must be different for move directives")
+            directives.append(
+                {
+                    "type": "move",
+                    "source": source,
+                    "destination": destination,
+                }
+            )
+        else:
+            raise ValueError(f"Unknown inline directive '{cmd}'")
+
+    return "".join(remaining_lines), directives
+
+
+def _resolve_directive_path(base_path: str, relative_path: str) -> str:
+    """Resolve a directive path and enforce that it stays inside the project root."""
+    root = os.path.abspath(base_path or os.getcwd())
+    target = os.path.abspath(os.path.join(root, relative_path))
+    if os.path.commonpath([root, target]) != root:
+        raise DiffApplyError(f"Path escapes project root: {relative_path}", file_path=target)
+    return target
+
+
+def _read_all_lines(abs_path: str) -> List[str]:
+    """Load file content for directive handling."""
+    try:
+        with open(abs_path, "r", encoding="utf-8") as fh:
+            data = fh.read()
+        return data.splitlines(keepends=True)
+    except FileNotFoundError as exc:
+        raise DiffApplyError(f"File does not exist: {abs_path}", file_path=abs_path) from exc
+    except OSError as exc:
+        raise DiffApplyError(f"Unable to read file: {abs_path}", file_path=abs_path) from exc
+
+
+def _build_delete_patch(relative_path: str, lines: List[str]) -> FilePatch:
+    """Construct a FilePatch that removes an entire file."""
+    hunk = Hunk(
+        old_start=1,
+        old_length=len(lines),
+        new_start=1,
+        new_length=0,
+        lines=[PatchLine("-", line) for line in lines],
+    )
+    return FilePatch(old_path=relative_path, new_path="/dev/null", hunks=[hunk])
+
+
+def _build_add_patch(relative_path: str, lines: List[str]) -> FilePatch:
+    """Construct a FilePatch that creates a file with the provided lines."""
+    hunk = Hunk(
+        old_start=1,
+        old_length=0,
+        new_start=1,
+        new_length=len(lines),
+        lines=[PatchLine("+", line) for line in lines],
+    )
+    return FilePatch(old_path="/dev/null", new_path=relative_path, hunks=[hunk])
+
+
+def _build_directive_patches(directives: List[Dict[str, str]], base_path: str) -> List[FilePatch]:
+    """Translate inline directives into concrete FilePatch objects."""
+    if not directives:
+        return []
+
+    patches: List[FilePatch] = []
+    base = base_path or os.getcwd()
+
+    for directive in directives:
+        if directive["type"] == "delete":
+            rel_path = directive["path"]
+            abs_path = _resolve_directive_path(base, rel_path)
+            lines = _read_all_lines(abs_path)
+            patches.append(_build_delete_patch(rel_path, lines))
+        elif directive["type"] == "move":
+            source_rel = directive["source"]
+            dest_rel = directive["destination"]
+            source_abs = _resolve_directive_path(base, source_rel)
+            dest_abs = _resolve_directive_path(base, dest_rel)
+            if os.path.exists(dest_abs):
+                raise DiffApplyError(f"Destination already exists: {dest_abs}", file_path=dest_abs)
+            lines = _read_all_lines(source_abs)
+            patches.append(_build_delete_patch(source_rel, lines))
+            patches.append(_build_add_patch(dest_rel, lines))
+        else:
+            raise DiffApplyError(f"Unsupported directive: {directive['type']}")
+
+    return patches
 
 
 class FileApplyDiffHandler(AsyncHandler):
@@ -142,9 +285,25 @@ class FileApplyDiffHandler(AsyncHandler):
         logger.info("file_apply_diff: Using base path %s", base_path)
 
         try:
-            file_patches = parse_unified_diff(diff_text)
-        except DiffParseError as exc:
-            raise ValueError(f"Invalid diff content: {exc}") from exc
+            cleaned_diff, directives = _extract_inline_directives(diff_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid inline directive: {exc}") from exc
+
+        file_patches: List[FilePatch] = []
+        if cleaned_diff.strip():
+            try:
+                file_patches = parse_unified_diff(cleaned_diff)
+            except DiffParseError as exc:
+                raise ValueError(f"Invalid diff content: {exc}") from exc
+
+        try:
+            directive_patches = _build_directive_patches(directives, base_path)
+            file_patches = directive_patches + file_patches
+        except DiffApplyError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if not file_patches:
+            raise ValueError("No file changes were provided")
 
         results: List[Dict[str, Any]] = []
         applied_paths: List[str] = []
@@ -325,12 +484,27 @@ class FilePreviewDiffHandler(AsyncHandler):
         logger.info("file_preview_diff: Using base path %s", base_path)
 
         try:
-            file_patches = parse_unified_diff(diff_text)
-        except DiffParseError as exc:
-            raise ValueError(f"Invalid diff content: {exc}") from exc
+            cleaned_diff, directives = _extract_inline_directives(diff_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid inline directive: {exc}") from exc
+
+        file_patches: List[FilePatch] = []
+        if cleaned_diff.strip():
+            try:
+                file_patches = parse_unified_diff(cleaned_diff)
+            except DiffParseError as exc:
+                raise ValueError(f"Invalid diff content: {exc}") from exc
+
+        try:
+            directive_patches = _build_directive_patches(directives, base_path)
+            file_patches = directive_patches + file_patches
+        except DiffApplyError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if not file_patches:
+            raise ValueError("No file changes were provided")
 
         previews: List[Dict[str, Any]] = []
-        git_manager = GitManager(base_path)
 
         for file_patch in file_patches:
             target_hint = file_patch.target_path or file_patch.new_path or file_patch.old_path
@@ -358,59 +532,31 @@ class FilePreviewDiffHandler(AsyncHandler):
                 continue
 
             try:
-                label = target_hint or os.path.basename(preview_path) or "file"
-                minimal_diff_lines = list(
-                    difflib.unified_diff(
-                        original_lines,
-                        updated_lines,
-                        fromfile=f"a/{label}",
-                        tofile=f"b/{label}",
-                        lineterm="",
-                        n=3,
-                    )
-                )
-
-                total_lines = len(original_lines) + len(updated_lines)
-                if total_lines <= 2000:
-                    context_span = max(len(original_lines), len(updated_lines), 3)
-                    full_diff_lines = list(
-                        difflib.unified_diff(
-                            original_lines,
-                            updated_lines,
-                            fromfile=f"a/{label}",
-                            tofile=f"b/{label}",
-                            lineterm="",
-                            n=context_span,
-                        )
-                    )
+                if file_action == "deleted":
+                    preview_action = "deleted"
+                elif file_action == "created":
+                    preview_action = "added"
                 else:
-                    full_diff_lines = minimal_diff_lines
+                    preview_action = "modified"
 
-                parsed_minimal = git_manager._parse_unified_diff_simple(minimal_diff_lines)
-                minimal_html = git_manager._generate_diff_html(
-                    parsed_minimal, display_path, "minimal"
+                original_text = "".join(original_lines)
+                updated_text = "".join(updated_lines)
+                html_versions = diff_renderer.generate_html_diff(
+                    original_text, updated_text, display_path
                 )
-
-                if full_diff_lines != minimal_diff_lines:
-                    parsed_full = git_manager._parse_unified_diff_simple(full_diff_lines)
-                    full_html = git_manager._generate_diff_html(
-                        parsed_full, display_path, "full"
-                    )
-                else:
-                    full_html = minimal_html
+                if not html_versions:
+                    fallback = diff_renderer.generate_fallback_diff_html(display_path)
+                    html_versions = {"minimal": fallback, "full": fallback}
 
                 previews.append(
                     {
                         "path": display_path,
                         "relative_path": target_hint,
                         "status": "ready",
-                        "html": minimal_html,
-                        "html_versions": {
-                            "minimal": minimal_html,
-                            "full": full_html,
-                        },
-                        "has_full": full_html != minimal_html,
-                        "action": file_action,
+                        "html": html_versions["minimal"],
+                        "html_versions": html_versions,
+                        "has_full": html_versions["minimal"] != html_versions["full"],
+                        "action": preview_action,
                     }
                 )
             except Exception as exc:

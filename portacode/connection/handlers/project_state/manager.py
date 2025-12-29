@@ -36,6 +36,8 @@ class ProjectStateManager:
         self.context = context
         self.projects: Dict[str, ProjectState] = {}
         self.git_managers: Dict[str, GitManager] = {}
+        self._shared_git_managers: Dict[str, Dict[str, Any]] = {}
+        self._shared_git_lock: Lock = Lock()
         self.file_watcher = FileSystemWatcher(self)
         self.debug_mode = False
         self.debug_file_path: Optional[str] = None
@@ -139,6 +141,58 @@ class ProjectStateManager:
                 metadata.pop('diff_details', None)
             
         return tab_dict
+
+    async def _handle_shared_git_change(self, project_folder_path: str):
+        """Notify all sessions for a project when the shared git manager detects changes."""
+        async with self._shared_git_lock:
+            entry = self._shared_git_managers.get(project_folder_path)
+            target_sessions = list(entry["sessions"]) if entry else []
+
+        for session_id in target_sessions:
+            await self._refresh_project_state(session_id, git_only=True, reason="git_monitor")
+
+    async def _acquire_shared_git_manager(self, project_folder_path: str, client_session_id: str) -> GitManager:
+        """Get or create a shared git manager for a project path."""
+        async with self._shared_git_lock:
+            entry = self._shared_git_managers.get(project_folder_path)
+
+            if not entry:
+                async def git_change_callback():
+                    await self._handle_shared_git_change(project_folder_path)
+
+                git_manager = GitManager(
+                    project_folder_path,
+                    change_callback=git_change_callback,
+                    owner_session_id=client_session_id,
+                )
+                entry = {"manager": git_manager, "sessions": set()}
+                self._shared_git_managers[project_folder_path] = entry
+
+            entry["sessions"].add(client_session_id)
+            self.git_managers[client_session_id] = entry["manager"]
+            return entry["manager"]
+
+    async def _release_shared_git_manager(self, project_folder_path: Optional[str], client_session_id: str):
+        """Release a session's reference to a shared git manager and clean it up if unused."""
+        manager_to_cleanup: Optional[GitManager] = None
+
+        async with self._shared_git_lock:
+            manager = self.git_managers.pop(client_session_id, None)
+
+            if not project_folder_path:
+                manager_to_cleanup = manager
+            else:
+                entry = self._shared_git_managers.get(project_folder_path)
+                if entry:
+                    entry["sessions"].discard(client_session_id)
+                    if not entry["sessions"]:
+                        self._shared_git_managers.pop(project_folder_path, None)
+                        manager_to_cleanup = manager or entry["manager"]
+                else:
+                    manager_to_cleanup = manager
+
+        if manager_to_cleanup:
+            manager_to_cleanup.cleanup()
     
     async def initialize_project_state(self, client_session_id: str, project_folder_path: str) -> ProjectState:
         """Initialize project state for a client session."""
@@ -151,22 +205,11 @@ class ProjectStateManager:
                     return existing_project
                 logger.info("Client session %s switching projects from %s to %s",
                             client_session_id, existing_project.project_folder_path, project_folder_path)
-                self._cleanup_project_locked(client_session_id)
+                previous_path = self._cleanup_project_locked(client_session_id)
+                await self._release_shared_git_manager(previous_path, client_session_id)
             
             logger.info("Initializing project state for client session: %s, folder: %s", client_session_id, project_folder_path)
-            
-            # Initialize Git manager with change callback
-            async def git_change_callback():
-                """Callback when git status changes are detected."""
-                logger.info("Git monitor detected status change for session %s", client_session_id)
-                await self._refresh_project_state(client_session_id, git_only=True, reason="git_monitor")
-            
-            git_manager = GitManager(
-                project_folder_path,
-                change_callback=git_change_callback,
-                owner_session_id=client_session_id,
-            )
-            self.git_managers[client_session_id] = git_manager
+            git_manager = await self._acquire_shared_git_manager(project_folder_path, client_session_id)
             
             loop = asyncio.get_event_loop()
             is_git_repo = git_manager.is_git_repo
@@ -1120,11 +1163,13 @@ class ProjectStateManager:
         """Clean up project state and resources."""
         lock = self._get_session_lock(client_session_id)
         async with lock:
-            self._cleanup_project_locked(client_session_id)
+            project_folder_path = self._cleanup_project_locked(client_session_id)
+        await self._release_shared_git_manager(project_folder_path, client_session_id)
 
-    def _cleanup_project_locked(self, client_session_id: str):
+    def _cleanup_project_locked(self, client_session_id: str) -> Optional[str]:
         """Internal helper to release resources associated with a project state. Lock must be held."""
         project_state = self.projects.get(client_session_id)
+        project_folder_path = project_state.project_folder_path if project_state else None
         
         if project_state:
             # Cancel debounce timer to prevent pending refreshes running after cleanup
@@ -1157,11 +1202,9 @@ class ProjectStateManager:
             logger.info("No project state found for client session: %s during cleanup", client_session_id)
         
         # Clean up associated git manager even if project state was not registered
-        git_manager = self.git_managers.get(client_session_id)
-        if git_manager:
-            git_manager.cleanup()
-        self.git_managers.pop(client_session_id, None)
+        # (actual cleanup occurs when shared git manager refcount drops to zero)
         self._write_debug_state()
+        return project_folder_path
     
     async def cleanup_projects_by_client_session(self, client_session_id: str):
         """Clean up project state for a specific client session when explicitly notified of disconnection."""

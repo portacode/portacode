@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -36,20 +37,11 @@ except ImportError:
     DIFF_MATCH_PATCH_AVAILABLE = False
     diff_match_patch = None
 
-# Import Pygments with fallback
-try:
-    from pygments import highlight
-    from pygments.lexers import get_lexer_for_filename, get_lexer_by_name
-    from pygments.formatters import HtmlFormatter
-    from pygments.util import ClassNotFound
-    PYGMENTS_AVAILABLE = True
-except ImportError:
-    PYGMENTS_AVAILABLE = False
-    highlight = None
-    get_lexer_for_filename = None
-    get_lexer_by_name = None
-    HtmlFormatter = None
-    ClassNotFound = Exception
+from portacode.utils import diff_renderer
+
+
+_GIT_PROCESS_REF_COUNTS: Dict[int, int] = {}
+_GIT_PROCESS_LOCK = threading.Lock()
 
 
 class GitManager:
@@ -99,13 +91,17 @@ class GitManager:
         """Track currently running git cat-file processes for this repo."""
         try:
             import psutil
+
             for proc in psutil.process_iter(['pid', 'cmdline', 'cwd']):
                 try:
                     cmdline = proc.info['cmdline']
-                    if (cmdline and len(cmdline) >= 2 and 
-                        'git' in cmdline[0] and 'cat-file' in cmdline[1] and
-                        proc.info['cwd'] == self.project_path):
-                        self._tracked_git_processes.add(proc.pid)
+                    if (cmdline and len(cmdline) >= 2 and
+                            'git' in cmdline[0] and 'cat-file' in cmdline[1] and
+                            proc.info['cwd'] == self.project_path):
+                        pid = proc.pid
+                        self._tracked_git_processes.add(pid)
+                        with _GIT_PROCESS_LOCK:
+                            _GIT_PROCESS_REF_COUNTS[pid] = _GIT_PROCESS_REF_COUNTS.get(pid, 0) + 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception as e:
@@ -658,543 +654,9 @@ class GitManager:
             logger.error("Error computing diff details: %s", e)
             return None
     
-    def _get_pygments_lexer(self, file_path: str) -> Optional[object]:
-        """Get Pygments lexer for a file path using built-in detection."""
-        if not PYGMENTS_AVAILABLE:
-            return None
-        
-        try:
-            # Use Pygments' built-in filename detection
-            lexer = get_lexer_for_filename(file_path)
-            return lexer
-        except ClassNotFound:
-            # If no lexer found, return None (will fall back to plain text)
-            logger.debug("No Pygments lexer found for file: %s", file_path)
-            return None
-        except Exception as e:
-            logger.debug("Error getting Pygments lexer: %s", e)
-            return None
-    
     def _generate_html_diff(self, original_content: str, modified_content: str, file_path: str) -> Optional[Dict[str, str]]:
-        """Generate unified HTML diff with intra-line highlighting. Returns both minimal and full context versions."""
-        if not PYGMENTS_AVAILABLE:
-            logger.debug("Pygments not available for HTML diff generation")
-            return None
-        
-        # Add performance safeguards to prevent blocking
-        max_content_size = 500000  # 500KB max per file (more reasonable)
-        max_lines = 5000  # Max 5000 lines per file (more reasonable for real projects)
-        
-        original_line_count = original_content.count('\n')
-        modified_line_count = modified_content.count('\n')
-        max_line_count = max(original_line_count, modified_line_count)
-        
-        # Check if file is too large for full processing
-        is_large_file = (len(original_content) > max_content_size or 
-                        len(modified_content) > max_content_size or 
-                        max_line_count > max_lines)
-        
-        if is_large_file:
-            logger.warning(f"Large file detected for diff generation: {file_path} ({max_line_count} lines)")
-            # Generate simplified diff without syntax highlighting for large files
-            return self._generate_simple_diff_html(original_content, modified_content, file_path)
-        
-        try:
-            import difflib
-            import time
-            
-            start_time = time.time()
-            timeout_seconds = 5  # 5 second timeout
-            
-            # Get line-based diff using Python's difflib (similar to git diff)
-            original_lines = original_content.splitlines(keepends=True)
-            modified_lines = modified_content.splitlines(keepends=True)
-            
-            # Check timeout
-            if time.time() - start_time > timeout_seconds:
-                logger.warning(f"Diff generation timeout for {file_path}")
-                return None
-            
-            # Generate both minimal and full diff with performance safeguards
-            minimal_diff_lines = list(difflib.unified_diff(
-                original_lines, 
-                modified_lines, 
-                fromfile='a/' + os.path.basename(file_path),
-                tofile='b/' + os.path.basename(file_path),
-                lineterm='',
-                n=3  # 3 lines of context (default)
-            ))
-            
-            # Check timeout
-            if time.time() - start_time > timeout_seconds:
-                logger.warning(f"Diff generation timeout for {file_path}")
-                return None
-            
-            # Generate full context diff only if file is small enough
-            if len(original_lines) + len(modified_lines) < 2000:  # Increased threshold for better UX
-                full_diff_lines = list(difflib.unified_diff(
-                    original_lines, 
-                    modified_lines, 
-                    fromfile='a/' + os.path.basename(file_path),
-                    tofile='b/' + os.path.basename(file_path),
-                    lineterm='',
-                    n=len(original_lines) + len(modified_lines)  # Show all lines
-                ))
-            else:
-                full_diff_lines = minimal_diff_lines  # Use minimal for large files
-            
-            # Parse diffs (simplified but restored)
-            minimal_parsed = self._parse_unified_diff_simple(minimal_diff_lines)
-            full_parsed = self._parse_unified_diff_simple(full_diff_lines)
-            
-            # Check timeout
-            if time.time() - start_time > timeout_seconds:
-                logger.warning(f"Diff generation timeout for {file_path}")
-                return None
-            
-            # Generate HTML for both versions
-            minimal_html = self._generate_diff_html(minimal_parsed, file_path, 'minimal')
-            full_html = self._generate_diff_html(full_parsed, file_path, 'full')
-            
-            return {
-                'minimal': minimal_html,
-                'full': full_html
-            }
-            
-        except Exception as e:
-            logger.error("Error generating HTML diff: %s", e)
-            return None
-    
-    def _generate_simple_diff_html(self, original_content: str, modified_content: str, file_path: str) -> Dict[str, str]:
-        """Generate simplified diff HTML for large files without syntax highlighting."""
-        try:
-            import difflib
-            
-            # Get line-based diff using Python's difflib
-            original_lines = original_content.splitlines(keepends=True)
-            modified_lines = modified_content.splitlines(keepends=True)
-            
-            # Generate minimal diff only for large files
-            diff_lines = list(difflib.unified_diff(
-                original_lines, 
-                modified_lines, 
-                fromfile='a/' + os.path.basename(file_path),
-                tofile='b/' + os.path.basename(file_path),
-                lineterm='',
-                n=3  # Keep minimal context
-            ))
-            
-            # Parse with simple parser (no syntax highlighting)
-            parsed = self._parse_unified_diff_simple(diff_lines)
-            
-            # Limit to reasonable size for large files
-            max_simple_diff_lines = 500
-            if len(parsed) > max_simple_diff_lines:
-                parsed = parsed[:max_simple_diff_lines]
-                logger.info(f"Truncated large diff to {max_simple_diff_lines} lines for {file_path}")
-            
-            # Generate HTML without syntax highlighting but with good UI
-            html = self._generate_simple_diff_html_content(parsed, file_path)
-            
-            return {
-                'minimal': html,
-                'full': html  # Same for both to keep UI consistent
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generating simple diff HTML: {e}")
-            return {
-                'minimal': self._generate_fallback_diff_html(file_path),
-                'full': self._generate_fallback_diff_html(file_path)
-            }
-    
-    def _generate_simple_diff_html_content(self, parsed_diff: List[Dict], file_path: str) -> str:
-        """Generate simple HTML diff content without syntax highlighting but with good UI."""
-        html_parts = []
-        html_parts.append('<div class="unified-diff-container" data-view-mode="minimal">')
-        
-        # Add stats header (no toggle for large files to keep it simple)
-        line_additions = sum(1 for line in parsed_diff if line['type'] == 'add')
-        line_deletions = sum(1 for line in parsed_diff if line['type'] == 'delete')
-        
-        html_parts.append(f'''
-            <div class="diff-stats">
-                <div class="diff-stats-left">
-                    <span class="additions">+{line_additions}</span>
-                    <span class="deletions">-{line_deletions}</span>
-                    <span class="file-path">{os.path.basename(file_path)} (Large file - simplified view)</span>
-                </div>
-            </div>
-        ''')
-        
-        # Generate content without syntax highlighting
-        html_parts.append('<div class="diff-content">')
-        html_parts.append('<table class="diff-table">')
-        
-        for line_info in parsed_diff:
-            if line_info['type'] == 'header':
-                continue  # Skip headers
-                
-            line_type = line_info['type']
-            old_line_num = line_info.get('old_line_num', '')
-            new_line_num = line_info.get('new_line_num', '')
-            content = line_info['content']
-            
-            # Simple HTML escaping without syntax highlighting
-            escaped_content = self._escape_html(content)
-            
-            row_class = f'diff-line diff-{line_type}'
-            html_parts.append(f'''
-                <tr class="{row_class}">
-                    <td class="line-num old-line-num">{old_line_num}</td>
-                    <td class="line-num new-line-num">{new_line_num}</td>
-                    <td class="line-content">{escaped_content}</td>
-                </tr>
-            ''')
-        
-        html_parts.append('</table>')
-        html_parts.append('</div>')
-        html_parts.append('</div>')
-        
-        return ''.join(html_parts)
-    
-    def _generate_fallback_diff_html(self, file_path: str) -> str:
-        """Generate minimal fallback HTML when all else fails."""
-        return f'''
-        <div class="unified-diff-container" data-view-mode="minimal">
-            <div class="diff-stats">
-                <div class="diff-stats-left">
-                    <span class="file-path">{os.path.basename(file_path)} (Diff unavailable)</span>
-                </div>
-            </div>
-            <div class="diff-content">
-                <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
-                    <i class="fas fa-exclamation-triangle" style="font-size: 2rem; margin-bottom: 1rem;"></i>
-                    <p>Diff view unavailable for this file</p>
-                    <p style="font-size: 0.9rem;">File may be too large or binary</p>
-                </div>
-            </div>
-        </div>
-        '''
-    
-    def _parse_unified_diff_simple(self, diff_lines):
-        """Simple unified diff parser without intra-line highlighting for better performance."""
-        parsed = []
-        old_line_num = 0
-        new_line_num = 0
-        
-        for line in diff_lines:
-            if line.startswith('@@'):
-                # Parse hunk header to get line numbers
-                import re
-                match = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
-                if match:
-                    old_line_num = int(match.group(1)) - 1
-                    new_line_num = int(match.group(2)) - 1
-                
-                parsed.append({
-                    'type': 'header',
-                    'content': line,
-                    'old_line_num': '',
-                    'new_line_num': ''
-                })
-            elif line.startswith('---') or line.startswith('+++'):
-                # Skip diff file headers (--- a/file, +++ b/file)
-                parsed.append({
-                    'type': 'header',
-                    'content': line,
-                    'old_line_num': '',
-                    'new_line_num': ''
-                })
-            elif line.startswith('-'):
-                old_line_num += 1
-                parsed.append({
-                    'type': 'delete',
-                    'old_line_num': old_line_num,
-                    'new_line_num': '',
-                    'content': line
-                })
-            elif line.startswith('+'):
-                new_line_num += 1
-                parsed.append({
-                    'type': 'add',
-                    'old_line_num': '',
-                    'new_line_num': new_line_num,
-                    'content': line
-                })
-            elif line.startswith(' '):
-                old_line_num += 1
-                new_line_num += 1
-                parsed.append({
-                    'type': 'context',
-                    'old_line_num': old_line_num,
-                    'new_line_num': new_line_num,
-                    'content': line
-                })
-        
-        return parsed
-    
-    def _generate_diff_html(self, parsed_diff: List[Dict], file_path: str, view_mode: str) -> str:
-        """Generate HTML for a parsed diff."""
-        # Limit diff size to prevent performance issues
-        max_diff_lines = 1000  # Increased limit for better UX
-        if len(parsed_diff) > max_diff_lines:
-            logger.warning(f"Diff too large, truncating: {file_path} ({len(parsed_diff)} lines)")
-            parsed_diff = parsed_diff[:max_diff_lines]
-        
-        # Get Pygments lexer for syntax highlighting
-        lexer = self._get_pygments_lexer(file_path)
-        
-        # Pre-highlight all unique lines for better context-aware syntax highlighting
-        unique_lines = set()
-        for line_info in parsed_diff:
-            if line_info['type'] != 'header' and 'content' in line_info:
-                content = line_info['content']
-                if content and content[0] in '+- ':
-                    clean_line = content[1:].rstrip('\n')
-                    if clean_line.strip():
-                        unique_lines.add(clean_line)
-        
-        # Pre-highlight all unique lines as a batch for better context
-        highlighted_cache = {}
-        if lexer and unique_lines:
-            try:
-                # Combine all lines to give Pygments better context
-                combined_content = '\n'.join(unique_lines)
-                combined_highlighted = highlight(combined_content, lexer, HtmlFormatter(nowrap=True, noclasses=False, style='monokai'))
-                
-                # Split back into individual lines
-                highlighted_lines = combined_highlighted.split('\n')
-                unique_lines_list = list(unique_lines)
-                
-                for i, line in enumerate(unique_lines_list):
-                    if i < len(highlighted_lines):
-                        highlighted_cache[line] = highlighted_lines[i]
-            except Exception as e:
-                logger.debug(f"Error in batch syntax highlighting: {e}")
-                highlighted_cache = {}
-        
-        # Build HTML
-        html_parts = []
-        html_parts.append(f'<div class="unified-diff-container" data-view-mode="{view_mode}">')
-        
-        # Add stats header with toggle
-        line_additions = sum(1 for line in parsed_diff if line['type'] == 'add')
-        line_deletions = sum(1 for line in parsed_diff if line['type'] == 'delete')
-        
-        html_parts.append(f'''
-            <div class="diff-stats">
-                <div class="diff-stats-left">
-                    <span class="additions">+{line_additions}</span>
-                    <span class="deletions">-{line_deletions}</span>
-                    <span class="file-path">{os.path.basename(file_path)}</span>
-                </div>
-                <div class="diff-stats-right">
-                    <button class="diff-toggle-btn" data-current-mode="{view_mode}">
-                        <i class="fas fa-eye"></i>
-                        <span class="toggle-text"></span>
-                    </button>
-                </div>
-            </div>
-        ''')
-        
-        # Generate unified diff view
-        html_parts.append('<div class="diff-content">')
-        html_parts.append('<table class="diff-table">')
-        
-        for line_info in parsed_diff:
-            if line_info['type'] == 'header':
-                continue  # Skip all diff headers including --- and +++ lines
-                
-            line_type = line_info['type']
-            old_line_num = line_info.get('old_line_num', '')
-            new_line_num = line_info.get('new_line_num', '')
-            content = line_info['content']
-            
-            # Apply syntax highlighting using pre-highlighted cache for better accuracy
-            if content and content[0] in '+- ':
-                prefix = content[0] if content[0] in '+-' else ' '
-                clean_content = content[1:].rstrip('\n')
-                
-                # Use pre-highlighted cache if available
-                if clean_content.strip() and clean_content in highlighted_cache:
-                    final_content = prefix + highlighted_cache[clean_content]
-                elif clean_content.strip():
-                    # Fallback to individual line highlighting
-                    try:
-                        highlighted = highlight(clean_content, lexer, HtmlFormatter(nowrap=True, noclasses=False, style='monokai'))
-                        final_content = prefix + highlighted
-                    except Exception as e:
-                        logger.debug("Error applying syntax highlighting: %s", e)
-                        final_content = self._escape_html(content)
-                else:
-                    final_content = self._escape_html(content)
-            else:
-                final_content = self._escape_html(content)
-            
-            # CSS classes for different line types
-            row_class = f'diff-line diff-{line_type}'
-            
-            html_parts.append(f'''
-                <tr class="{row_class}">
-                    <td class="line-num old-line-num">{old_line_num}</td>
-                    <td class="line-num new-line-num">{new_line_num}</td>
-                    <td class="line-content">{final_content}</td>
-                </tr>
-            ''')
-        
-        html_parts.append('</table>')
-        html_parts.append('</div>')
-        html_parts.append('</div>')
-        
-        return ''.join(html_parts)
-    
-    def _parse_unified_diff_with_intraline(self, diff_lines, original_lines, modified_lines):
-        """Parse unified diff and add intra-line character highlighting."""
-        parsed = []
-        old_line_num = 0
-        new_line_num = 0
-        
-        pending_deletes = []
-        pending_adds = []
-        
-        def flush_pending():
-            """Process pending delete/add pairs for intra-line highlighting."""
-            if pending_deletes and pending_adds:
-                # Apply intra-line highlighting to delete/add pairs
-                for i, (del_line, add_line) in enumerate(zip(pending_deletes, pending_adds)):
-                    del_content = del_line['content'][1:]  # Remove '-' prefix
-                    add_content = add_line['content'][1:]  # Remove '+' prefix
-                    
-                    del_highlighted, add_highlighted = self._generate_intraline_diff(del_content, add_content)
-                    
-                    # Update the parsed lines with intra-line highlighting
-                    del_line['intraline_html'] = '-' + del_highlighted
-                    add_line['intraline_html'] = '+' + add_highlighted
-                    
-                    parsed.append(del_line)
-                    parsed.append(add_line)
-                
-                # Handle remaining unmatched deletes/adds
-                for del_line in pending_deletes[len(pending_adds):]:
-                    parsed.append(del_line)
-                for add_line in pending_adds[len(pending_deletes):]:
-                    parsed.append(add_line)
-            else:
-                # No pairs to highlight, just add them as-is
-                parsed.extend(pending_deletes)
-                parsed.extend(pending_adds)
-            
-            pending_deletes.clear()
-            pending_adds.clear()
-        
-        for line in diff_lines:
-            if line.startswith('@@'):
-                # Flush any pending changes before hunk header
-                flush_pending()
-                
-                # Parse hunk header to get line numbers
-                import re
-                match = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
-                if match:
-                    old_line_num = int(match.group(1)) - 1
-                    new_line_num = int(match.group(2)) - 1
-                
-                parsed.append({
-                    'type': 'header',
-                    'content': line,
-                    'old_line_num': '',
-                    'new_line_num': ''
-                })
-            elif line.startswith('---') or line.startswith('+++'):
-                # Skip diff file headers (--- a/file, +++ b/file)
-                parsed.append({
-                    'type': 'header',
-                    'content': line,
-                    'old_line_num': '',
-                    'new_line_num': ''
-                })
-            elif line.startswith('-'):
-                pending_deletes.append({
-                    'type': 'delete',
-                    'old_line_num': old_line_num + 1,
-                    'new_line_num': '',
-                    'content': line
-                })
-                old_line_num += 1
-            elif line.startswith('+'):
-                pending_adds.append({
-                    'type': 'add',
-                    'old_line_num': '',
-                    'new_line_num': new_line_num + 1,
-                    'content': line
-                })
-                new_line_num += 1
-            elif line.startswith(' '):
-                # Flush pending changes before context line
-                flush_pending()
-                
-                old_line_num += 1
-                new_line_num += 1
-                parsed.append({
-                    'type': 'context',
-                    'old_line_num': old_line_num,
-                    'new_line_num': new_line_num,
-                    'content': line
-                })
-            elif line.startswith('---') or line.startswith('+++'):
-                parsed.append({
-                    'type': 'header',
-                    'content': line,
-                    'old_line_num': '',
-                    'new_line_num': ''
-                })
-        
-        # Flush any remaining pending changes
-        flush_pending()
-        
-        return parsed
-    
-    def _generate_intraline_diff(self, old_text: str, new_text: str) -> Tuple[str, str]:
-        """Generate intra-line character-level diff highlighting."""
-        # Temporarily disable intraline highlighting to fix performance issues
-        return self._escape_html(old_text), self._escape_html(new_text)
-        
-        if not DIFF_MATCH_PATCH_AVAILABLE:
-            return self._escape_html(old_text), self._escape_html(new_text)
-        
-        try:
-            dmp = diff_match_patch()
-            diffs = dmp.diff_main(old_text, new_text)
-            dmp.diff_cleanupSemantic(diffs)
-            
-            old_parts = []
-            new_parts = []
-            
-            for op, text in diffs:
-                escaped_text = self._escape_html(text)
-                
-                if op == 0:  # EQUAL
-                    old_parts.append(escaped_text)
-                    new_parts.append(escaped_text)
-                elif op == -1:  # DELETE
-                    old_parts.append(f'<span class="intraline-delete">{escaped_text}</span>')
-                elif op == 1:  # INSERT
-                    new_parts.append(f'<span class="intraline-add">{escaped_text}</span>')
-            
-            return ''.join(old_parts), ''.join(new_parts)
-            
-        except Exception as e:
-            logger.debug("Error generating intra-line diff: %s", e)
-            return self._escape_html(old_text), self._escape_html(new_text)
-    
-    def _escape_html(self, text: str) -> str:
-        """Escape HTML special characters."""
-        return (text.replace('&', '&amp;')
-                   .replace('<', '&lt;')
-                   .replace('>', '&gt;')
-                   .replace('"', '&quot;')
-                   .replace("'", '&#x27;'))
+        """Proxy to the stateless diff renderer so tab views keep their HTML output."""
+        return diff_renderer.generate_html_diff(original_content, modified_content, file_path)
     
     def get_head_commit_hash(self) -> Optional[str]:
         """Get the hash of the HEAD commit."""
@@ -1500,8 +962,8 @@ class GitManager:
                 # For submodules, use git add directly to stage only the submodule reference
                 self.repo.git.add(rel_path)
             else:
-                # For regular files, use the index method
-                self.repo.index.add([rel_path])
+                # Use git add -A on the specific file to handle deletions as well
+                self.repo.git.add('-A', '--', rel_path)
             
             logger.info("Successfully staged file: %s", rel_path)
             return True
@@ -1563,8 +1025,8 @@ class GitManager:
                 has_head = False
             
             if has_head:
-                # Restore the file from HEAD - for repos with commits
-                self.repo.git.restore(rel_path)
+                # Restore both index and working tree from HEAD
+                self.repo.git.restore('--staged', '--worktree', '--', rel_path)
                 logger.info("Successfully reverted file: %s", rel_path)
             else:
                 # For repositories with no commits, we can't revert to HEAD
@@ -1608,10 +1070,10 @@ class GitManager:
                 for submodule_path in submodule_paths:
                     self.repo.git.add(submodule_path)
             
-            # Stage regular files using index.add for efficiency
+            # Stage regular files using git add -A to capture deletions
             if rel_paths:
                 logger.info("Staging regular files: %s", rel_paths)
-                self.repo.index.add(rel_paths)
+                self.repo.git.add('-A', '--', *rel_paths)
             
             logger.info("Successfully staged %d files (%d submodules, %d regular)", 
                        len(file_paths), len(submodule_paths), len(rel_paths))
@@ -1696,7 +1158,7 @@ class GitManager:
                         regular_files.append(rel_paths[i])
                 
                 if regular_files:
-                    self.repo.git.restore(*regular_files)
+                    self.repo.git.restore('--staged', '--worktree', '--', *regular_files)
                     logger.info("Successfully reverted %d files", len(regular_files))
             else:
                 # For repositories with no commits, remove files to "revert" them
@@ -1990,26 +1452,37 @@ class GitManager:
         # Clean up only the git processes tracked by this specific GitManager instance
         try:
             import psutil
+
             killed_count = 0
-            
             for pid in list(self._tracked_git_processes):
-                try:
-                    proc = psutil.Process(pid)
-                    if proc.is_running():
-                        proc.terminate()
-                        killed_count += 1
-                        logger.info("Terminated tracked git process %d", pid)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-                finally:
-                    self._tracked_git_processes.discard(pid)
-            
+                should_terminate = False
+                with _GIT_PROCESS_LOCK:
+                    if pid in _GIT_PROCESS_REF_COUNTS:
+                        _GIT_PROCESS_REF_COUNTS[pid] -= 1
+                        if _GIT_PROCESS_REF_COUNTS[pid] <= 0:
+                            should_terminate = True
+                            _GIT_PROCESS_REF_COUNTS.pop(pid, None)
+                    else:
+                        should_terminate = True
+
+                if should_terminate:
+                    try:
+                        proc = psutil.Process(pid)
+                        if proc.is_running():
+                            proc.terminate()
+                            killed_count += 1
+                            logger.info("Terminated tracked git process %d", pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                self._tracked_git_processes.discard(pid)
+
             if killed_count > 0:
                 logger.info("Cleaned up %d tracked git processes for session", killed_count)
-                
+
         except Exception as e:
             logger.warning("Error cleaning up tracked git processes: %s", e)
-        
+
         # Clear the tracking set
         self._tracked_git_processes.clear()
 
