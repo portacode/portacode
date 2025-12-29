@@ -49,6 +49,7 @@ from .handlers import (
     ProjectStateGitUnstageHandler,
     ProjectStateGitRevertHandler,
     ProjectStateGitCommitHandler,
+    UpdatePortacodeHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -468,6 +469,8 @@ class TerminalManager:
         self._command_registry.register(ProjectStateGitUnstageHandler)
         self._command_registry.register(ProjectStateGitRevertHandler)
         self._command_registry.register(ProjectStateGitCommitHandler)
+        # System management handlers
+        self._command_registry.register(UpdatePortacodeHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway

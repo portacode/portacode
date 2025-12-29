@@ -40,6 +40,7 @@ from .project_state_handlers import (
     ProjectStateGitRevertHandler,
     ProjectStateGitCommitHandler,
 )
+from .update_handler import UpdatePortacodeHandler
 
 __all__ = [
     "BaseHandler",
@@ -76,4 +77,5 @@ __all__ = [
     "ProjectStateGitUnstageHandler",
     "ProjectStateGitRevertHandler",
     "ProjectStateGitCommitHandler",
+    "UpdatePortacodeHandler",
 ] 

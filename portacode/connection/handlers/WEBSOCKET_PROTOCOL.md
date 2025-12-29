@@ -41,6 +41,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`terminal_list`](#terminal_list)
   - [System Actions](#system-actions)
     - [`system_info`](#system_info)
+    - [`update_portacode_cli`](#update_portacode_cli)
   - [File Actions](#file-actions)
     - [`file_read`](#file_read)
     - [`file_search`](#file_search)
@@ -81,6 +82,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`terminal_list`](#terminal_list-event)
   - [System Events](#system-events)
     - [`system_info`](#system_info-event)
+    - [`update_portacode_response`](#update_portacode_response)
   - [File Events](#file-events)
     - [`file_read_response`](#file_read_response)
     - [`file_search_response`](#file_search_response)
@@ -315,6 +317,19 @@ This action does not require any payload fields.
 **Responses:**
 
 *   On success, the device will respond with a [`system_info`](#system_info-event) event.
+
+### `update_portacode_cli`
+
+Updates the Portacode CLI package and restarts the process. Handled by [`update_portacode_cli`](./update_handler.py).
+
+**Payload Fields:**
+
+This action does not require any payload fields.
+
+**Responses:**
+
+*   On success, the device will respond with an `update_portacode_response` event and then exit with code 42 to trigger restart.
+*   On error, an `update_portacode_response` event with error details is sent.
 
 ### `file_read`
 
@@ -899,6 +914,17 @@ Provides system information in response to a `system_info` action. Handled by [`
     *   `memory` (object): Memory usage statistics.
     *   `disk` (object): Disk usage statistics.
     *   `os_info` (object): Operating system details, including `os_type`, `os_version`, `architecture`, `default_shell`, and `default_cwd`.
+
+### `update_portacode_response`
+
+Reports the result of an `update_portacode_cli` action. Handled by [`update_portacode_cli`](./update_handler.py).
+
+**Event Fields:**
+
+*   `success` (boolean, mandatory): Whether the update operation was successful.
+*   `message` (string, optional): Success message when update completes.
+*   `error` (string, optional): Error message when update fails.
+*   `restart_required` (boolean, optional): Indicates if process restart is required (always true for successful updates).
 
 ### <a name="file_read_response"></a>`file_read_response`
 
