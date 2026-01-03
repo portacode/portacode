@@ -42,6 +42,7 @@ This document describes the complete protocol for communicating with devices thr
   - [System Actions](#system-actions)
     - [`system_info`](#system_info)
     - [`update_portacode_cli`](#update_portacode_cli)
+    - [`clock_sync_request`](#clock_sync_request)
   - [File Actions](#file-actions)
     - [`file_read`](#file_read)
     - [`file_search`](#file_search)
@@ -83,6 +84,7 @@ This document describes the complete protocol for communicating with devices thr
   - [System Events](#system-events)
     - [`system_info`](#system_info-event)
     - [`update_portacode_response`](#update_portacode_response)
+    - [`clock_sync_response`](#clock_sync_response)
   - [File Events](#file-events)
     - [`file_read_response`](#file_read_response)
     - [`file_search_response`](#file_search_response)
@@ -317,6 +319,18 @@ This action does not require any payload fields.
 **Responses:**
 
 *   On success, the device will respond with a [`system_info`](#system_info-event) event.
+
+### `clock_sync_request`
+
+Internal event that devices send to the gateway to request the authoritative server timestamp (used for adjusting `portacode.utils.ntp_clock`). The gateway responds immediately with [`clock_sync_response`](#clock_sync_response).
+
+**Payload Fields:**
+
+*   `request_id` (string, optional): Correlates the response with the request.
+
+**Responses:**
+
+*   The gateway responds with [`clock_sync_response`](#clock_sync_response) that includes the authoritative `server_time` (plus the optional `server_time_iso` mirror).
 
 ### `update_portacode_cli`
 
@@ -913,7 +927,20 @@ Provides system information in response to a `system_info` action. Handled by [`
     *   `cpu_percent` (float): CPU usage percentage.
     *   `memory` (object): Memory usage statistics.
     *   `disk` (object): Disk usage statistics.
-    *   `os_info` (object): Operating system details, including `os_type`, `os_version`, `architecture`, `default_shell`, and `default_cwd`.
+*   `os_info` (object): Operating system details, including `os_type`, `os_version`, `architecture`, `default_shell`, and `default_cwd`.
+
+### <a name="clock_sync_response"></a>`clock_sync_response`
+
+Reply sent by the gateway immediately after receiving a `clock_sync_request`. Devices use this event plus the measured round-trip time to keep their local `ntp_clock` offset accurate.
+
+**Event Fields:**
+
+*   `event` (string): Always `clock_sync_response`.
+*   `server_time` (integer): Server time in milliseconds.
+*   `server_time_iso` (string, optional): ISO 8601 representation of `server_time`, useful for UI dashboards.
+*   `server_receive_time` (integer, optional): Timestamp when the gateway received the sync request.
+*   `server_send_time` (integer, optional): Timestamp when the gateway replied; used to compute a midpoint for latency compensation.
+*   `request_id` (string, optional): Mirrors the request's `request_id`.
 
 ### `update_portacode_response`
 

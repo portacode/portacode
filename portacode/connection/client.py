@@ -36,6 +36,10 @@ class ConnectionManager:
         service manager restart.
     """
 
+    CLOCK_SYNC_INTERVAL = 60.0
+    CLOCK_SYNC_TIMEOUT = 20.0
+    CLOCK_SYNC_MAX_FAILURES = 3
+
     def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None, debug: bool = False):
         self.gateway_url = gateway_url
         self.keypair = keypair
@@ -49,6 +53,11 @@ class ConnectionManager:
 
         self.websocket: Optional[WebSocketClientProtocol] = None
         self.mux: Optional[Multiplexer] = None
+        self._clock_sync_task: Optional[asyncio.Task[None]] = None
+        self._clock_sync_future: Optional[asyncio.Future] = None
+        self._clock_sync_request_id: Optional[str] = None
+        self._clock_sync_sent_at: Optional[float] = None
+        self._clock_sync_failures = 0
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -93,8 +102,12 @@ class ConnectionManager:
                     except Exception as exc:
                         logger.warning("TerminalManager unavailable: %s", LogCategory.TERMINAL, exc)
 
-                    # Start main receive loop until closed or stop requested
-                    await self._listen()
+                    self._start_clock_sync_task()
+                    try:
+                        # Start main receive loop until closed or stop requested
+                        await self._listen()
+                    finally:
+                        await self._stop_clock_sync_task()
             except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as exc:
                 attempt += 1
                 logger.warning("Connection error: %s", LogCategory.CONNECTION, exc)
@@ -142,6 +155,7 @@ class ConnectionManager:
                 print("Press Cmd+C to close the connection.")
             else:
                 print("Press Ctrl+C to close the connection.")
+        # Finished authentication flow.
 
     async def _listen(self) -> None:
         assert self.websocket is not None, "WebSocket not ready"
@@ -149,11 +163,17 @@ class ConnectionManager:
             try:
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=1.0)
 
-                # Add device_receive timestamp if trace present
                 try:
-                    import json
                     data = json.loads(message)
+                except Exception:
+                    data = None
+
+                if isinstance(data, dict):
                     payload = data.get("payload", {})
+                    if isinstance(payload, dict) and payload.get("event") == "clock_sync_response":
+                        receive_time_ms = int(time.time() * 1000)
+                        await self._handle_clock_sync_response(payload, receive_time_ms)
+                        continue
                     if isinstance(payload, dict) and "trace" in payload and "request_id" in payload:
                         from portacode.utils.ntp_clock import ntp_clock
                         device_receive_time = ntp_clock.now_ms()
@@ -161,11 +181,8 @@ class ConnectionManager:
                             payload["trace"]["device_receive"] = device_receive_time
                             if "client_send" in payload["trace"]:
                                 payload["trace"]["ping"] = device_receive_time - payload["trace"]["client_send"]
-                            # Re-serialize with updated trace
                             message = json.dumps(data)
                             logger.info(f"📥 Device received traced message: {payload['request_id']}")
-                except:
-                    pass  # Not a traced message, continue normally
 
                 if self.mux:
                     await self.mux.on_raw_message(message)
@@ -178,6 +195,97 @@ class ConnectionManager:
             await self.websocket.close()
         except Exception:
             pass
+
+    def _start_clock_sync_task(self) -> None:
+        if self._clock_sync_task:
+            self._clock_sync_task.cancel()
+        self._clock_sync_task = asyncio.create_task(self._clock_sync_loop())
+
+    async def _stop_clock_sync_task(self) -> None:
+        if self._clock_sync_task:
+            self._clock_sync_task.cancel()
+            try:
+                await self._clock_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._clock_sync_task = None
+        if self._clock_sync_future and not self._clock_sync_future.done():
+            self._clock_sync_future.cancel()
+        self._clock_sync_future = None
+        self._clock_sync_request_id = None
+        self._clock_sync_sent_at = None
+
+    async def _clock_sync_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                await self._perform_clock_sync()
+                await asyncio.sleep(self.CLOCK_SYNC_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
+    async def _perform_clock_sync(self) -> None:
+        if not self.websocket or self.websocket.closed:
+            return
+        request_id = f"clock_sync:{secrets.token_urlsafe(6)}"
+        payload = {
+            "event": "clock_sync_request",
+            "request_id": request_id,
+        }
+        message = json.dumps({"channel": 0, "payload": payload})
+        self._clock_sync_request_id = request_id
+        self._clock_sync_sent_at = int(time.time() * 1000)
+        loop = asyncio.get_running_loop()
+        self._clock_sync_future = loop.create_future()
+        try:
+            await self.websocket.send(message)
+        except Exception as exc:
+            logger.warning("Clock sync send failed: %s", exc)
+            await self._handle_clock_sync_timeout()
+            return
+
+        try:
+            await asyncio.wait_for(self._clock_sync_future, timeout=self.CLOCK_SYNC_TIMEOUT)
+            self._clock_sync_failures = 0
+        except asyncio.TimeoutError:
+            await self._handle_clock_sync_timeout()
+        finally:
+            self._clock_sync_future = None
+            self._clock_sync_request_id = None
+            self._clock_sync_sent_at = None
+
+    async def _handle_clock_sync_response(self, payload: dict, receive_time_ms: int) -> None:
+        if payload.get("request_id") != self._clock_sync_request_id:
+            return
+        if self._clock_sync_future and not self._clock_sync_future.done():
+            self._clock_sync_future.set_result(payload)
+        server_receive_time = payload.get("server_receive_time")
+        server_send_time = payload.get("server_send_time")
+        if server_receive_time is not None and server_send_time is not None:
+            server_time = round((server_receive_time + server_send_time) / 2)
+        elif server_send_time is not None:
+            server_time = server_send_time
+        else:
+            server_time = payload.get("server_time")
+        sent_at = self._clock_sync_sent_at
+        if server_time is None or sent_at is None:
+            return
+        round_trip_ms = max(receive_time_ms - sent_at, 0)
+        from portacode.utils.ntp_clock import ntp_clock
+        ntp_clock.update_from_server(server_time, round_trip_ms)
+        self._clock_sync_failures = 0
+
+    async def _handle_clock_sync_timeout(self) -> None:
+        self._clock_sync_failures += 1
+        logger.warning(
+            "Clock sync timeout (%d/%d), scheduling reconnect...",
+            self._clock_sync_failures,
+            self.CLOCK_SYNC_MAX_FAILURES,
+        )
+        if self._clock_sync_failures >= self.CLOCK_SYNC_MAX_FAILURES and self.websocket:
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
 
 
 async def run_until_interrupt(manager: ConnectionManager) -> None:
