@@ -15,6 +15,7 @@ class NTPClock:
         self._offset_ms = 0.0
         self._last_sync = None
         self._last_latency_ms = None
+        self._smoothing_weight = 0.2
 
     def now(self) -> float:
         """Return the current timestamp (seconds since epoch) adjusted by the offset."""
@@ -43,7 +44,11 @@ class NTPClock:
         client_receive_ms = time.time() * 1000
         half_latency = latency_ms / 2
         estimated_server_received = client_receive_ms - half_latency
-        self._offset_ms = server_time_ms - estimated_server_received
+        new_offset = server_time_ms - estimated_server_received
+        if self._last_sync is not None:
+            self._offset_ms += self._smoothing_weight * (new_offset - self._offset_ms)
+        else:
+            self._offset_ms = new_offset
         self._last_latency_ms = latency_ms
         self._last_sync = time.time()
 

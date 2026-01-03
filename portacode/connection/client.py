@@ -37,6 +37,8 @@ class ConnectionManager:
     """
 
     CLOCK_SYNC_INTERVAL = 60.0
+    CLOCK_SYNC_FAST_INTERVAL = 1.0
+    CLOCK_SYNC_INITIAL_REQUESTS = 5
     CLOCK_SYNC_TIMEOUT = 20.0
     CLOCK_SYNC_MAX_FAILURES = 3
 
@@ -58,6 +60,7 @@ class ConnectionManager:
         self._clock_sync_request_id: Optional[str] = None
         self._clock_sync_sent_at: Optional[float] = None
         self._clock_sync_failures = 0
+        self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -200,6 +203,7 @@ class ConnectionManager:
         if self._clock_sync_task:
             self._clock_sync_task.cancel()
         self._clock_sync_task = asyncio.create_task(self._clock_sync_loop())
+        self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
 
     async def _stop_clock_sync_task(self) -> None:
         if self._clock_sync_task:
@@ -219,7 +223,12 @@ class ConnectionManager:
         try:
             while not self._stop_event.is_set():
                 await self._perform_clock_sync()
-                await asyncio.sleep(self.CLOCK_SYNC_INTERVAL)
+                if self._remaining_initial_syncs > 0:
+                    self._remaining_initial_syncs -= 1
+                    interval = self.CLOCK_SYNC_FAST_INTERVAL
+                else:
+                    interval = self.CLOCK_SYNC_INTERVAL
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass
 
@@ -261,7 +270,10 @@ class ConnectionManager:
         server_receive_time = payload.get("server_receive_time")
         server_send_time = payload.get("server_send_time")
         if server_receive_time is not None and server_send_time is not None:
-            server_time = round((server_receive_time + server_send_time) / 2)
+            processing_latency = max(server_send_time - server_receive_time, 0)
+            server_time = round(server_receive_time + processing_latency / 2)
+        elif server_receive_time is not None:
+            server_time = server_receive_time
         elif server_send_time is not None:
             server_time = server_send_time
         else:
