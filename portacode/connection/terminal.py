@@ -804,7 +804,11 @@ class TerminalManager:
         #     logger.info("terminal_manager: Dispatching %s event to %d client sessions", 
         #                event_type, len(target_sessions))
         
-        await self._control_channel.send(enhanced_payload)
+        try:
+            await self._control_channel.send(enhanced_payload)
+        except ConnectionClosedError as exc:
+            logger.warning("terminal_manager: Connection closed (%s); skipping %s event", exc, event_type)
+            return
 
     async def _send_terminal_list(self) -> None:
         """Send terminal list for reconnection reconciliation."""
