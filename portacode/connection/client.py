@@ -8,6 +8,8 @@ from typing import Optional
 import json
 import base64
 import sys
+import secrets
+import time
 
 import websockets
 from websockets import WebSocketClientProtocol
@@ -233,7 +235,7 @@ class ConnectionManager:
             pass
 
     async def _perform_clock_sync(self) -> None:
-        if not self.websocket or self.websocket.closed:
+        if not self.websocket or getattr(self.websocket, "closed", False):
             return
         request_id = f"clock_sync:{secrets.token_urlsafe(6)}"
         payload = {
