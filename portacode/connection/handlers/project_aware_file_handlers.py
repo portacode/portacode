@@ -22,6 +22,17 @@ class ProjectAwareFileWriteHandler(SyncHandler):
         """Write file contents and update project state tabs."""
         file_path = message.get("path")
         content = message.get("content", "")
+        # Optimistic lock: ensure the client saw the correct file state
+        expected_mtime = message.get("expected_mtime")
+        if expected_mtime is not None:
+            try:
+                current_mtime = os.path.getmtime(file_path)
+            except FileNotFoundError:
+                raise ValueError(f"File not found: {file_path}")
+            if current_mtime != expected_mtime:
+                raise ValueError(
+                    f"File was modified on disk (current {current_mtime} != expected {expected_mtime})"
+                )
         
         if not file_path:
             raise ValueError("path parameter is required")
