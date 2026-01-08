@@ -174,71 +174,185 @@ def _load_file_lines(path: str) -> Tuple[List[str], bool]:
         return [], False
 
 
+def _collect_original_line_chunks(hunk: Hunk) -> List[List[str]]:
+    """Collect consecutive lines from the original file that can anchor a hunk."""
+    chunks: List[List[str]] = []
+    current: List[str] = []
+
+    for line in hunk.lines:
+        if line.op in {" ", "-"}:
+            current.append(line.text)
+        elif current:
+            chunks.append(list(current))
+            current = []
+    if current:
+        chunks.append(list(current))
+
+    return [chunk for chunk in chunks if chunk]
+
+
+def _find_unique_chunk_position(original_lines: List[str], chunk: List[str]) -> Optional[int]:
+    """Return the sole index where chunk appears, or None if ambiguous."""
+    if not chunk or len(chunk) > len(original_lines):
+        return None
+
+    matches: List[int] = []
+    max_start = len(original_lines) - len(chunk)
+    for idx in range(0, max_start + 1):
+        if original_lines[idx : idx + len(chunk)] == chunk:
+            matches.append(idx)
+            if len(matches) > 1:
+                break
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _find_hunk_fallback_index(
+    original_lines: List[str], hunk: Hunk
+) -> Optional[Tuple[int, int]]:
+    """Try to find a unique match for hunk context and return (index, context_length)."""
+    chunks = _collect_original_line_chunks(hunk)
+    if not chunks:
+        return None
+
+    chunks.sort(key=len, reverse=True)
+    for chunk in chunks:
+        pos = _find_unique_chunk_position(original_lines, chunk)
+        if pos is not None:
+            return pos, len(chunk)
+    return None
+
+
+def _apply_hunk_segment(
+    original_lines: List[str],
+    start_index: int,
+    hunk: Hunk,
+    *,
+    file_path: str,
+) -> Tuple[List[str], int]:
+    """Apply a single hunk starting at a specific index."""
+    if start_index > len(original_lines):
+        raise DiffApplyError(
+            "Hunk start position past end of file",
+            file_path=file_path,
+            line_number=hunk.old_start,
+        )
+
+    result: List[str] = []
+    src_index = start_index
+    current_line_number = start_index + 1
+
+    for line in hunk.lines:
+        if line.op == " ":
+            if src_index >= len(original_lines):
+                raise DiffApplyError(
+                    "Unexpected end of file while matching context",
+                    file_path=file_path,
+                    line_number=current_line_number,
+                )
+            if original_lines[src_index] != line.text:
+                raise DiffApplyError(
+                    f"Context mismatch. Expected {original_lines[src_index]!r} but got {line.text!r}",
+                    file_path=file_path,
+                    line_number=current_line_number,
+                )
+            result.append(line.text)
+            src_index += 1
+            current_line_number += 1
+        elif line.op == "-":
+            if src_index >= len(original_lines):
+                raise DiffApplyError(
+                    "Unexpected end of file while removing line",
+                    file_path=file_path,
+                    line_number=current_line_number,
+                )
+            if original_lines[src_index] != line.text:
+                raise DiffApplyError(
+                    f"Deletion mismatch. Expected {original_lines[src_index]!r} but got {line.text!r}",
+                    file_path=file_path,
+                    line_number=current_line_number,
+                )
+            src_index += 1
+            current_line_number += 1
+        elif line.op == "+":
+            result.append(line.text)
+        else:
+            raise DiffApplyError(
+                f"Unsupported hunk operation {line.op!r}",
+                file_path=file_path,
+                line_number=current_line_number,
+            )
+
+    return result, src_index
+
+
 def _apply_hunks(
     original_lines: List[str],
     hunks: List[Hunk],
     *,
     file_path: str,
+    heuristic_log: Optional[List[str]] = None,
 ) -> List[str]:
     """Apply hunks to the provided original lines."""
     result: List[str] = []
     src_index = 0  # zero-based
 
     for hunk in hunks:
-        expected_index = max(hunk.old_start - 1, 0)
-        if expected_index > len(original_lines):
+        desired_index = max(hunk.old_start - 1, 0)
+        fallback = _find_hunk_fallback_index(original_lines, hunk)
+        attempts: List[int] = [desired_index]
+        fallback_context_len = 0
+        fallback_index: Optional[int] = None
+        if fallback:
+            fallback_index, fallback_context_len = fallback
+            if fallback_index != desired_index and fallback_index >= src_index:
+                attempts.append(fallback_index)
+
+        last_error: Optional[DiffApplyError] = None
+        for attempt_index in attempts:
+            if attempt_index < src_index:
+                continue
+
+            prefix_length = len(result)
+            prefix_src = src_index
+            if attempt_index > src_index:
+                result.extend(original_lines[src_index:attempt_index])
+                src_index = attempt_index
+
+            try:
+                applied_lines, new_src_index = _apply_hunk_segment(
+                    original_lines,
+                    attempt_index,
+                    hunk,
+                    file_path=file_path,
+                )
+                result.extend(applied_lines)
+                src_index = new_src_index
+
+                if (
+                    heuristic_log is not None
+                    and fallback_index is not None
+                    and attempt_index == fallback_index
+                ):
+                    heuristic_log.append(
+                        f"Hunk for {file_path} was shifted from line {desired_index + 1} to {fallback_index + 1} "
+                        f"using a unique {fallback_context_len}-line context match."
+                    )
+                break
+            except DiffApplyError as exc:
+                last_error = exc
+                del result[prefix_length:]
+                src_index = prefix_src
+                continue
+        else:
+            if last_error:
+                raise last_error
             raise DiffApplyError(
-                "Hunk start position past end of file",
+                "Unable to apply hunk",
                 file_path=file_path,
                 line_number=hunk.old_start,
             )
-
-        # Copy unchanged content preceding the hunk
-        if expected_index > src_index:
-            result.extend(original_lines[src_index:expected_index])
-            src_index = expected_index
-
-        current_line_number = hunk.old_start
-        for line in hunk.lines:
-            if line.op == " ":
-                if src_index >= len(original_lines):
-                    raise DiffApplyError(
-                        "Unexpected end of file while matching context",
-                        file_path=file_path,
-                        line_number=current_line_number,
-                    )
-                if original_lines[src_index] != line.text:
-                    raise DiffApplyError(
-                        f"Context mismatch. Expected {original_lines[src_index]!r} but got {line.text!r}",
-                        file_path=file_path,
-                        line_number=current_line_number,
-                    )
-                result.append(line.text)
-                src_index += 1
-                current_line_number += 1
-            elif line.op == "-":
-                if src_index >= len(original_lines):
-                    raise DiffApplyError(
-                        "Unexpected end of file while removing line",
-                        file_path=file_path,
-                        line_number=current_line_number,
-                    )
-                if original_lines[src_index] != line.text:
-                    raise DiffApplyError(
-                        f"Deletion mismatch. Expected {original_lines[src_index]!r} but got {line.text!r}",
-                        file_path=file_path,
-                        line_number=current_line_number,
-                    )
-                src_index += 1
-                current_line_number += 1
-            elif line.op == "+":
-                result.append(line.text)
-            else:
-                raise DiffApplyError(
-                    f"Unsupported hunk operation {line.op!r}",
-                    file_path=file_path,
-                    line_number=current_line_number,
-                )
 
     # Append remaining content
     if src_index < len(original_lines):
@@ -247,7 +361,11 @@ def _apply_hunks(
     return result
 
 
-def apply_file_patch(file_patch: FilePatch, base_path: Optional[str]) -> Tuple[str, str, int]:
+def apply_file_patch(
+    file_patch: FilePatch,
+    base_path: Optional[str],
+    heuristic_log: Optional[List[str]] = None,
+) -> Tuple[str, str, int]:
     """Apply a parsed FilePatch to disk.
 
     Returns:
@@ -275,7 +393,12 @@ def apply_file_patch(file_patch: FilePatch, base_path: Optional[str]) -> Tuple[s
             os.remove(target_path)
         return target_path, "deleted", 0
 
-    updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+    updated_lines = _apply_hunks(
+        original_lines,
+        file_patch.hunks,
+        file_path=target_path,
+        heuristic_log=heuristic_log,
+    )
 
     dir_name = os.path.dirname(target_path)
     if dir_name and not os.path.exists(dir_name):
@@ -289,7 +412,9 @@ def apply_file_patch(file_patch: FilePatch, base_path: Optional[str]) -> Tuple[s
 
 
 def preview_file_patch(
-    file_patch: FilePatch, base_path: Optional[str]
+    file_patch: FilePatch,
+    base_path: Optional[str],
+    heuristic_log: Optional[List[str]] = None,
 ) -> Tuple[str, str, List[str], List[str]]:
     """Compute the before/after contents for a FilePatch without writing to disk.
 
@@ -311,11 +436,21 @@ def preview_file_patch(
 
     if file_patch.is_delete:
         # Validate the hunks but the resulting file will be removed entirely
-        _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        _apply_hunks(
+            original_lines,
+            file_patch.hunks,
+            file_path=target_path,
+            heuristic_log=heuristic_log,
+        )
         updated_lines = []
         action = "deleted"
     else:
-        updated_lines = _apply_hunks(original_lines, file_patch.hunks, file_path=target_path)
+        updated_lines = _apply_hunks(
+            original_lines,
+            file_patch.hunks,
+            file_path=target_path,
+            heuristic_log=heuristic_log,
+        )
         action = "created" if not file_exists else "modified"
 
     return target_path, action, original_lines, updated_lines

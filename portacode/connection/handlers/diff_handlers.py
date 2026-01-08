@@ -314,18 +314,22 @@ class FileApplyDiffHandler(AsyncHandler):
         )
 
         for file_patch in file_patches:
-            apply_func = partial(apply_file_patch, file_patch, base_path)
+            heuristics: List[str] = []
+            apply_func = partial(
+                apply_file_patch, file_patch, base_path, heuristic_log=heuristics
+            )
             try:
                 target_path, action, bytes_written = await loop.run_in_executor(None, apply_func)
                 applied_paths.append(target_path)
-                results.append(
-                    {
-                        "path": target_path,
-                        "status": "applied",
-                        "action": action,
-                        "bytes_written": bytes_written,
-                    }
-                )
+                result_entry = {
+                    "path": target_path,
+                    "status": "applied",
+                    "action": action,
+                    "bytes_written": bytes_written,
+                }
+                if heuristics:
+                    result_entry["heuristic_adjustments"] = heuristics
+                results.append(result_entry)
                 logger.info("file_apply_diff: %s %s (%s bytes)", action, target_path, bytes_written)
             except DiffApplyError as exc:
                 logger.warning("file_apply_diff: Failed to apply diff for %s: %s", file_patch.target_path, exc)
@@ -510,13 +514,16 @@ class FilePreviewDiffHandler(AsyncHandler):
             target_hint = file_patch.target_path or file_patch.new_path or file_patch.old_path
             display_path = _resolve_preview_path(base_path, target_hint)
 
+            heuristics: List[str] = []
             try:
                 (
                     preview_path,
                     file_action,
                     original_lines,
                     updated_lines,
-                ) = preview_file_patch(file_patch, base_path)
+                ) = preview_file_patch(
+                    file_patch, base_path, heuristic_log=heuristics
+                )
             except DiffApplyError as exc:
                 logger.exception(
                     "file_preview_diff: Unable to compute preview for %s", display_path
@@ -548,17 +555,18 @@ class FilePreviewDiffHandler(AsyncHandler):
                     fallback = diff_renderer.generate_fallback_diff_html(display_path)
                     html_versions = {"minimal": fallback, "full": fallback}
 
-                previews.append(
-                    {
-                        "path": display_path,
-                        "relative_path": target_hint,
-                        "status": "ready",
-                        "html": html_versions["minimal"],
-                        "html_versions": html_versions,
-                        "has_full": html_versions["minimal"] != html_versions["full"],
-                        "action": preview_action,
-                    }
-                )
+                preview_entry = {
+                    "path": display_path,
+                    "relative_path": target_hint,
+                    "status": "ready",
+                    "html": html_versions["minimal"],
+                    "html_versions": html_versions,
+                    "has_full": html_versions["minimal"] != html_versions["full"],
+                    "action": preview_action,
+                }
+                if heuristics:
+                    preview_entry["heuristic_adjustments"] = heuristics
+                previews.append(preview_entry)
             except Exception as exc:
                 logger.exception(
                     "file_preview_diff: Failed to render preview for %s", display_path
