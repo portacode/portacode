@@ -9,6 +9,7 @@ _version.py
 client_sessions.json
 project_state_debug.json
 test_results
+logs
 
 # Example-generated volumes
 examples/simple_device/data/
