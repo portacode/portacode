@@ -3,13 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from concurrent.futures import ThreadPoolExecutor
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 import json
 import base64
-import os
 import sys
 import secrets
 import time
@@ -22,11 +19,6 @@ from .multiplex import Multiplexer
 from ..logging_categories import get_categorized_logger, LogCategory
 
 logger = get_categorized_logger(__name__)
-
-
-ASYNCIO_DEBUG_DIR = Path("logs")
-ASYNCIO_DEBUG_LOGFILE = ASYNCIO_DEBUG_DIR / "asyncio-debug.log"
-_ASYNCIO_DEBUG_HANDLER: Optional[RotatingFileHandler] = None
 
 
 class ConnectionManager:
@@ -71,44 +63,6 @@ class ConnectionManager:
         self._clock_sync_sent_at: Optional[float] = None
         self._clock_sync_failures = 0
         self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
-        self._executor = self._create_executor()
-        self._executor_shutdown = False
-
-    def _create_executor(self) -> ThreadPoolExecutor:
-        return ThreadPoolExecutor(max_workers=max(2, os.cpu_count() or 2))
-
-    def _ensure_executor(self) -> ThreadPoolExecutor:
-        if self._executor_shutdown:
-            self._executor = self._create_executor()
-            self._executor_shutdown = False
-        return self._executor
-
-    def _shutdown_executor(self) -> None:
-        if self._executor_shutdown:
-            return
-        self._executor_shutdown = True
-        self._executor.shutdown(wait=False)
-
-    def _ensure_asyncio_debug_logging(self) -> None:
-        global _ASYNCIO_DEBUG_HANDLER
-        if _ASYNCIO_DEBUG_HANDLER is not None:
-            return
-        ASYNCIO_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
-            ASYNCIO_DEBUG_LOGFILE,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-        )
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s %(levelname)s %(name)s %(message)s"
-            )
-        )
-        asyncio_logger = logging.getLogger("asyncio")
-        asyncio_logger.setLevel(logging.DEBUG)
-        asyncio_logger.addHandler(handler)
-        _ASYNCIO_DEBUG_HANDLER = handler
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -121,15 +75,9 @@ class ConnectionManager:
         self._stop_event.set()
         if self._task is not None:
             await self._task
-        self._shutdown_executor()
 
     async def _runner(self) -> None:
         attempt = 0
-        loop = asyncio.get_running_loop()
-        loop.set_debug(True)
-        loop.slow_callback_duration = 0.05
-        self._ensure_asyncio_debug_logging()
-        loop.set_default_executor(self._ensure_executor())
         while not self._stop_event.is_set():
             try:
                 if attempt:
