@@ -1,14 +1,23 @@
 """System command handlers."""
 
+import concurrent.futures
+import getpass
+import importlib.util
 import logging
 import os
 import platform
+import shutil
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict
+
 from portacode import __version__
 import psutil
+
+try:
+    from importlib import metadata as importlib_metadata
+except ImportError:  # pragma: no cover - py<3.8
+    import importlib_metadata
 
 from .base import SyncHandler
 
@@ -32,6 +41,105 @@ def _ensure_cpu_thread():
         if _cpu_thread is None or not _cpu_thread.is_alive():
             _cpu_thread = threading.Thread(target=_cpu_monitor, daemon=True)
             _cpu_thread.start()
+
+
+def _get_user_context() -> Dict[str, Any]:
+    """Gather current CLI user plus permission hints."""
+    context = {}
+    login_source = "os.getlogin"
+    try:
+        username = os.getlogin()
+    except Exception:
+        login_source = "getpass"
+        username = getpass.getuser()
+
+    context["username"] = username
+    context["username_source"] = login_source
+    context["home"] = str(Path.home())
+
+    uid = getattr(os, "getuid", None)
+    euid = getattr(os, "geteuid", None)
+    context["uid"] = uid() if uid else None
+    context["euid"] = euid() if euid else context["uid"]
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            context["is_root"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            context["is_root"] = None
+    else:
+        context["is_root"] = context["euid"] == 0 if context["euid"] is not None else False
+
+    context["has_sudo"] = shutil.which("sudo") is not None
+    context["sudo_user"] = os.environ.get("SUDO_USER")
+    context["is_sudo_session"] = bool(os.environ.get("SUDO_UID"))
+    return context
+
+
+def _get_playwright_info() -> Dict[str, Any]:
+    """Return Playwright presence, version, and browser binaries if available."""
+    result: Dict[str, Any] = {
+        "installed": False,
+        "version": None,
+        "browsers": {},
+        "error": None,
+    }
+
+    if importlib.util.find_spec("playwright") is None:
+        return result
+
+    result["installed"] = True
+    try:
+        result["version"] = importlib_metadata.version("playwright")
+    except Exception as exc:
+        logger.debug("Unable to read Playwright version metadata: %s", exc)
+
+    def _inspect_browsers() -> Dict[str, Any]:
+        from playwright.sync_api import sync_playwright
+
+        browsers_data: Dict[str, Any] = {}
+        with sync_playwright() as p:
+            for name in ("chromium", "firefox", "webkit"):
+                browser_type = getattr(p, name, None)
+                if browser_type is None:
+                    continue
+                exec_path = getattr(browser_type, "executable_path", None)
+                browsers_data[name] = {
+                    "available": bool(exec_path),
+                    "executable_path": exec_path,
+                }
+        return browsers_data
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_inspect_browsers)
+            browsers = future.result(timeout=5)
+            result["browsers"] = browsers
+    except concurrent.futures.TimeoutError:
+        msg = "Playwright inspection timed out"
+        logger.warning(msg)
+        result["error"] = msg
+    except Exception as exc:
+        logger.warning("Playwright browser inspection failed: %s", exc)
+        result["error"] = str(exc)
+
+    return result
+
+
+def _get_proxmox_info() -> Dict[str, Any]:
+    """Detect if the current host is a Proxmox node."""
+    info: Dict[str, Any] = {"is_proxmox_node": False, "version": None}
+    release_file = Path("/etc/proxmox-release")
+    if release_file.exists():
+        info["is_proxmox_node"] = True
+        try:
+            info["version"] = release_file.read_text().strip()
+        except Exception:
+            info["version"] = None
+    elif Path("/etc/pve").exists():
+        info["is_proxmox_node"] = True
+    return info
 
 
 def _get_os_info() -> Dict[str, Any]:
@@ -143,6 +251,9 @@ class SystemInfoHandler(SyncHandler):
         
         # Add OS information - this is critical for proper shell detection
         info["os_info"] = _get_os_info()
+        info["user_context"] = _get_user_context()
+        info["playwright"] = _get_playwright_info()
+        info["proxmox"] = _get_proxmox_info()
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__

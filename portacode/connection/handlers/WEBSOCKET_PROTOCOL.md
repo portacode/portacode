@@ -927,7 +927,29 @@ Provides system information in response to a `system_info` action. Handled by [`
     *   `cpu_percent` (float): CPU usage percentage.
     *   `memory` (object): Memory usage statistics.
     *   `disk` (object): Disk usage statistics.
-*   `os_info` (object): Operating system details, including `os_type`, `os_version`, `architecture`, `default_shell`, and `default_cwd`.
+    *   `os_info` (object): Operating system details, including `os_type`, `os_version`, `architecture`, `default_shell`, and `default_cwd`.
+    *   `user_context` (object): Information about the user running the CLI, including:
+        *   `username` (string): Resolved username (via `os.getlogin` or fallback).
+        *   `username_source` (string): Which API resolved the username.
+        *   `home` (string): Home directory detected for the CLI user.
+        *   `uid` (integer|null): POSIX UID when available.
+        *   `euid` (integer|null): Effective UID when available.
+        *   `is_root` (boolean|null): True when running as root/administrator.
+        *   `has_sudo` (boolean): Whether a `sudo` binary exists on the host.
+        *   `sudo_user` (string|null): Value of `SUDO_USER` when set.
+        *   `is_sudo_session` (boolean): True when the CLI was started via `sudo`.
+    *   `playwright` (object): Optional Playwright runtime metadata when Playwright is installed:
+        *   `installed` (boolean): True if Playwright is importable on the device.
+        *   `version` (string|null): Exact package version when available.
+        *   `browsers` (object): Browser-specific data keyed by Playwright browser names:
+            *   `<browser>` (object): Per-browser info (variants: `chromium`, `firefox`, `webkit`).
+                *   `available` (boolean): True when Playwright knows an executable path.
+                *   `executable_path` (string|null): Absolute path to the browser binary when known.
+        *   `error` (string|null): Any warning message captured while probing Playwright.
+    *   `proxmox` (object): Detection hints for Proxmox VE nodes:
+        *   `is_proxmox_node` (boolean): True when Proxmox artifacts (e.g., `/etc/proxmox-release`) exist.
+        *   `version` (string|null): Raw contents of `/etc/proxmox-release` when readable.
+    *   `portacode_version` (string): Installed CLI version returned by `portacode.__version__`.
 
 ### <a name="clock_sync_response"></a>`clock_sync_response`
 
