@@ -21,6 +21,8 @@ import time
 from dataclasses import asdict
 from typing import Any, Dict, Optional, List
 
+from websockets.exceptions import ConnectionClosedError
+
 from .multiplex import Multiplexer, Channel
 from .handlers import (
     CommandRegistry,
