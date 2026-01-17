@@ -1,6 +1,7 @@
 """Terminal session management."""
 
 import asyncio
+import json
 import logging
 import os
 import struct
@@ -9,7 +10,11 @@ import time
 import uuid
 from asyncio.subprocess import Process
 from pathlib import Path
-from typing import Any, Dict, Optional, List, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, Optional, List, TYPE_CHECKING
+
+from platformdirs import user_data_dir
+
+from portacode.link_capture import prepare_link_capture_bin
 
 import pyte
 
@@ -25,6 +30,10 @@ TERMINAL_DATA_INITIAL_WAIT_MS = 10  # Time to wait for additional data even on f
 TERMINAL_COLUMNS = 80  # Default terminal width
 TERMINAL_ROWS = 24     # Default terminal height (visible area)
 TERMINAL_SCROLLBACK_LIMIT = 1000  # Maximum number of scrollback lines to preserve
+
+# Link event folder for capturing helper notifications
+_LINK_EVENT_ROOT = Path(user_data_dir("portacode", "portacode")) / "link_events"
+_LINK_EVENT_POLL_INTERVAL = 0.5  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +72,100 @@ def _build_child_env() -> Dict[str, str]:
     env.setdefault("COLUMNS", str(TERMINAL_COLUMNS))
     env.setdefault("LINES", str(TERMINAL_ROWS))
     return env
+
+
+_LINK_EVENT_DISPATCHER: Optional["LinkEventDispatcher"] = None
+
+class LinkEventDispatcher:
+    """Watch a shared folder for link capture files."""
+
+    def __init__(self, directory: Optional[Path]):
+        self.directory = directory
+        self._task: Optional[asyncio.Task[None]] = None
+
+        # Callbacks that are notified whenever a new event file is processed
+        self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
+
+    def start(self) -> None:
+        if not self.directory:
+            return
+        if self._task and not self._task.done():
+            return
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.warning("link_watcher: Failed to create directory %s: %s", self.directory, exc)
+            return
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        if not self._task:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                if self.directory.exists():
+                    for entry in sorted(self.directory.iterdir()):
+                        if not entry.is_file():
+                            continue
+                        await self._process_entry(entry)
+                await asyncio.sleep(_LINK_EVENT_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("link_watcher: error scanning %s: %s", self.directory, exc)
+                await asyncio.sleep(_LINK_EVENT_POLL_INTERVAL)
+
+    async def _process_entry(self, entry: Path) -> None:
+        try:
+            raw = entry.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception as exc:
+            logger.warning("link_watcher: failed to read %s: %s", entry, exc)
+        else:
+            terminal_id = payload.get("terminal_id")
+            link = payload.get("url")
+            if link:
+                logger.info("link_watcher: terminal %s captured link %s", terminal_id, link)
+            else:
+                logger.info("link_watcher: terminal %s observed link capture without url (%s)", terminal_id, payload)
+            await self._notify_callbacks(payload)
+        finally:
+            try:
+                entry.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("link_watcher: failed to remove %s: %s", entry, exc)
+
+    def register_callback(self, callback: Callable[[Dict[str, Any]], Awaitable[None]]) -> None:
+        """Register a coroutine callback for processed link events."""
+        if callback in self._callbacks:
+            return
+        self._callbacks.append(callback)
+
+    async def _notify_callbacks(self, payload: Dict[str, Any]) -> None:
+        if not self._callbacks:
+            return
+        for callback in list(self._callbacks):
+            try:
+                result = callback(payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.warning("link_watcher: callback raised an exception: %s", exc)
+
+
+def _get_link_event_dispatcher() -> "LinkEventDispatcher":
+    global _LINK_EVENT_DISPATCHER
+    if _LINK_EVENT_DISPATCHER is None:
+        _LINK_EVENT_DISPATCHER = LinkEventDispatcher(_LINK_EVENT_ROOT)
+    return _LINK_EVENT_DISPATCHER
 
 
 class TerminalSession:
@@ -107,7 +210,7 @@ class TerminalSession:
         # Cancel existing reader task if it exists
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
-            
+           
         self._reader_task = asyncio.create_task(_pump())
 
     async def write(self, data: str) -> None:
@@ -651,6 +754,9 @@ class SessionManager:
         self.mux = mux
         self.terminal_manager = terminal_manager
         self._sessions: Dict[str, TerminalSession] = {}
+        self._link_event_dispatcher = _get_link_event_dispatcher()
+        self._link_event_dispatcher.register_callback(self._handle_link_capture_event)
+        self._link_event_dispatcher.start()
 
     def _allocate_channel_id(self) -> str:
         """Allocate a new unique channel ID for a terminal session using UUID."""
@@ -680,6 +786,22 @@ class SessionManager:
 
         logger.info("Launching terminal %s using shell=%s on channel=%s", term_id, shell, channel_id)
 
+        env = _build_child_env()
+
+        env["PORTACODE_LINK_CHANNEL"] = str(_LINK_EVENT_ROOT)
+        env["PORTACODE_TERMINAL_ID"] = term_id
+
+        bin_dir = prepare_link_capture_bin()
+        if bin_dir:
+            current_path = env.get("PATH", os.environ.get("PATH", ""))
+            path_entries = current_path.split(os.pathsep) if current_path else []
+            bin_str = str(bin_dir)
+            if bin_str not in path_entries:
+                env["PATH"] = os.pathsep.join([bin_str] + path_entries) if path_entries else bin_str
+            browser_path = bin_dir / "xdg-open"
+            if browser_path.exists():
+                env["BROWSER"] = str(browser_path)
+
         if _IS_WINDOWS:
             try:
                 from winpty import PtyProcess
@@ -687,7 +809,7 @@ class SessionManager:
                 logger.error("winpty (pywinpty) not found: %s", exc)
                 raise RuntimeError("pywinpty not installed on client")
 
-            pty_proc = PtyProcess.spawn(shell, cwd=cwd or None, env=_build_child_env())
+            pty_proc = PtyProcess.spawn(shell, cwd=cwd or None, env=env)
             session = WindowsTerminalSession(term_id, pty_proc, channel, project_id, self.terminal_manager)
         else:
             # Unix: try real PTY for proper TTY semantics
@@ -702,7 +824,7 @@ class SessionManager:
                     stderr=slave_fd,
                     preexec_fn=os.setsid,
                     cwd=cwd,
-                    env=_build_child_env(),
+                    env=env,
                 )
                 # Wrap master_fd into a StreamReader
                 loop = asyncio.get_running_loop()
@@ -720,7 +842,7 @@ class SessionManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=cwd,
-                    env=_build_child_env(),
+                    env=env,
                 )
             session = TerminalSession(term_id, proc, channel, project_id, self.terminal_manager)
 
@@ -735,6 +857,38 @@ class SessionManager:
             "cwd": cwd,
             "project_id": project_id,
         }
+
+    async def _handle_link_capture_event(self, payload: Dict[str, Any]) -> None:
+        """Translate link capture files into websocket events."""
+        link = payload.get("url")
+        terminal_id = payload.get("terminal_id")
+        if not link:
+            logger.debug("session_manager: Ignoring link capture without URL (%s)", payload)
+            return
+        if not terminal_id:
+            logger.warning("session_manager: Link capture missing terminal_id: %s", payload)
+            return
+        session = self.get_session(terminal_id)
+        if not session:
+            logger.info("session_manager: No active session for terminal %s, dropping link event", terminal_id)
+            return
+        if not self.terminal_manager:
+            logger.warning("session_manager: No terminal_manager available for link event")
+            return
+
+        event_payload = {
+            "event": "terminal_link_request",
+            "terminal_id": session.id,
+            "channel": getattr(session.channel, "id", session.id),
+            "url": link,
+            "command": payload.get("command"),
+            "args": payload.get("args"),
+            "pid": getattr(session.proc, "pid", None),
+            "timestamp": payload.get("timestamp"),
+            "project_id": session.project_id,
+        }
+        logger.info("session_manager: Dispatching link request for terminal %s to clients", terminal_id)
+        await self.terminal_manager._send_session_aware(event_payload, project_id=session.project_id)
 
     def get_session(self, terminal_id: str) -> Optional[TerminalSession]:
         """Get a terminal session by ID."""
@@ -803,4 +957,4 @@ class SessionManager:
                 await sess.reattach_channel(new_channel)
                 logger.info("Successfully reattached terminal %s", sess.id)
             except Exception as exc:
-                logger.error("Failed to reattach terminal %s: %s", sess.id, exc) 
+                logger.error("Failed to reattach terminal %s: %s", sess.id, exc)

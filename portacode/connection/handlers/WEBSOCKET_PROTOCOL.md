@@ -872,6 +872,22 @@ The `data` field contains the exact bytes output by the terminal process, decode
 
 **Security Note**: The `device_id` field is automatically injected by the server based on the authenticated connection - the device cannot and should not specify its own ID. The `project_id` and `client_sessions` fields are added by the device's terminal manager for proper routing and filtering.
 
+### <a name="terminal_link_request"></a>`terminal_link_request`
+
+Signals that the active terminal session attempted to open an external URL (e.g., via `xdg-open`). The terminal environment is instrumented with the `portacode/link_capture` helper, so CLI programs that try to open a browser are captured and forwarded to connected clients for confirmation.
+
+**Event Fields:**
+
+*   `terminal_id` (string, mandatory): The UUID of the terminal session that triggered the request.
+*   `channel` (string, mandatory): Same as `terminal_id` (included for backward compatibility with raw channel routing).
+*   `url` (string, mandatory): The full URL the terminal tried to open. Clients must surface this text directly so users can verify it.
+*   `command` (string, optional): The command that attempted the navigation (e.g., `xdg-open`).
+*   `args` (array[string], optional): Arguments passed to the command, which may include safely-encoded paths or flags.
+*   `timestamp` (number, optional): UNIX epoch seconds when the capture occurred.
+*   `project_id` (string, optional): The project UUID in whose context the attempt was made.
+
+Clients receiving this event should pause and ask the user for confirmation before opening the URL, and may throttle or suppress repeated events to prevent modal storms if a CLI tool loops on the same link.
+
 ### <a name="terminal_exit"></a>`terminal_exit`
 
 Notifies the server that a terminal session has terminated. This can be due to the process ending or the session being stopped. Handled by [`terminal_start`](./terminal_handlers.py).

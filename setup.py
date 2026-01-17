@@ -21,6 +21,7 @@ setup(
         "portacode": [
             "static/js/**/*.js",
             "static/js/**/*.html",
+            "link_capture/bin/*",
         ],
     },
     python_requires=">=3.8",
