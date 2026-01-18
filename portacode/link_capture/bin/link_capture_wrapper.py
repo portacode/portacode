@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Core logic for all link-capture wrapper scripts."""
+"""Simple link capture wrapper that never executes a native browser."""
 
 import json
 import os
-import shutil
 import sys
 import time
 import uuid
@@ -59,21 +58,6 @@ def _write_capture_event(cmd_name, args, link):
             temp_file.unlink(missing_ok=True)
 
 
-def _find_real_command(cmd_name):
-    wrapper_dir = Path(__file__).resolve().parent
-    path_entries = os.environ.get("PATH", "").split(os.pathsep)
-    filtered = [entry for entry in path_entries if Path(entry).resolve() != wrapper_dir]
-    filtered_path = os.pathsep.join(filtered) if filtered else None
-    return shutil.which(cmd_name, path=filtered_path)
-
-
-def _exec_real_command(real_cmd, cmd_name, args):
-    if not real_cmd:
-        sys.stderr.write(f"link_capture: unable to locate {cmd_name}\n")
-        sys.exit(127)
-    os.execvpe(real_cmd, [cmd_name] + args, os.environ)
-
-
 def main() -> None:
     if len(sys.argv) < 2:
         sys.stderr.write("link_capture: missing target command name\n")
@@ -83,8 +67,8 @@ def main() -> None:
     link = _find_link_argument(cmd_args)
     if link:
         _write_capture_event(cmd_name, cmd_args, link)
-    real_cmd = _find_real_command(cmd_name)
-    _exec_real_command(real_cmd, cmd_name, cmd_args)
+    # Never run a real browser; capture and exit successfully.
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,8 @@ TERMINAL_SCROLLBACK_LIMIT = 1000  # Maximum number of scrollback lines to preser
 # Link event folder for capturing helper notifications
 _LINK_EVENT_ROOT = Path(user_data_dir("portacode", "portacode")) / "link_events"
 _LINK_EVENT_POLL_INTERVAL = 0.5  # seconds
+LINK_EVENT_THROTTLE_SECONDS = 5.0
+LINK_CAPTURE_ORIGINAL_BROWSER_ENV = "PORTACODE_LINK_CAPTURE_ORIGINAL_BROWSER"
 
 logger = logging.getLogger(__name__)
 
@@ -800,6 +802,11 @@ class SessionManager:
                 env["PATH"] = os.pathsep.join([bin_str] + path_entries) if path_entries else bin_str
             browser_path = bin_dir / "xdg-open"
             if browser_path.exists():
+                original_browser = env.get("BROWSER")
+                if original_browser:
+                    env[LINK_CAPTURE_ORIGINAL_BROWSER_ENV] = original_browser
+                elif LINK_CAPTURE_ORIGINAL_BROWSER_ENV in env:
+                    env.pop(LINK_CAPTURE_ORIGINAL_BROWSER_ENV, None)
                 env["BROWSER"] = str(browser_path)
 
         if _IS_WINDOWS:
