@@ -2,9 +2,15 @@
 
 import shutil
 import tempfile
-from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Optional
+
+try:
+    # Use the stdlib helpers when they are available (Python ≥3.9).
+    from importlib.resources import as_file, files
+except ImportError:  # pragma: no cover
+    # Fall back to the backport for older Python 3.x runtimes (>=3.6).
+    from importlib_resources import as_file, files
 
 _LINK_CAPTURE_TEMP_DIR: Optional[Path] = None
 

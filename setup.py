@@ -39,6 +39,7 @@ setup(
         "diff-match-patch>=20230430",
         "Pygments>=2.14.0",
         "ntplib>=0.4.0",
+        "importlib_resources>=6.0",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],
@@ -50,6 +51,10 @@ setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
