@@ -1,4 +1,5 @@
 """System command handlers."""
+from __future__ import annotations
 
 import concurrent.futures
 import getpass
@@ -7,6 +8,7 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Dict
@@ -20,6 +22,7 @@ except ImportError:  # pragma: no cover - py<3.8
     import importlib_metadata
 
 from .base import SyncHandler
+from .proxmox_infra import get_infra_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -127,18 +130,58 @@ def _get_playwright_info() -> Dict[str, Any]:
     return result
 
 
+def _run_probe_command(cmd: list[str]) -> str | None:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip()
+
+
+def _parse_pveversion(output: str) -> str | None:
+    first_token = output.split(None, 1)[0] if output else ""
+    if not first_token:
+        return None
+    if "/" in first_token:
+        return first_token.split("/", 1)[1]
+    return first_token
+
+
+def _parse_dpkg_version(output: str) -> str | None:
+    for line in output.splitlines():
+        if line.lower().startswith("version:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _get_proxmox_version() -> str | None:
+    release_file = Path("/etc/proxmox-release")
+    if release_file.exists():
+        try:
+            return release_file.read_text().strip()
+        except Exception:
+            pass
+    value = _run_probe_command(["pveversion"])
+    parsed = _parse_pveversion(value or "")
+    if parsed:
+        return parsed
+    for pkg in ("pve-manager", "proxmox-ve"):
+        pkg_output = _run_probe_command(["dpkg", "-s", pkg])
+        parsed = _parse_dpkg_version(pkg_output or "")
+        if parsed:
+            return parsed
+    return None
+
+
 def _get_proxmox_info() -> Dict[str, Any]:
     """Detect if the current host is a Proxmox node."""
     info: Dict[str, Any] = {"is_proxmox_node": False, "version": None}
-    release_file = Path("/etc/proxmox-release")
-    if release_file.exists():
+    if Path("/etc/proxmox-release").exists() or Path("/etc/pve").exists():
         info["is_proxmox_node"] = True
-        try:
-            info["version"] = release_file.read_text().strip()
-        except Exception:
-            info["version"] = None
-    elif Path("/etc/pve").exists():
-        info["is_proxmox_node"] = True
+    version = _get_proxmox_version()
+    if version:
+        info["version"] = version
+    info["infra"] = get_infra_snapshot()
     return info
 
 

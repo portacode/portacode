@@ -52,6 +52,9 @@ from .handlers import (
     ProjectStateGitRevertHandler,
     ProjectStateGitCommitHandler,
     UpdatePortacodeHandler,
+    ConfigureProxmoxInfraHandler,
+    CreateProxmoxContainerHandler,
+    RevertProxmoxInfraHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -411,6 +414,7 @@ class TerminalManager:
             "mux": mux,
             "use_content_caching": True,  # Enable content caching optimization
             "debug": self.debug,
+            "event_loop": asyncio.get_running_loop(),
         }
         
         # Initialize command registry
@@ -472,6 +476,9 @@ class TerminalManager:
         self._command_registry.register(ProjectStateGitRevertHandler)
         self._command_registry.register(ProjectStateGitCommitHandler)
         # System management handlers
+        self._command_registry.register(ConfigureProxmoxInfraHandler)
+        self._command_registry.register(CreateProxmoxContainerHandler)
+        self._command_registry.register(RevertProxmoxInfraHandler)
         self._command_registry.register(UpdatePortacodeHandler)
 
     # ---------------------------------------------------------------------

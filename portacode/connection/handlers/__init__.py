@@ -14,6 +14,7 @@ from .terminal_handlers import (
     TerminalListHandler,
 )
 from .system_handlers import SystemInfoHandler
+from .update_handler import UpdatePortacodeHandler
 from .file_handlers import (
     FileReadHandler,
     FileWriteHandler,
@@ -40,7 +41,11 @@ from .project_state_handlers import (
     ProjectStateGitRevertHandler,
     ProjectStateGitCommitHandler,
 )
-from .update_handler import UpdatePortacodeHandler
+from .proxmox_infra import (
+    ConfigureProxmoxInfraHandler,
+    CreateProxmoxContainerHandler,
+    RevertProxmoxInfraHandler,
+)
 
 __all__ = [
     "BaseHandler",
@@ -52,6 +57,8 @@ __all__ = [
     "TerminalStopHandler",
     "TerminalListHandler",
     "SystemInfoHandler",
+    "ConfigureProxmoxInfraHandler",
+    "CreateProxmoxContainerHandler",
     # File operation handlers (optional - register as needed)
     "FileReadHandler",
     "FileWriteHandler", 
@@ -78,4 +85,5 @@ __all__ = [
     "ProjectStateGitRevertHandler",
     "ProjectStateGitCommitHandler",
     "UpdatePortacodeHandler",
+    "RevertProxmoxInfraHandler",
 ] 

@@ -405,6 +405,45 @@ def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – C
         finally:
             await mgr.stop()
 
+        asyncio.run(_run())
+
+
+@cli.command("revert_proxmox_infra")
+@click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
+def revert_proxmox_infra(gateway: str | None) -> None:  # noqa: D401 – Click callback
+    """Revert the Proxmox infrastructure configuration stored on this device."""
+
+    target_gateway = gateway or os.getenv(GATEWAY_ENV) or GATEWAY_URL
+
+    async def _run() -> None:
+        keypair = get_or_create_keypair()
+        mgr = ConnectionManager(target_gateway, keypair, debug=False)
+        await mgr.start()
+
+        for _ in range(20):
+            if mgr.mux is not None:
+                break
+            await asyncio.sleep(0.1)
+        if mgr.mux is None:
+            click.echo("Failed to initialise connection – aborting.")
+            await mgr.stop()
+            return
+
+        ctl = mgr.mux.get_channel(0)
+        await ctl.send({"cmd": "revert_proxmox_infra"})
+
+        try:
+            with click.progressbar(length=30, label="Waiting for revert response") as bar:
+                for _ in range(30):
+                    try:
+                        reply = await asyncio.wait_for(ctl.recv(), timeout=0.1)
+                        click.echo(click.style("< " + json.dumps(reply, indent=2), fg="cyan"))
+                    except asyncio.TimeoutError:
+                        pass
+                    bar.update(1)
+        finally:
+            await mgr.stop()
+
     asyncio.run(_run())
 
 

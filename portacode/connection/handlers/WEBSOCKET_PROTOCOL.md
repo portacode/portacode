@@ -320,6 +320,82 @@ This action does not require any payload fields.
 
 *   On success, the device will respond with a [`system_info`](#system_info-event) event.
 
+### `setup_proxmox_infra`
+
+Configures a Proxmox node for Portacode infrastructure usage (API token validation, automatic storage/template detection, bridge/NAT setup, and connectivity verification). Handled by [`ConfigureProxmoxInfraHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+*   `token_identifier` (string, required): API token identifier in the form `user@realm!tokenid`.
+*   `token_value` (string, required): Secret value associated with the token.
+*   `verify_ssl` (boolean, optional): When true, the handler verifies SSL certificates; defaults to `false`.
+
+**Responses:**
+
+*   On success, the device will emit a [`proxmox_infra_configured`](#proxmox_infra_configured-event) event with the persisted infra snapshot.
+*   On failure, the device will emit an [`error`](#error) event with details (e.g., permission issues, missing proxmoxer/dnsmasq, missing root privileges, or failed network verification).
+
+### `revert_proxmox_infra`
+
+Reverts the Proxmox infrastructure network changes and clears the stored API token. Handled by [`RevertProxmoxInfraHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+This action does not require any payload fields.
+
+**Responses:**
+
+*   On success, the device will emit a [`proxmox_infra_reverted`](#proxmox_infra_reverted-event) event containing the cleared snapshot.
+
+### `create_proxmox_container`
+
+Creates a Portacode-managed LXC container, starts it, and bootstraps the Portacode service by running the commands from [`proxmox_management/setup_portacode.py`](../../proxmox_management/setup_portacode.py). Handled by [`CreateProxmoxContainerHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+*   `template` (string, required): Template identifier to use for the CT (e.g., `local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst`).
+*   `disk_gib` (integer, optional): Rootfs size in GiB (defaults to 32).
+*   `ram_mib` (integer, optional): Memory size in MiB (defaults to 2048).
+*   `cpus` (integer, optional): Number of CPU cores (defaults to 1).
+*   `hostname` (string, optional): Desired hostname inside the container; defaults to `ct<vmid>`.
+*   `username` (string, optional): OS user to provision (defaults to `svcuser`).
+*   `password` (string, optional): Password for the user (used only during provisioning).
+*   `ssh_key` (string, optional): SSH public key to add to the user.
+
+**Responses:**
+
+*   On success, the device will emit a [`proxmox_container_created`](#proxmox_container_created-event) event that includes the Portacode auth key produced inside the container.
+*   On failure, the device will emit an [`error`](#error) event.
+
+### `proxmox_container_created`
+
+Emitted after a successful `create_proxmox_container` action. Contains the new container ID, the Portacode public key produced inside the container, and the bootstrap logs.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the CT and Portacode bootstrap succeed.
+*   `message` (string): Human-readable summary (e.g., `Container 103 is ready`).
+*   `ctid` (string): The numeric CT ID.
+*   `public_key` (string): Portacode public auth key created inside the new container.
+*   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
+*   `setup_steps` (array[object]): Detailed bootstrap step results (name, stdout/stderr, elapsed time, and status).
+
+### `proxmox_container_progress`
+
+Sent intermittently while `create_proxmox_container` is executing so callers can display a progress indicator. Each notification describes the currently running step (validation, provisioning, or each bootstrap command) and whether it succeeded or failed.
+
+**Event Fields:**
+
+*   `step_index` (integer): 1-based index of the current step inside the entire provisioning sequence.
+*   `total_steps` (integer): Total number of steps that must run before provisioning completes.
+*   `step_name` (string): Internal step identifier (e.g., `create_container`, `apt_update`, `portacode_connect`).
+*   `step_label` (string): Human-friendly label suitable for UI (e.g., `Create container`, `Apt update`).
+*   `status` (string): One of `in_progress`, `completed`, or `failed`.
+*   `phase` (string): Either `lifecycle` (environment/container lifecycle) or `bootstrap` (per-command bootstrap work).
+*   `message` (string): Short description of what is happening or why a failure occurred.
+*   `details` (object, optional): Contains `attempt` (if retries were needed) and `error_summary` when a step fails.
+*   `request_id` (string, optional): Mirrors the request ID from the incoming `create_proxmox_container` payload when available.
+
 ### `clock_sync_request`
 
 Internal event that devices send to the gateway to request the authoritative server timestamp (used for adjusting `portacode.utils.ntp_clock`). The gateway responds immediately with [`clock_sync_response`](#clock_sync_response).
@@ -965,7 +1041,71 @@ Provides system information in response to a `system_info` action. Handled by [`
     *   `proxmox` (object): Detection hints for Proxmox VE nodes:
         *   `is_proxmox_node` (boolean): True when Proxmox artifacts (e.g., `/etc/proxmox-release`) exist.
         *   `version` (string|null): Raw contents of `/etc/proxmox-release` when readable.
+        *   `infra` (object): Portacode infrastructure configuration snapshot:
+            *   `configured` (boolean): True when `setup_proxmox_infra` stored an API token.
+            *   `host` (string|null): Hostname used for the API client (usually `localhost`).
+            *   `node` (string|null): Proxmox node name that was targeted.
+            *   `user` (string|null): API token owner (e.g., `root@pam`).
+            *   `token_name` (string|null): API token identifier.
+            *   `default_storage` (string|null): Storage pool chosen for future containers.
+            *   `templates` (array[string]): Cached list of available LXC templates.
+            *   `last_verified` (string|null): ISO timestamp when the token was last validated.
+            *   `network` (object):
+                *   `applied` (boolean): True when the bridge/NAT services were successfully configured.
+                *   `message` (string|null): Informational text about the network setup attempt.
+                *   `bridge` (string): The bridge interface configured (typically `vmbr1`).
+                *   `health` (string|null): `"healthy"` when the connectivity verification succeeded.
+            *   `node_status` (object|null): Status response returned by the Proxmox API when validating the token.
     *   `portacode_version` (string): Installed CLI version returned by `portacode.__version__`.
+
+### `proxmox_infra_configured`
+
+Emitted after a successful `setup_proxmox_infra` action. The event reports the stored API token metadata, template list, and network setup status.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the configuration completed.
+*   `message` (string): User-facing summary (e.g., "Proxmox infrastructure configured").
+*   `infra` (object): Same snapshot described under [`system_info`](#system_info-event) `proxmox.infra`.
+
+### `proxmox_infra_reverted`
+
+Emitted after a successful `revert_proxmox_infra` action. Indicates the infra config is no longer present and the network was restored.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the revert completed.
+*   `message` (string): Summary (e.g., "Proxmox infrastructure configuration reverted").
+*   `infra` (object): Snapshot with `configured=false` (matching [`system_info`](#system_info-event) `proxmox.infra`).
+
+### `proxmox_container_created`
+
+Emitted after a successful `create_proxmox_container` action to report the newly created CT, its Portacode public key, and the bootstrap logs.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the CT provisioning and `portacode connect` steps complete.
+*   `message` (string): Human-readable summary (e.g., `Container 102 is ready`).
+*   `ctid` (string): The container ID that was created.
+*   `public_key` (string): Portacode public auth key discovered inside the container.
+*   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
+*   `setup_steps` (array[object]): Detailed bootstrap step reports including stdout/stderr, elapsed time, and pass/fail status.
+
+### `proxmox_container_progress`
+
+Sent continuously while `create_proxmox_container` runs so dashboards can show a progress bar tied to each lifecycle and bootstrap step.
+
+**Event Fields:**
+
+*   `step_index` (integer): 1-based position of the step inside the entire provisioning workflow.
+*   `total_steps` (integer): Total number of lifecycle and bootstrap steps for the current operation.
+*   `step_name` (string): Internal identifier (e.g., `validate_environment`, `install_deps`, `portacode_connect`).
+*   `step_label` (string): Friendly label suitable for the UI.
+*   `status` (string): One of `in_progress`, `completed`, or `failed`.
+*   `phase` (string): Either `lifecycle` (node validation/container lifecycle) or `bootstrap` (commands run inside the CT).
+*   `message` (string): Short human-readable description of the action or failure.
+*   `details` (object, optional): Contains `attempt` (when retries are used) and `error_summary` on failure.
+*   `request_id` (string, optional): Mirrors the `create_proxmox_container` request when provided.
 
 ### <a name="clock_sync_response"></a>`clock_sync_response`
 
