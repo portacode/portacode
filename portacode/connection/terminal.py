@@ -55,6 +55,7 @@ from .handlers import (
     ConfigureProxmoxInfraHandler,
     CreateProxmoxContainerHandler,
     RevertProxmoxInfraHandler,
+    StartPortacodeServiceHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -478,6 +479,7 @@ class TerminalManager:
         # System management handlers
         self._command_registry.register(ConfigureProxmoxInfraHandler)
         self._command_registry.register(CreateProxmoxContainerHandler)
+        self._command_registry.register(StartPortacodeServiceHandler)
         self._command_registry.register(RevertProxmoxInfraHandler)
         self._command_registry.register(UpdatePortacodeHandler)
 

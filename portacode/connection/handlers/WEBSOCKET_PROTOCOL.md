@@ -396,6 +396,32 @@ Sent intermittently while `create_proxmox_container` is executing so callers can
 *   `details` (object, optional): Contains `attempt` (if retries were needed) and `error_summary` when a step fails.
 *   `request_id` (string, optional): Mirrors the request ID from the incoming `create_proxmox_container` payload when available.
 
+### `start_portacode_service`
+
+Runs `sudo portacode service install` inside the container after the dashboard has created the corresponding Device record with the supplied public key.
+
+**Payload Fields:**
+
+*   `ctid` (string, required): Container ID target.
+*   `step_index` (integer, required): Next step index to render inside `proxmox_container_progress`.
+*   `total_steps` (integer, required): The overall total number of steps (including lifecycle, bootstrap, and service installation).
+
+**Responses:**
+
+*   Emits additional [`proxmox_container_progress`](#proxmox_container_progress-event) events to report the authentication and service-install steps.
+*   On success, emits a [`proxmox_service_started`](#proxmox_service_started-event).
+*   On failure, emits a generic [`error`](#error) event.
+
+### `proxmox_service_started`
+
+Indicates that `portacode service install` finished successfully inside a managed container.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the install succeeded.
+*   `message` (string): Success summary (e.g., `Portacode service install completed`).
+*   `ctid` (string): Container ID.
+
 ### `clock_sync_request`
 
 Internal event that devices send to the gateway to request the authoritative server timestamp (used for adjusting `portacode.utils.ntp_clock`). The gateway responds immediately with [`clock_sync_response`](#clock_sync_response).

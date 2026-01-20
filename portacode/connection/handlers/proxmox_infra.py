@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -41,6 +42,53 @@ SYSCTL_PATH = Path("/etc/sysctl.d/99-portacode-forward.conf")
 UNIT_DIR = Path("/etc/systemd/system")
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
+
+
+def _emit_progress_event(
+    handler: SyncHandler,
+    *,
+    step_index: int,
+    total_steps: int,
+    step_name: str,
+    step_label: str,
+    status: str,
+    message: str,
+    phase: str,
+    request_id: Optional[str],
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    loop = handler.context.get("event_loop")
+    if not loop or loop.is_closed():
+        logger.debug(
+            "progress event skipped (no event loop) step=%s status=%s",
+            step_name,
+            status,
+        )
+        return
+
+    payload: Dict[str, Any] = {
+        "event": "proxmox_container_progress",
+        "step_name": step_name,
+        "step_label": step_label,
+        "status": status,
+        "phase": phase,
+        "step_index": step_index,
+        "total_steps": total_steps,
+        "message": message,
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    if details:
+        payload["details"] = details
+
+    future = asyncio.run_coroutine_threadsafe(handler.send_response(payload), loop)
+    future.add_done_callback(
+        lambda fut: logger.warning(
+            "Failed to emit progress event for %s: %s", step_name, fut.exception()
+        )
+        if fut.exception()
+        else None
+    )
 
 
 def _call_subprocess(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -251,7 +299,9 @@ def _format_rootfs(storage: str, disk_gib: int, storage_type: str) -> str:
 def _get_provisioning_user_info(message: Dict[str, Any]) -> Tuple[str, str, str]:
     user = (message.get("username") or "svcuser").strip() if message else "svcuser"
     user = user or "svcuser"
-    password = message.get("password") or "" if message else ""
+    password = message.get("password")
+    if not password:
+        password = secrets.token_urlsafe(10)
     ssh_key = (message.get("ssh_key") or "").strip() if message else ""
     return user, password, ssh_key
 
@@ -380,6 +430,13 @@ def _write_container_record(vmid: int, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _read_container_record(vmid: int) -> Dict[str, Any]:
+    path = CONTAINERS_DIR / f"ct-{vmid}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Container record {path} missing")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     templates = config.get("templates") or []
     default_template = templates[0] if templates else ""
@@ -428,10 +485,10 @@ def _connect_proxmox(config: Dict[str, Any]) -> Any:
     )
 
 
-def _run_pct(vmid: int, cmd: str) -> Dict[str, Any]:
+def _run_pct(vmid: int, cmd: str, input_text: Optional[str] = None) -> Dict[str, Any]:
     full = ["pct", "exec", str(vmid), "--", "bash", "-lc", cmd]
     start = time.time()
-    proc = subprocess.run(full, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.run(full, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=input_text)
     return {
         "cmd": cmd,
         "returncode": proc.returncode,
@@ -560,6 +617,8 @@ def _run_setup_steps(
             continue
 
         attempts = 0
+        retry_on = step.get("retry_on", [])
+        max_attempts = step.get("retries", 0) + 1
         while True:
             attempts += 1
             res = _run_pct(vmid, step["cmd"])
@@ -572,14 +631,21 @@ def _run_setup_steps(
                 if progress_callback:
                     progress_callback(step_index, computed_total, step, "completed", res)
                 break
+
+            will_retry = False
+            if attempts < max_attempts and retry_on:
+                stderr_stdout = (res.get("stderr", "") + res.get("stdout", ""))
+                if any(tok in stderr_stdout for tok in retry_on):
+                    will_retry = True
+
             if progress_callback:
-                progress_callback(step_index, computed_total, step, "failed", res)
-            retry_on = step.get("retry_on", [])
-            if attempts >= step.get("retries", 0) + 1:
-                return results, False
-            if any(tok in (res.get("stderr", "") + res.get("stdout", "")) for tok in retry_on):
+                status = "retrying" if will_retry else "failed"
+                progress_callback(step_index, computed_total, step, status, res)
+
+            if will_retry:
                 time.sleep(step.get("retry_delay_s", 3))
                 continue
+
             return results, False
     return results, True
 
@@ -746,58 +812,12 @@ class CreateProxmoxContainerHandler(SyncHandler):
     def command_name(self) -> str:
         return "create_proxmox_container"
 
-    def _emit_progress_event(
-        self,
-        *,
-        step_index: int,
-        total_steps: int,
-        step_name: str,
-        step_label: str,
-        status: str,
-        message: str,
-        phase: str,
-        request_id: Optional[str],
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        loop = self.context.get("event_loop")
-        if not loop or loop.is_closed():
-            logger.debug(
-                "progress event skipped (no event loop) step=%s status=%s",
-                step_name,
-                status,
-            )
-            return
-
-        payload: Dict[str, Any] = {
-            "event": "proxmox_container_progress",
-            "step_name": step_name,
-            "step_label": step_label,
-            "status": status,
-            "phase": phase,
-            "step_index": step_index,
-            "total_steps": total_steps,
-            "message": message,
-        }
-        if request_id:
-            payload["request_id"] = request_id
-        if details:
-            payload["details"] = details
-
-        future = asyncio.run_coroutine_threadsafe(self.send_response(payload), loop)
-        future.add_done_callback(
-            lambda fut: logger.warning(
-                "Failed to emit progress event for %s: %s", step_name, fut.exception()
-            )
-            if fut.exception()
-            else None
-        )
-
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("create_proxmox_container command received")
         request_id = message.get("request_id")
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
         bootstrap_steps = _build_bootstrap_steps(bootstrap_user, bootstrap_password, bootstrap_ssh_key)
-        total_steps = 3 + len(bootstrap_steps)
+        total_steps = 3 + len(bootstrap_steps) + 2
         current_step_index = 1
 
         def _run_lifecycle_step(
@@ -809,7 +829,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
         ):
             nonlocal current_step_index
             step_index = current_step_index
-            self._emit_progress_event(
+            _emit_progress_event(self,
                 step_index=step_index,
                 total_steps=total_steps,
                 step_name=step_name,
@@ -822,7 +842,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
             try:
                 result = action()
             except Exception as exc:
-                self._emit_progress_event(
+                _emit_progress_event(
+                    self,
                     step_index=step_index,
                     total_steps=total_steps,
                     step_name=step_name,
@@ -834,7 +855,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     details={"error": str(exc)},
                 )
                 raise
-            self._emit_progress_event(
+            _emit_progress_event(
+                self,
                 step_index=step_index,
                 total_steps=total_steps,
                 step_name=step_name,
@@ -905,25 +927,34 @@ class CreateProxmoxContainerHandler(SyncHandler):
             _start_container_step,
         )
 
-        def _bootstrap_progress_callback(step_index: int, total: int, step: Dict[str, Any], status: str, result: Optional[Dict[str, Any]]):
+        def _bootstrap_progress_callback(
+            step_index: int,
+            total: int,
+            step: Dict[str, Any],
+            status: str,
+            result: Optional[Dict[str, Any]],
+        ):
             label = step.get("display_name") or _friendly_step_label(step.get("name", "bootstrap"))
+            error_summary = (result or {}).get("error_summary") or (result or {}).get("error")
+            attempt = (result or {}).get("attempt")
             if status == "in_progress":
                 message_text = f"{label} is running…"
             elif status == "completed":
                 message_text = f"{label} completed."
+            elif status == "retrying":
+                attempt_desc = f" (attempt {attempt})" if attempt else ""
+                message_text = f"{label} failed{attempt_desc}; retrying…"
             else:
-                summary = (result or {}).get("error_summary") or (result or {}).get("error")
                 message_text = f"{label} failed"
-                if summary:
-                    message_text += f": {summary}"
+                if error_summary:
+                    message_text += f": {error_summary}"
             details: Dict[str, Any] = {}
-            if status == "failed" and result:
-                if result.get("attempt"):
-                    details["attempt"] = result["attempt"]
-                summary_detail = result.get("error_summary") or result.get("error")
-                if summary_detail:
-                    details["error_summary"] = summary_detail
-            self._emit_progress_event(
+            if attempt:
+                details["attempt"] = attempt
+            if error_summary:
+                details["error_summary"] = error_summary
+            _emit_progress_event(
+                self,
                 step_index=step_index,
                 total_steps=total,
                 step_name=step.get("name", "bootstrap"),
@@ -945,6 +976,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             start_index=current_step_index,
             total_steps=total_steps,
         )
+        current_step_index += len(bootstrap_steps)
 
         return {
             "event": "proxmox_container_created",
@@ -962,6 +994,112 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 "cpus": payload["cpus"],
             },
             "setup_steps": steps,
+        }
+
+
+class StartPortacodeServiceHandler(SyncHandler):
+    """Start the Portacode service inside a newly created container."""
+
+    @property
+    def command_name(self) -> str:
+        return "start_portacode_service"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        ctid = message.get("ctid")
+        if not ctid:
+            raise ValueError("ctid is required")
+        try:
+            vmid = int(ctid)
+        except ValueError:
+            raise ValueError("ctid must be an integer")
+
+        record = _read_container_record(vmid)
+        user = record.get("username")
+        password = record.get("password")
+        if not user or not password:
+            raise RuntimeError("Container credentials unavailable")
+
+        start_index = int(message.get("step_index", 1))
+        total_steps = int(message.get("total_steps", start_index + 2))
+        request_id = message.get("request_id")
+
+        auth_step_name = "setup_device_authentication"
+        auth_label = "Setting up device authentication"
+        _emit_progress_event(
+            self,
+            step_index=start_index,
+            total_steps=total_steps,
+            step_name=auth_step_name,
+            step_label=auth_label,
+            status="in_progress",
+            message="Notifying the server of the new device…",
+            phase="service",
+            request_id=request_id,
+        )
+        _emit_progress_event(
+            self,
+            step_index=start_index,
+            total_steps=total_steps,
+            step_name=auth_step_name,
+            step_label=auth_label,
+            status="completed",
+            message="Authentication metadata recorded.",
+            phase="service",
+            request_id=request_id,
+        )
+
+        install_step = start_index + 1
+        install_label = "Launching Portacode service"
+        _emit_progress_event(
+            self,
+            step_index=install_step,
+            total_steps=total_steps,
+            step_name="launch_portacode_service",
+            step_label=install_label,
+            status="in_progress",
+            message="Running sudo portacode service install…",
+            phase="service",
+            request_id=request_id,
+        )
+
+        cmd = f"su - {user} -c 'sudo -S portacode service install'"
+        res = _run_pct(vmid, cmd, input_text=password + "\n")
+
+        if res["returncode"] != 0:
+            _emit_progress_event(
+                self,
+                step_index=install_step,
+                total_steps=total_steps,
+                step_name="launch_portacode_service",
+                step_label=install_label,
+                status="failed",
+                message=f"{install_label} failed: {res.get('stderr') or res.get('stdout')}",
+                phase="service",
+                request_id=request_id,
+                details={
+                    "stderr": res.get("stderr"),
+                    "stdout": res.get("stdout"),
+                },
+            )
+            raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
+
+        _emit_progress_event(
+            self,
+            step_index=install_step,
+            total_steps=total_steps,
+            step_name="launch_portacode_service",
+            step_label=install_label,
+            status="completed",
+            message="Portacode service install finished.",
+            phase="service",
+            request_id=request_id,
+        )
+
+        return {
+            "event": "proxmox_service_started",
+            "success": True,
+            "message": "Portacode service install completed",
+            "ctid": str(vmid),
         }
 
 

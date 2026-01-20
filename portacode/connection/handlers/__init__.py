@@ -45,6 +45,7 @@ from .proxmox_infra import (
     ConfigureProxmoxInfraHandler,
     CreateProxmoxContainerHandler,
     RevertProxmoxInfraHandler,
+    StartPortacodeServiceHandler,
 )
 
 __all__ = [
@@ -84,6 +85,7 @@ __all__ = [
     "ProjectStateGitUnstageHandler",
     "ProjectStateGitRevertHandler",
     "ProjectStateGitCommitHandler",
+    "StartPortacodeServiceHandler",
     "UpdatePortacodeHandler",
     "RevertProxmoxInfraHandler",
 ] 
