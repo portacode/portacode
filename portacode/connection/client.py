@@ -223,14 +223,11 @@ class ConnectionManager:
 
     async def _clock_sync_loop(self) -> None:
         try:
-            while not self._stop_event.is_set():
+            while self._remaining_initial_syncs > 0 and not self._stop_event.is_set():
                 await self._perform_clock_sync()
+                self._remaining_initial_syncs -= 1
                 if self._remaining_initial_syncs > 0:
-                    self._remaining_initial_syncs -= 1
-                    interval = self.CLOCK_SYNC_FAST_INTERVAL
-                else:
-                    interval = self.CLOCK_SYNC_INTERVAL
-                await asyncio.sleep(interval)
+                    await asyncio.sleep(self.CLOCK_SYNC_FAST_INTERVAL)
         except asyncio.CancelledError:
             pass
 
