@@ -367,6 +367,45 @@ Creates a Portacode-managed LXC container, starts it, and bootstraps the Portaco
 *   On success, the device will emit a [`proxmox_container_created`](#proxmox_container_created-event) event that includes the Portacode auth key produced inside the container.
 *   On failure, the device will emit an [`error`](#error) event.
 
+### `start_proxmox_container`
+
+Starts a previously provisioned, Portacode-managed LXC container. Handled by [`StartProxmoxContainerHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+*   `ctid` (string, required): Identifier of the container to start.
+
+**Responses:**
+
+*   Emits a [`proxmox_container_action`](#proxmox_container_action-event) event with `action="start"` and the refreshed infra snapshot.
+*   Emits an [`error`](#error) event when the request cannot be fulfilled (e.g., missing infra config, CT not tagged as managed, or API failure).
+
+### `stop_proxmox_container`
+
+Stops a running Portacode-managed container. Handled by [`StopProxmoxContainerHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+*   `ctid` (string, required): Identifier of the container to stop.
+
+**Responses:**
+
+*   Emits a [`proxmox_container_action`](#proxmox_container_action-event) event with `action="stop"` and the refreshed infra snapshot.
+*   Emits an [`error`](#error) event on failure.
+
+### `remove_proxmox_container`
+
+Deletes a managed container from Proxmox (stopping it first if necessary) and removes the stored metadata file. Handled by [`RemoveProxmoxContainerHandler`](./proxmox_infra.py).
+
+**Payload Fields:**
+
+*   `ctid` (string, required): Identifier of the container to delete.
+
+**Responses:**
+
+*   Emits a [`proxmox_container_action`](#proxmox_container_action-event) event with `action="remove"` and the refreshed infra snapshot after deletion.
+*   Emits an [`error`](#error) event on failure.
+
 ### `proxmox_container_created`
 
 Emitted after a successful `create_proxmox_container` action. Contains the new container ID, the Portacode public key produced inside the container, and the bootstrap logs.
@@ -1067,21 +1106,37 @@ Provides system information in response to a `system_info` action. Handled by [`
     *   `proxmox` (object): Detection hints for Proxmox VE nodes:
         *   `is_proxmox_node` (boolean): True when Proxmox artifacts (e.g., `/etc/proxmox-release`) exist.
         *   `version` (string|null): Raw contents of `/etc/proxmox-release` when readable.
-        *   `infra` (object): Portacode infrastructure configuration snapshot:
-            *   `configured` (boolean): True when `setup_proxmox_infra` stored an API token.
-            *   `host` (string|null): Hostname used for the API client (usually `localhost`).
-            *   `node` (string|null): Proxmox node name that was targeted.
-            *   `user` (string|null): API token owner (e.g., `root@pam`).
-            *   `token_name` (string|null): API token identifier.
-            *   `default_storage` (string|null): Storage pool chosen for future containers.
-            *   `templates` (array[string]): Cached list of available LXC templates.
-            *   `last_verified` (string|null): ISO timestamp when the token was last validated.
-            *   `network` (object):
-                *   `applied` (boolean): True when the bridge/NAT services were successfully configured.
-                *   `message` (string|null): Informational text about the network setup attempt.
-                *   `bridge` (string): The bridge interface configured (typically `vmbr1`).
-                *   `health` (string|null): `"healthy"` when the connectivity verification succeeded.
-            *   `node_status` (object|null): Status response returned by the Proxmox API when validating the token.
+            *   `infra` (object): Portacode infrastructure configuration snapshot:
+                *   `configured` (boolean): True when `setup_proxmox_infra` stored an API token.
+                *   `host` (string|null): Hostname used for the API client (usually `localhost`).
+                *   `node` (string|null): Proxmox node name that was targeted.
+                *   `user` (string|null): API token owner (e.g., `root@pam`).
+                *   `token_name` (string|null): API token identifier.
+                *   `default_storage` (string|null): Storage pool chosen for future containers.
+                *   `templates` (array[string]): Cached list of available LXC templates.
+                *   `last_verified` (string|null): ISO timestamp when the token was last validated.
+                *   `network` (object):
+                    *   `applied` (boolean): True when the bridge/NAT services were successfully configured.
+                    *   `message` (string|null): Informational text about the network setup attempt.
+                    *   `bridge` (string): The bridge interface configured (typically `vmbr1`).
+                    *   `health` (string|null): `"healthy"` when the connectivity verification succeeded.
+                *   `node_status` (object|null): Status response returned by the Proxmox API when validating the token.
+                *   `managed_containers` (object): Cached summary of the Portacode-managed containers:
+                    *   `updated_at` (string): ISO timestamp when this snapshot was last refreshed.
+                    *   `count` (integer): Number of managed containers.
+                    *   `total_ram_mib` (integer): RAM footprint summed across all containers.
+                    *   `total_disk_gib` (integer): Disk footprint summed across all containers.
+                    *   `total_cpu_share` (number): CPU shares requested across all containers.
+                    *   `containers` (array[object]): Container summaries with the following fields:
+                        *   `vmid` (string|null): Numeric CT ID.
+                        *   `hostname` (string|null): Hostname configured in the CT.
+                        *   `template` (string|null): Template identifier used.
+                        *   `storage` (string|null): Storage pool backing the rootfs.
+                        *   `disk_gib` (integer): Rootfs size in GiB.
+                        *   `ram_mib` (integer): Memory size in MiB.
+                        *   `cpu_share` (number): vCPU-equivalent share requested at creation.
+                        *   `status` (string): Lowercase lifecycle status (e.g., `running`, `stopped`, `deleted`).
+                        *   `created_at` (string|null): ISO timestamp recorded when the CT was provisioned.
     *   `portacode_version` (string): Installed CLI version returned by `portacode.__version__`.
 
 ### `proxmox_infra_configured`
@@ -1132,6 +1187,20 @@ Sent continuously while `create_proxmox_container` runs so dashboards can show a
 *   `message` (string): Short human-readable description of the action or failure.
 *   `details` (object, optional): Contains `attempt` (when retries are used) and `error_summary` on failure.
 *   `request_id` (string, optional): Mirrors the `create_proxmox_container` request when provided.
+
+### `proxmox_container_action`
+
+Emitted after `start_proxmox_container`, `stop_proxmox_container`, or `remove_proxmox_container` commands complete. Each event includes the refreshed infra snapshot so dashboards can immediately display the latest managed container totals even though the `proxmox.infra.managed_containers` cache updates only every ~30 seconds.
+
+**Event Fields:**
+
+*   `action` (string): The action that ran (`start`, `stop`, or `remove`).
+*   `success` (boolean): True when the requested action succeeded.
+*   `ctid` (string): Target CT ID.
+*   `message` (string): Human-friendly summary (e.g., `Stopped container 103`).
+*   `status` (string): The container’s new status (e.g., `running`, `stopped`, `deleted`).
+*   `details` (object, optional): Exit status information (e.g., `exitstatus`, `stop_exitstatus`, `delete_exitstatus`).
+*   `infra` (object): Same snapshot described under [`system_info`](#system_info-event) `proxmox.infra`, including the updated `managed_containers` summary.
 
 ### <a name="clock_sync_response"></a>`clock_sync_response`
 

@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -40,6 +41,9 @@ DNS_SERVER = "1.1.1.1"
 IFACES_PATH = Path("/etc/network/interfaces")
 SYSCTL_PATH = Path("/etc/sysctl.d/99-portacode-forward.conf")
 UNIT_DIR = Path("/etc/systemd/system")
+_MANAGED_CONTAINERS_CACHE_TTL_S = 30.0
+_MANAGED_CONTAINERS_CACHE: Dict[str, Any] = {"timestamp": 0.0, "summary": None}
+_MANAGED_CONTAINERS_CACHE_LOCK = threading.Lock()
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
 
@@ -290,6 +294,117 @@ def _ensure_containers_dir() -> None:
     CONTAINERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _invalidate_managed_containers_cache() -> None:
+    with _MANAGED_CONTAINERS_CACHE_LOCK:
+        _MANAGED_CONTAINERS_CACHE["timestamp"] = 0.0
+        _MANAGED_CONTAINERS_CACHE["summary"] = None
+
+
+def _load_managed_container_records() -> List[Dict[str, Any]]:
+    _ensure_containers_dir()
+    records: List[Dict[str, Any]] = []
+    for path in sorted(CONTAINERS_DIR.glob("ct-*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - best effort logging
+            logger.debug("Unable to read container record %s: %s", path, exc)
+            continue
+        records.append(payload)
+    return records
+
+
+def _build_managed_containers_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total_ram = 0
+    total_disk = 0
+    total_cpu_share = 0.0
+    containers: List[Dict[str, Any]] = []
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _as_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for record in sorted(records, key=lambda entry: _as_int(entry.get("vmid"))):
+        ram_mib = _as_int(record.get("ram_mib"))
+        disk_gib = _as_int(record.get("disk_gib"))
+        cpu_share = _as_float(record.get("cpus"))
+        total_ram += ram_mib
+        total_disk += disk_gib
+        total_cpu_share += cpu_share
+        status = (record.get("status") or "unknown").lower()
+        containers.append(
+            {
+                "vmid": str(_as_int(record.get("vmid"))) if record.get("vmid") is not None else None,
+                "hostname": record.get("hostname"),
+                "template": record.get("template"),
+                "storage": record.get("storage"),
+                "disk_gib": disk_gib,
+                "ram_mib": ram_mib,
+                "cpu_share": cpu_share,
+                "created_at": record.get("created_at"),
+                "status": status,
+            }
+        )
+
+    return {
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "count": len(containers),
+        "total_ram_mib": total_ram,
+        "total_disk_gib": total_disk,
+        "total_cpu_share": round(total_cpu_share, 2),
+        "containers": containers,
+    }
+
+
+def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
+    def _refresh_container_statuses(records: List[Dict[str, Any]], config: Dict[str, Any] | None) -> None:
+        if not records or not config:
+            return
+        try:
+            proxmox = _connect_proxmox(config)
+            node = _get_node_from_config(config)
+            statuses = {
+                str(ct.get("vmid")): (ct.get("status") or "unknown").lower()
+                for ct in proxmox.nodes(node).lxc.get()
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug("Failed to refresh container statuses: %s", exc)
+            return
+        for record in records:
+            vmid = record.get("vmid")
+            if vmid is None:
+                continue
+            try:
+                vmid_key = str(int(vmid))
+            except (ValueError, TypeError):
+                continue
+            status = statuses.get(vmid_key)
+            if status:
+                record["status"] = status
+
+    now = time.monotonic()
+    with _MANAGED_CONTAINERS_CACHE_LOCK:
+        cache_ts = _MANAGED_CONTAINERS_CACHE["timestamp"]
+        cached = _MANAGED_CONTAINERS_CACHE["summary"]
+    if not force and cached and now - cache_ts < _MANAGED_CONTAINERS_CACHE_TTL_S:
+        return cached
+    config = _load_config()
+    records = _load_managed_container_records()
+    _refresh_container_statuses(records, config)
+    summary = _build_managed_containers_summary(records)
+    with _MANAGED_CONTAINERS_CACHE_LOCK:
+        _MANAGED_CONTAINERS_CACHE["timestamp"] = now
+        _MANAGED_CONTAINERS_CACHE["summary"] = summary
+    return summary
+
+
 def _format_rootfs(storage: str, disk_gib: int, storage_type: str) -> str:
     if storage_type in ("lvm", "lvmthin"):
         return f"{storage}:{disk_gib}"
@@ -365,14 +480,14 @@ def _get_storage_type(storages: Iterable[Dict[str, Any]], storage_name: str) -> 
     return ""
 
 
-def _validate_positive_int(value: Any, default: int) -> int:
+def _validate_positive_number(value: Any, default: float) -> float:
     try:
-        candidate = int(value)
+        candidate = float(value)
         if candidate > 0:
             return candidate
     except Exception:
         pass
-    return default
+    return float(default)
 
 
 def _wait_for_task(proxmox: Any, node: str, upid: str) -> Tuple[Dict[str, Any], float]:
@@ -424,10 +539,24 @@ def _start_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any]
     return _wait_for_task(proxmox, node, upid)
 
 
+def _stop_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any], float]:
+    status = proxmox.nodes(node).lxc(vmid).status.current.get()
+    if status.get("status") != "running":
+        return status, 0.0
+    upid = proxmox.nodes(node).lxc(vmid).status.stop.post()
+    return _wait_for_task(proxmox, node, upid)
+
+
+def _delete_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any], float]:
+    upid = proxmox.nodes(node).lxc(vmid).delete()
+    return _wait_for_task(proxmox, node, upid)
+
+
 def _write_container_record(vmid: int, payload: Dict[str, Any]) -> None:
     _ensure_containers_dir()
     path = CONTAINERS_DIR / f"ct-{vmid}.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _invalidate_managed_containers_cache()
 
 
 def _read_container_record(vmid: int) -> Dict[str, Any]:
@@ -435,6 +564,19 @@ def _read_container_record(vmid: int) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Container record {path} missing")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _update_container_record(vmid: int, updates: Dict[str, Any]) -> None:
+    record = _read_container_record(vmid)
+    record.update(updates)
+    _write_container_record(vmid, record)
+
+
+def _remove_container_record(vmid: int) -> None:
+    path = CONTAINERS_DIR / f"ct-{vmid}.json"
+    if path.exists():
+        path.unlink()
+        _invalidate_managed_containers_cache()
 
 
 def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -446,9 +588,9 @@ def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) ->
 
     bridge = config.get("network", {}).get("bridge", DEFAULT_BRIDGE)
     hostname = (message.get("hostname") or "").strip()
-    disk_gib = _validate_positive_int(message.get("disk_gib") or message.get("disk"), 32)
-    ram_mib = _validate_positive_int(message.get("ram_mib") or message.get("ram"), 2048)
-    cpus = _validate_positive_int(message.get("cpus"), 1)
+    disk_gib = int(max(round(_validate_positive_number(message.get("disk_gib") or message.get("disk"), 3)), 1))
+    ram_mib = int(max(round(_validate_positive_number(message.get("ram_mib") or message.get("ram"), 2048)), 1))
+    cpus = _validate_positive_number(message.get("cpus"), 0.2)
     storage = message.get("storage") or config.get("default_storage") or ""
     if not storage:
         raise ValueError("Storage pool could not be determined.")
@@ -471,6 +613,38 @@ def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) ->
         "description": MANAGED_MARKER,
     }
     return payload
+
+
+def _ensure_infra_configured() -> Dict[str, Any]:
+    config = _load_config()
+    if not config or not config.get("token_value"):
+        raise RuntimeError("Proxmox infrastructure is not configured.")
+    return config
+
+
+def _get_node_from_config(config: Dict[str, Any]) -> str:
+    return config.get("node") or DEFAULT_NODE_NAME
+
+
+def _parse_ctid(message: Dict[str, Any]) -> int:
+    for key in ("ctid", "vmid"):
+        value = message.get(key)
+        if value is not None:
+            try:
+                return int(str(value).strip())
+            except ValueError:
+                raise ValueError(f"{key} must be an integer") from None
+    raise ValueError("ctid is required")
+
+
+def _ensure_container_managed(
+    proxmox: Any, node: str, vmid: int
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    record = _read_container_record(vmid)
+    ct_cfg = proxmox.nodes(node).lxc(str(vmid)).config.get()
+    if not ct_cfg or MANAGED_MARKER not in (ct_cfg.get("description") or ""):
+        raise RuntimeError(f"Container {vmid} is not managed by Portacode.")
+    return record, ct_cfg
 
 
 def _connect_proxmox(config: Dict[str, Any]) -> Any:
@@ -528,15 +702,22 @@ def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -
 
     last_pub = last_priv = None
     stable = 0
+    history: List[Dict[str, Any]] = []
+
+    process_exited = False
+    exit_out = exit_err = ""
     while time.time() - start < timeout_s:
         if proc.poll() is not None:
-            out, err = proc.communicate(timeout=1)
-            return {
-                "ok": False,
-                "error": "portacode connect exited before keys were created",
-                "stdout": (out or "").strip(),
-                "stderr": (err or "").strip(),
-            }
+            process_exited = True
+            exit_out, exit_err = proc.communicate(timeout=1)
+            history.append(
+                {
+                    "timestamp_s": round(time.time() - start, 2),
+                    "status": "process_exited",
+                    "returncode": proc.returncode,
+                }
+            )
+            break
         pub_size = file_size(pub_path)
         priv_size = file_size(priv_path)
         if pub_size and priv_size:
@@ -546,21 +727,60 @@ def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -
                 stable = 0
             last_pub, last_priv = pub_size, priv_size
             if stable >= 1:
+                history.append(
+                    {
+                        "timestamp_s": round(time.time() - start, 2),
+                        "pub_size": pub_size,
+                        "priv_size": priv_size,
+                        "stable": stable,
+                    }
+                )
                 break
+        history.append(
+            {
+                "timestamp_s": round(time.time() - start, 2),
+                "pub_size": pub_size,
+                "priv_size": priv_size,
+                "stable": stable,
+            }
+        )
         time.sleep(1)
 
-    if stable < 1:
+    final_pub = file_size(pub_path)
+    final_priv = file_size(priv_path)
+    if final_pub and final_priv:
+        key_res = _run_pct(vmid, f"su - {user} -c 'cat {pub_path}'")
+        if not process_exited:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        return {
+            "ok": True,
+            "public_key": key_res["stdout"].strip(),
+            "history": history,
+        }
+
+    if not process_exited:
         proc.terminate()
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
-        out, err = proc.communicate(timeout=1)
+        exit_out, exit_err = proc.communicate(timeout=1)
+        history.append(
+            {
+                "timestamp_s": round(time.time() - start, 2),
+                "status": "timeout_waiting_for_keys",
+            }
+        )
         return {
             "ok": False,
             "error": "timed out waiting for portacode key files",
-            "stdout": (out or "").strip(),
-            "stderr": (err or "").strip(),
+            "stdout": (exit_out or "").strip(),
+            "stderr": (exit_err or "").strip(),
+            "history": history,
         }
 
     proc.terminate()
@@ -573,6 +793,7 @@ def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -
     return {
         "ok": True,
         "public_key": key_res["stdout"].strip(),
+        "history": history,
     }
 
 
@@ -670,6 +891,19 @@ def _bootstrap_portacode(
         total_steps=total_steps,
     )
     if not ok:
+        details = results[-1] if results else {}
+        summary = details.get("error_summary") or details.get("stderr") or details.get("stdout") or details.get("name")
+        history = details.get("history")
+        history_snippet = ""
+        if isinstance(history, list) and history:
+            history_snippet = f" history={history[-3:]}"
+        if summary:
+            logger.warning(
+                "Portacode bootstrap failure summary=%s%s",
+                summary,
+                f" history_len={len(history)}" if history else "",
+            )
+            raise RuntimeError(f"Portacode bootstrap steps failed: {summary}{history_snippet}")
         raise RuntimeError("Portacode bootstrap steps failed.")
     key_step = next((entry for entry in results if entry.get("name") == "portacode_connect"), None)
     public_key = key_step.get("public_key") if key_step else None
@@ -748,6 +982,7 @@ def configure_infrastructure(token_identifier: str, token_value: str, verify_ssl
     _save_config(config)
     snapshot = build_snapshot(config)
     snapshot["node_status"] = status
+    snapshot["managed_containers"] = _get_managed_containers_summary(force=True)
     return snapshot
 
 
@@ -756,6 +991,7 @@ def get_infra_snapshot() -> Dict[str, Any]:
     snapshot = build_snapshot(config)
     if config.get("node_status"):
         snapshot["node_status"] = config["node_status"]
+    snapshot["managed_containers"] = _get_managed_containers_summary()
     return snapshot
 
 
@@ -768,6 +1004,7 @@ def revert_infrastructure() -> Dict[str, Any]:
     snapshot["network"]["applied"] = False
     snapshot["network"]["message"] = "Reverted to previous network state"
     snapshot["network"]["bridge"] = DEFAULT_BRIDGE
+    snapshot["managed_containers"] = _get_managed_containers_summary(force=True)
     return snapshot
 
 
@@ -791,7 +1028,7 @@ def _instantiate_container(proxmox: Any, node: str, payload: Dict[str, Any]) -> 
             rootfs=rootfs,
             memory=int(payload["ram_mib"]),
             swap=int(payload.get("swap_mb", 0)),
-            cores=int(payload.get("cpus", 1)),
+            cores=max(int(payload.get("cores", 1)), 1),
             cpuunits=int(payload.get("cpuunits", 256)),
             net0=payload["net0"],
             unprivileged=int(payload.get("unprivileged", 1)),
@@ -905,6 +1142,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             vmid, _ = _instantiate_container(proxmox, node, payload)
             payload["vmid"] = vmid
             payload["created_at"] = datetime.utcnow().isoformat() + "Z"
+            payload["status"] = "creating"
             _write_container_record(vmid, payload)
             return proxmox, node, vmid, payload
 
@@ -926,6 +1164,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             "Container startup completed.",
             _start_container_step,
         )
+        _update_container_record(vmid, {"status": "running"})
 
         def _bootstrap_progress_callback(
             step_index: int,
@@ -1100,6 +1339,106 @@ class StartPortacodeServiceHandler(SyncHandler):
             "success": True,
             "message": "Portacode service install completed",
             "ctid": str(vmid),
+        }
+
+
+class StartProxmoxContainerHandler(SyncHandler):
+    """Start a managed container via the Proxmox API."""
+
+    @property
+    def command_name(self) -> str:
+        return "start_proxmox_container"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        vmid = _parse_ctid(message)
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        _ensure_container_managed(proxmox, node, vmid)
+
+        status, elapsed = _start_container(proxmox, node, vmid)
+        _update_container_record(vmid, {"status": "running"})
+
+        infra = get_infra_snapshot()
+        return {
+            "event": "proxmox_container_action",
+            "action": "start",
+            "success": True,
+            "ctid": str(vmid),
+            "message": f"Started container {vmid} in {elapsed:.1f}s.",
+            "details": {"exitstatus": status.get("exitstatus")},
+            "status": status.get("status"),
+            "infra": infra,
+        }
+
+
+class StopProxmoxContainerHandler(SyncHandler):
+    """Stop a managed container via the Proxmox API."""
+
+    @property
+    def command_name(self) -> str:
+        return "stop_proxmox_container"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        vmid = _parse_ctid(message)
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        _ensure_container_managed(proxmox, node, vmid)
+
+        status, elapsed = _stop_container(proxmox, node, vmid)
+        final_status = status.get("status") or "stopped"
+        _update_container_record(vmid, {"status": final_status})
+
+        infra = get_infra_snapshot()
+        message_text = (
+            f"Container {vmid} is already stopped."
+            if final_status != "running" and elapsed == 0.0
+            else f"Stopped container {vmid} in {elapsed:.1f}s."
+        )
+        return {
+            "event": "proxmox_container_action",
+            "action": "stop",
+            "success": True,
+            "ctid": str(vmid),
+            "message": message_text,
+            "details": {"exitstatus": status.get("exitstatus")},
+            "status": final_status,
+            "infra": infra,
+        }
+
+
+class RemoveProxmoxContainerHandler(SyncHandler):
+    """Delete a managed container via the Proxmox API."""
+
+    @property
+    def command_name(self) -> str:
+        return "remove_proxmox_container"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        vmid = _parse_ctid(message)
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        _ensure_container_managed(proxmox, node, vmid)
+
+        stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
+        delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
+        _remove_container_record(vmid)
+
+        infra = get_infra_snapshot()
+        return {
+            "event": "proxmox_container_action",
+            "action": "remove",
+            "success": True,
+            "ctid": str(vmid),
+            "message": f"Deleted container {vmid} in {delete_elapsed:.1f}s.",
+            "details": {
+                "stop_exitstatus": stop_status.get("exitstatus"),
+                "delete_exitstatus": delete_status.get("exitstatus"),
+            },
+            "status": "deleted",
+            "infra": infra,
         }
 
 
