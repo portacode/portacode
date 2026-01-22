@@ -361,6 +361,9 @@ Creates a Portacode-managed LXC container, starts it, and bootstraps the Portaco
 *   `username` (string, optional): OS user to provision (defaults to `svcuser`).
 *   `password` (string, optional): Password for the user (used only during provisioning).
 *   `ssh_key` (string, optional): SSH public key to add to the user.
+*   `device_id` (string, optional): ID of the Device record that already exists on the dashboard.
+*   `device_public_key` (string, optional): PEM-encoded Portacode public key. When supplied together with `device_private_key` the handler injects the keypair, records the device metadata, and runs `portacode service install` automatically.
+*   `device_private_key` (string, optional): PEM-encoded private key that pairs with `device_public_key`. Both key fields must be present for the automatic service-install mode.
 
 **Responses:**
 
@@ -418,6 +421,8 @@ Emitted after a successful `create_proxmox_container` action. Contains the new c
 *   `public_key` (string): Portacode public auth key created inside the new container.
 *   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
 *   `setup_steps` (array[object]): Detailed bootstrap step results (name, stdout/stderr, elapsed time, and status).
+*   `device_id` (string, optional): Mirrors the `device_id` supplied with `create_proxmox_container`, if any.
+*   `service_installed` (boolean): True when the handler already ran `portacode service install` (with a provided keypair); otherwise it remains False and the dashboard can call `start_portacode_service`.
 
 ### `proxmox_container_progress`
 
@@ -450,6 +455,7 @@ Runs `sudo portacode service install` inside the container after the dashboard h
 *   Emits additional [`proxmox_container_progress`](#proxmox_container_progress-event) events to report the authentication and service-install steps.
 *   On success, emits a [`proxmox_service_started`](#proxmox_service_started-event).
 *   On failure, emits a generic [`error`](#error) event.
+*   When `create_proxmox_container` already provided a dashboard-generated keypair, the handler may have installed the service already, so this call is optional unless you need to re-run the install.
 
 ### `proxmox_service_started`
 

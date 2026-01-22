@@ -7,15 +7,17 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import platformdirs
 
@@ -428,7 +430,12 @@ def _friendly_step_label(step_name: str) -> str:
     return normalized.capitalize()
 
 
-def _build_bootstrap_steps(user: str, password: str, ssh_key: str) -> List[Dict[str, Any]]:
+def _build_bootstrap_steps(
+    user: str,
+    password: str,
+    ssh_key: str,
+    include_portacode_connect: bool = True,
+) -> List[Dict[str, Any]]:
     steps = [
         {
             "name": "apt_update",
@@ -465,11 +472,14 @@ def _build_bootstrap_steps(user: str, password: str, ssh_key: str) -> List[Dict[
             "cmd": f"install -d -m 700 /home/{user}/.ssh && echo '{ssh_key}' >> /home/{user}/.ssh/authorized_keys && chown -R {user}:{user} /home/{user}/.ssh",
             "retries": 0,
         })
-    steps.extend([
-        {"name": "pip_upgrade", "cmd": "python3 -m pip install --upgrade pip", "retries": 0},
-        {"name": "install_portacode", "cmd": "python3 -m pip install --upgrade portacode", "retries": 0},
-        {"name": "portacode_connect", "type": "portacode_connect", "timeout_s": 30},
-    ])
+    steps.extend(
+        [
+            {"name": "pip_upgrade", "cmd": "python3 -m pip install --upgrade pip", "retries": 0},
+            {"name": "install_portacode", "cmd": "python3 -m pip install --upgrade portacode", "retries": 0},
+        ]
+    )
+    if include_portacode_connect:
+        steps.append({"name": "portacode_connect", "type": "portacode_connect", "timeout_s": 30})
     return steps
 
 
@@ -679,6 +689,74 @@ def _run_pct_check(vmid: int, cmd: str) -> Dict[str, Any]:
     return res
 
 
+def _run_pct_exec(vmid: int, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return _call_subprocess(["pct", "exec", str(vmid), "--", *command])
+
+
+def _run_pct_exec_check(vmid: int, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    res = _run_pct_exec(vmid, command)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr or res.stdout or f"pct exec {' '.join(command)} failed")
+    return res
+
+
+def _run_pct_push(vmid: int, src: str, dest: str) -> subprocess.CompletedProcess[str]:
+    return _call_subprocess(["pct", "push", str(vmid), src, dest])
+
+
+def _push_bytes_to_container(
+    vmid: int, user: str, path: str, data: bytes, mode: int = 0o600
+) -> None:
+    logger.debug("Preparing to push %d bytes to container vmid=%s path=%s for user=%s", len(data), vmid, path, user)
+    tmp_path: Optional[str] = None
+    try:
+        parent = Path(path).parent
+        parent_str = parent.as_posix()
+        if parent_str not in {"", ".", "/"}:
+            _run_pct_exec_check(vmid, ["mkdir", "-p", parent_str])
+            _run_pct_exec_check(vmid, ["chown", "-R", f"{user}:{user}", parent_str])
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+
+        push_res = _run_pct_push(vmid, tmp_path, path)
+        if push_res.returncode != 0:
+            raise RuntimeError(push_res.stderr or push_res.stdout or f"pct push returned {push_res.returncode}")
+
+        _run_pct_exec_check(vmid, ["chown", f"{user}:{user}", path])
+        _run_pct_exec_check(vmid, ["chmod", format(mode, "o"), path])
+        logger.debug("Successfully pushed %d bytes to vmid=%s path=%s", len(data), vmid, path)
+    except Exception as exc:
+        logger.error("Failed to write to container vmid=%s path=%s for user=%s: %s", vmid, path, user, exc)
+        raise
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError as cleanup_exc:
+                logger.warning("Failed to remove temporary file %s: %s", tmp_path, cleanup_exc)
+
+
+def _resolve_portacode_key_dir(vmid: int, user: str) -> str:
+    data_dir_cmd = f"su - {user} -c 'echo -n ${{XDG_DATA_HOME:-$HOME/.local/share}}'"
+    data_home = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
+    portacode_dir = f"{data_home}/portacode"
+    _run_pct_exec_check(vmid, ["mkdir", "-p", portacode_dir])
+    _run_pct_exec_check(vmid, ["chown", "-R", f"{user}:{user}", portacode_dir])
+    return f"{portacode_dir}/keys"
+
+
+def _deploy_device_keypair(vmid: int, user: str, private_key: str, public_key: str) -> None:
+    key_dir = _resolve_portacode_key_dir(vmid, user)
+    priv_path = f"{key_dir}/id_portacode"
+    pub_path = f"{key_dir}/id_portacode.pub"
+    _push_bytes_to_container(vmid, user, priv_path, private_key.encode(), mode=0o600)
+    _push_bytes_to_container(vmid, user, pub_path, public_key.encode(), mode=0o644)
+
+
 def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -> Dict[str, Any]:
     cmd = ["pct", "exec", str(vmid), "--", "bash", "-lc", f"su - {user} -c 'portacode connect'"]
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -880,6 +958,7 @@ def _bootstrap_portacode(
     progress_callback: Optional[ProgressCallback] = None,
     start_index: int = 1,
     total_steps: Optional[int] = None,
+    default_public_key: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     actual_steps = steps if steps is not None else _build_bootstrap_steps(user, password, ssh_key)
     results, ok = _run_setup_steps(
@@ -906,7 +985,7 @@ def _bootstrap_portacode(
             raise RuntimeError(f"Portacode bootstrap steps failed: {summary}{history_snippet}")
         raise RuntimeError("Portacode bootstrap steps failed.")
     key_step = next((entry for entry in results if entry.get("name") == "portacode_connect"), None)
-    public_key = key_step.get("public_key") if key_step else None
+    public_key = key_step.get("public_key") if key_step else default_public_key
     if not public_key:
         raise RuntimeError("Portacode connect did not return a public key.")
     return public_key, results
@@ -1052,8 +1131,17 @@ class CreateProxmoxContainerHandler(SyncHandler):
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("create_proxmox_container command received")
         request_id = message.get("request_id")
+        device_id = message.get("device_id")
+        device_public_key = (message.get("device_public_key") or "").strip()
+        device_private_key = (message.get("device_private_key") or "").strip()
+        has_device_keypair = bool(device_public_key and device_private_key)
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
-        bootstrap_steps = _build_bootstrap_steps(bootstrap_user, bootstrap_password, bootstrap_ssh_key)
+        bootstrap_steps = _build_bootstrap_steps(
+            bootstrap_user,
+            bootstrap_password,
+            bootstrap_ssh_key,
+            include_portacode_connect=not has_device_keypair,
+        )
         total_steps = 3 + len(bootstrap_steps) + 2
         current_step_index = 1
 
@@ -1214,8 +1302,101 @@ class CreateProxmoxContainerHandler(SyncHandler):
             progress_callback=_bootstrap_progress_callback,
             start_index=current_step_index,
             total_steps=total_steps,
+            default_public_key=device_public_key if has_device_keypair else None,
         )
         current_step_index += len(bootstrap_steps)
+
+        service_installed = False
+        if has_device_keypair:
+            logger.info(
+                "deploying dashboard-provided Portacode keypair (device_id=%s) into container %s",
+                device_id,
+                vmid,
+            )
+            _deploy_device_keypair(
+                vmid,
+                payload["username"],
+                device_private_key,
+                device_public_key,
+            )
+            service_installed = True
+            service_start_index = current_step_index
+
+            auth_step_name = "setup_device_authentication"
+            auth_label = "Setting up device authentication"
+            _emit_progress_event(
+                self,
+                step_index=service_start_index,
+                total_steps=total_steps,
+                step_name=auth_step_name,
+                step_label=auth_label,
+                status="in_progress",
+                message="Notifying the server of the new device…",
+                phase="service",
+                request_id=request_id,
+            )
+            _emit_progress_event(
+                self,
+                step_index=service_start_index,
+                total_steps=total_steps,
+                step_name=auth_step_name,
+                step_label=auth_label,
+                status="completed",
+                message="Authentication metadata recorded.",
+                phase="service",
+                request_id=request_id,
+            )
+
+            install_step = service_start_index + 1
+            install_label = "Launching Portacode service"
+            _emit_progress_event(
+                self,
+                step_index=install_step,
+                total_steps=total_steps,
+                step_name="launch_portacode_service",
+                step_label=install_label,
+                status="in_progress",
+                message="Running sudo portacode service install…",
+                phase="service",
+                request_id=request_id,
+            )
+
+            cmd = f"su - {payload['username']} -c 'sudo -S portacode service install'"
+            res = _run_pct(vmid, cmd, input_text=payload["password"] + "\n")
+
+            if res["returncode"] != 0:
+                _emit_progress_event(
+                    self,
+                    step_index=install_step,
+                    total_steps=total_steps,
+                    step_name="launch_portacode_service",
+                    step_label=install_label,
+                    status="failed",
+                    message=f"{install_label} failed: {res.get('stderr') or res.get('stdout')}",
+                    phase="service",
+                    request_id=request_id,
+                    details={
+                        "stderr": res.get("stderr"),
+                        "stdout": res.get("stdout"),
+                    },
+                )
+                raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
+
+            _emit_progress_event(
+                self,
+                step_index=install_step,
+                total_steps=total_steps,
+                step_name="launch_portacode_service",
+                step_label=install_label,
+                status="completed",
+                message="Portacode service install finished.",
+                phase="service",
+                request_id=request_id,
+            )
+
+            logger.info("create_proxmox_container: portacode service install completed inside ct %s", vmid)
+
+            current_step_index += 2
 
         return {
             "event": "proxmox_container_created",
@@ -1233,6 +1414,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 "cpus": payload["cpus"],
             },
             "setup_steps": steps,
+            "device_id": device_id,
+            "service_installed": service_installed,
         }
 
 
