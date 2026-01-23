@@ -10,8 +10,9 @@ import platform
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from portacode import __version__
 import psutil
@@ -31,11 +32,26 @@ _cpu_percent = 0.0
 _cpu_thread = None
 _cpu_lock = threading.Lock()
 
+# Cgroup v2 tracking
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_cgroup_path: Optional[Path] = None
+_cgroup_v2_supported: Optional[bool] = None
+_CGROUP_CPU_STAT = "cpu.stat"
+_CGROUP_CPU_MAX = "cpu.max"
+_last_cgroup_usage: Optional[int] = None
+_last_cgroup_time: Optional[float] = None
+
 def _cpu_monitor():
     """Background thread to update CPU usage every 5 seconds."""
     global _cpu_percent
     while True:
-        _cpu_percent = psutil.cpu_percent(interval=5.0)
+        percent = _get_cgroup_cpu_percent()
+        if percent is None:
+            # Fall back to psutil when cgroup stats are not available yet.
+            percent = psutil.cpu_percent(interval=5.0)
+        else:
+            time.sleep(5.0)
+        _cpu_percent = percent
 
 def _ensure_cpu_thread():
     """Ensure CPU monitoring thread is running (singleton)."""
@@ -128,6 +144,119 @@ def _get_playwright_info() -> Dict[str, Any]:
         result["error"] = str(exc)
 
     return result
+
+
+def _resolve_cgroup_path() -> Path:
+    global _cgroup_path
+    if _cgroup_path is not None and _cgroup_path.exists():
+        return _cgroup_path
+    path = _CGROUP_ROOT
+    cgroup_file = Path("/proc/self/cgroup")
+    if cgroup_file.exists():
+        try:
+            contents = cgroup_file.read_text()
+        except OSError:
+            pass
+        else:
+            for line in contents.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    continue
+                rel_path = parts[-1].lstrip("/")
+                candidate = _CGROUP_ROOT / rel_path
+                # Fallback to root path if the relative path is empty
+                candidate = candidate if rel_path else _CGROUP_ROOT
+                if candidate.exists():
+                    path = candidate
+                    break
+    _cgroup_path = path
+    return _cgroup_path
+
+
+def _cgroup_file(name: str) -> Path:
+    return _resolve_cgroup_path() / name
+
+
+def _detect_cgroup_v2() -> bool:
+    global _cgroup_v2_supported
+    if _cgroup_v2_supported is not None:
+        return _cgroup_v2_supported
+    controllers = _cgroup_file("cgroup.controllers")
+    cpu_stat = _cgroup_file(_CGROUP_CPU_STAT)
+    _cgroup_v2_supported = controllers.exists() and cpu_stat.exists()
+    return _cgroup_v2_supported
+
+
+def _read_cgroup_cpu_usage() -> Optional[int]:
+    path = _cgroup_file(_CGROUP_CPU_STAT)
+    try:
+        data = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in data.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "usage_usec":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _read_cgroup_cpu_limit() -> Optional[float]:
+    """Return the allowed CPU (cores) for this cgroup, if limited."""
+    path = _cgroup_file(_CGROUP_CPU_MAX)
+    if not path.exists():
+        return None
+    try:
+        data = path.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    parts = data.split()
+    if len(parts) < 2:
+        return None
+    quota, period = parts[0], parts[1]
+    if quota == "max":
+        return None
+    try:
+        quota_value = int(quota)
+        period_value = int(period)
+    except ValueError:
+        return None
+    if period_value <= 0:
+        return None
+    return quota_value / period_value
+
+
+def _get_cgroup_cpu_percent() -> Optional[float]:
+    if not _detect_cgroup_v2():
+        return None
+    usage = _read_cgroup_cpu_usage()
+    if usage is None:
+        return None
+    now = time.monotonic()
+    global _last_cgroup_usage, _last_cgroup_time
+    prev_usage = _last_cgroup_usage
+    prev_time = _last_cgroup_time
+    _last_cgroup_usage = usage
+    _last_cgroup_time = now
+    if prev_usage is None or prev_time is None:
+        return None
+    delta_usage = usage - prev_usage
+    delta_time = now - prev_time
+    if delta_time <= 0 or delta_usage < 0:
+        return None
+    cpu_ratio = (delta_usage / 1_000_000) / delta_time
+    limit_cpus = _read_cgroup_cpu_limit()
+    if limit_cpus and limit_cpus > 0:
+        percent = (cpu_ratio / limit_cpus) * 100.0
+    else:
+        cpu_count = psutil.cpu_count(logical=True) or 1
+        percent = (cpu_ratio / cpu_count) * 100.0
+    return max(0.0, min(percent, 100.0))
 
 
 def _run_probe_command(cmd: list[str]) -> str | None:

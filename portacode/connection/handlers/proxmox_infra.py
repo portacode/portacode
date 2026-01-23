@@ -263,7 +263,10 @@ def _ensure_bridge(bridge: str = DEFAULT_BRIDGE) -> Dict[str, Any]:
         apt = shutil.which("apt-get")
         if not apt:
             raise RuntimeError("dnsmasq is missing and apt-get unavailable to install it")
-        _call_subprocess([apt, "update"], check=True)
+        update = _call_subprocess([apt, "update"], check=False)
+        if update.returncode not in (0, 100):
+            msg = update.stderr or update.stdout or f"exit status {update.returncode}"
+            raise RuntimeError(f"apt-get update failed: {msg}")
         _call_subprocess([apt, "install", "-y", "dnsmasq"], check=True)
     _write_bridge_config(bridge)
     _ensure_sysctl()
@@ -976,13 +979,24 @@ def _bootstrap_portacode(
         history_snippet = ""
         if isinstance(history, list) and history:
             history_snippet = f" history={history[-3:]}"
+        command = details.get("cmd")
+        command_text = ""
+        if command:
+            if isinstance(command, (list, tuple)):
+                command_text = shlex.join(str(entry) for entry in command)
+            else:
+                command_text = str(command)
+        command_suffix = f" command={command_text}" if command_text else ""
         if summary:
             logger.warning(
-                "Portacode bootstrap failure summary=%s%s",
+                "Portacode bootstrap failure summary=%s%s%s",
                 summary,
                 f" history_len={len(history)}" if history else "",
+                f" command={command_text}" if command_text else "",
             )
-            raise RuntimeError(f"Portacode bootstrap steps failed: {summary}{history_snippet}")
+            raise RuntimeError(
+                f"Portacode bootstrap steps failed: {summary}{history_snippet}{command_suffix}"
+            )
         raise RuntimeError("Portacode bootstrap steps failed.")
     key_step = next((entry for entry in results if entry.get("name") == "portacode_connect"), None)
     public_key = key_step.get("public_key") if key_step else default_public_key
@@ -1034,17 +1048,13 @@ def configure_infrastructure(token_identifier: str, token_value: str, verify_ssl
         network = _ensure_bridge()
         # Wait for network convergence before validating connectivity
         time.sleep(2)
-        if _verify_connectivity():
-            network["health"] = "healthy"
-        else:
-            network = {"applied": False, "bridge": DEFAULT_BRIDGE, "message": "Connectivity check failed; bridge reverted"}
-            _revert_bridge()
-    except PermissionError as exc:
-        network = {"applied": False, "message": str(exc), "bridge": DEFAULT_BRIDGE}
-        logger.warning("Bridge setup skipped: %s", exc)
-    except Exception as exc:  # pragma: no cover - best effort
-        network = {"applied": False, "message": str(exc), "bridge": DEFAULT_BRIDGE}
-        logger.warning("Bridge setup failed: %s", exc)
+        if not _verify_connectivity():
+            raise RuntimeError("Connectivity check failed; bridge reverted")
+        network["health"] = "healthy"
+    except Exception as exc:
+        logger.warning("Bridge setup failed; reverting previous changes: %s", exc)
+        _revert_bridge()
+        raise
     config = {
         "host": DEFAULT_HOST,
         "node": node,
