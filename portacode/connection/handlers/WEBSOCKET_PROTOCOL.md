@@ -27,6 +27,10 @@ The Portacode server acts as a **routing middleman** between client sessions and
 
 - **`source_client_session`** (Server → Device): Server **adds this** when forwarding client commands to devices (so device knows which client sent the command and can target responses back). Clients never include this field.
 
+### Proxying infrastructure updates
+
+Portacode infrastructure devices (like the proxmox host) can send events on behalf of the LXC Devices they manage. Such messages include the optional `on_behalf_of_device` field and the server silently replaces `device_id` with that child device before routing. The gateway enforces that the sender is the child’s `proxmox_parent` (via `Device.proxmox_parent`) so only the infrastructure owner can impersonate a child device. Messages that fail this check are dropped.
+
 This document describes the complete protocol for communicating with devices through the server, guiding app developers on how to get their client sessions to communicate with devices.
 
 ## Table of Contents
@@ -422,6 +426,7 @@ Emitted after a successful `create_proxmox_container` action. Contains the new c
 *   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
 *   `setup_steps` (array[object]): Detailed bootstrap step results (name, stdout/stderr, elapsed time, and status).
 *   `device_id` (string): Mirrors the dashboard Device ID supplied with `create_proxmox_container`. The handler records this value in the container metadata file so subsequent events can reference the same Device.
+*   `on_behalf_of_device` (string): Same value as `device_id` when the container host is reporting progress for the child device; only proxmox parents may include this field.
 *   `service_installed` (boolean): True when the handler already ran `portacode service install` (with a provided keypair); otherwise it remains False and the dashboard can call `start_portacode_service`.
 
 ### `proxmox_container_progress`
@@ -439,6 +444,7 @@ Sent intermittently while `create_proxmox_container` is executing so callers can
 *   `message` (string): Short description of what is happening or why a failure occurred.
 *   `details` (object, optional): Contains `attempt` (if retries were needed) and `error_summary` when a step fails.
 *   `request_id` (string, optional): Mirrors the request ID from the incoming `create_proxmox_container` payload when available.
+ *   `on_behalf_of_device` (string, optional): When present the proxmox device is reporting progress for the referenced dashboard device; the gateway verifies the proxmox node is the child’s `proxmox_parent` before routing the event.
 
 ### `start_portacode_service`
 
@@ -1178,6 +1184,7 @@ Emitted after a successful `create_proxmox_container` action to report the newly
 *   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
 *   `setup_steps` (array[object]): Detailed bootstrap step reports including stdout/stderr, elapsed time, and pass/fail status.
 *   `device_id` (string): Mirrors the device ID supplied with `create_proxmox_container` and persisted inside the host metadata file for this CT.
+*   `on_behalf_of_device` (string): Same value as `device_id` when the container host is reporting progress for the child device.
 
 ### `proxmox_container_progress`
 
@@ -1194,6 +1201,7 @@ Sent continuously while `create_proxmox_container` runs so dashboards can show a
 *   `message` (string): Short human-readable description of the action or failure.
 *   `details` (object, optional): Contains `attempt` (when retries are used) and `error_summary` on failure.
 *   `request_id` (string, optional): Mirrors the `create_proxmox_container` request when provided.
+*   `on_behalf_of_device` (string, optional): Mirrors the child device ID when a proxmox host reports progress for that child; only proxmox parents can supply this field.
 
 ### `proxmox_container_action`
 

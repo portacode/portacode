@@ -62,6 +62,7 @@ def _emit_progress_event(
     phase: str,
     request_id: Optional[str],
     details: Optional[Dict[str, Any]] = None,
+    on_behalf_of_device: Optional[str] = None,
 ) -> None:
     loop = handler.context.get("event_loop")
     if not loop or loop.is_closed():
@@ -86,6 +87,8 @@ def _emit_progress_event(
         payload["request_id"] = request_id
     if details:
         payload["details"] = details
+    if on_behalf_of_device:
+        payload["on_behalf_of_device"] = str(on_behalf_of_device)
 
     future = asyncio.run_coroutine_threadsafe(handler.send_response(payload), loop)
     future.add_done_callback(
@@ -1141,7 +1144,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("create_proxmox_container command received")
         request_id = message.get("request_id")
-        device_id = (message.get("device_id") or "").strip()
+        raw_device_id = message.get("device_id")
+        device_id = str(raw_device_id or "").strip()
         if not device_id:
             raise ValueError("device_id is required to create a container")
         device_public_key = (message.get("device_public_key") or "").strip()
@@ -1175,6 +1179,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message=start_message,
                 phase="lifecycle",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
             try:
                 result = action()
@@ -1190,6 +1195,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     phase="lifecycle",
                     request_id=request_id,
                     details={"error": str(exc)},
+                    on_behalf_of_device=device_id,
                 )
                 raise
             _emit_progress_event(
@@ -1202,6 +1208,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message=success_message,
                 phase="lifecycle",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
             current_step_index += 1
             return result
@@ -1304,6 +1311,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 phase="bootstrap",
                 request_id=request_id,
                 details=details or None,
+                on_behalf_of_device=device_id,
             )
 
         public_key, steps = _bootstrap_portacode(
@@ -1347,6 +1355,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message="Notifying the server of the new device…",
                 phase="service",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
             _emit_progress_event(
                 self,
@@ -1358,6 +1367,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message="Authentication metadata recorded.",
                 phase="service",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
 
             install_step = service_start_index + 1
@@ -1372,6 +1382,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message="Running sudo portacode service install…",
                 phase="service",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
 
             cmd = f"su - {payload['username']} -c 'sudo -S portacode service install'"
@@ -1392,6 +1403,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         "stderr": res.get("stderr"),
                         "stdout": res.get("stdout"),
                     },
+                    on_behalf_of_device=device_id,
                 )
                 raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
@@ -1405,6 +1417,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 message="Portacode service install finished.",
                 phase="service",
                 request_id=request_id,
+                on_behalf_of_device=device_id,
             )
 
             logger.info("create_proxmox_container: portacode service install completed inside ct %s", vmid)
@@ -1428,6 +1441,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             },
             "setup_steps": steps,
             "device_id": device_id,
+            "on_behalf_of_device": device_id,
             "service_installed": service_installed,
         }
 
@@ -1453,6 +1467,9 @@ class StartPortacodeServiceHandler(SyncHandler):
         password = record.get("password")
         if not user or not password:
             raise RuntimeError("Container credentials unavailable")
+        on_behalf_of_device = record.get("device_id")
+        if on_behalf_of_device:
+            on_behalf_of_device = str(on_behalf_of_device)
 
         start_index = int(message.get("step_index", 1))
         total_steps = int(message.get("total_steps", start_index + 2))
@@ -1470,6 +1487,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             message="Notifying the server of the new device…",
             phase="service",
             request_id=request_id,
+            on_behalf_of_device=on_behalf_of_device,
         )
         _emit_progress_event(
             self,
@@ -1481,6 +1499,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             message="Authentication metadata recorded.",
             phase="service",
             request_id=request_id,
+            on_behalf_of_device=on_behalf_of_device,
         )
 
         install_step = start_index + 1
@@ -1495,6 +1514,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             message="Running sudo portacode service install…",
             phase="service",
             request_id=request_id,
+            on_behalf_of_device=on_behalf_of_device,
         )
 
         cmd = f"su - {user} -c 'sudo -S portacode service install'"
@@ -1515,6 +1535,7 @@ class StartPortacodeServiceHandler(SyncHandler):
                     "stderr": res.get("stderr"),
                     "stdout": res.get("stdout"),
                 },
+                on_behalf_of_device=on_behalf_of_device,
             )
             raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
@@ -1528,6 +1549,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             message="Portacode service install finished.",
             phase="service",
             request_id=request_id,
+            on_behalf_of_device=on_behalf_of_device,
         )
 
         return {
