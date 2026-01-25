@@ -361,7 +361,7 @@ Creates a Portacode-managed LXC container, starts it, and bootstraps the Portaco
 *   `username` (string, optional): OS user to provision (defaults to `svcuser`).
 *   `password` (string, optional): Password for the user (used only during provisioning).
 *   `ssh_key` (string, optional): SSH public key to add to the user.
-*   `device_id` (string, optional): ID of the Device record that already exists on the dashboard.
+*   `device_id` (string, required): ID of the dashboard Device record that represents the container. The handler persists this value in the host metadata file so related events can always be correlated back to that Device.
 *   `device_public_key` (string, optional): PEM-encoded Portacode public key. When supplied together with `device_private_key` the handler injects the keypair, records the device metadata, and runs `portacode service install` automatically.
 *   `device_private_key` (string, optional): PEM-encoded private key that pairs with `device_public_key`. Both key fields must be present for the automatic service-install mode.
 
@@ -421,7 +421,7 @@ Emitted after a successful `create_proxmox_container` action. Contains the new c
 *   `public_key` (string): Portacode public auth key created inside the new container.
 *   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
 *   `setup_steps` (array[object]): Detailed bootstrap step results (name, stdout/stderr, elapsed time, and status).
-*   `device_id` (string, optional): Mirrors the `device_id` supplied with `create_proxmox_container`, if any.
+*   `device_id` (string): Mirrors the dashboard Device ID supplied with `create_proxmox_container`. The handler records this value in the container metadata file so subsequent events can reference the same Device.
 *   `service_installed` (boolean): True when the handler already ran `portacode service install` (with a provided keypair); otherwise it remains False and the dashboard can call `start_portacode_service`.
 
 ### `proxmox_container_progress`
@@ -1177,6 +1177,7 @@ Emitted after a successful `create_proxmox_container` action to report the newly
 *   `public_key` (string): Portacode public auth key discovered inside the container.
 *   `container` (object): Metadata such as `vmid`, `hostname`, `template`, `storage`, `disk_gib`, `ram_mib`, and `cpus`.
 *   `setup_steps` (array[object]): Detailed bootstrap step reports including stdout/stderr, elapsed time, and pass/fail status.
+*   `device_id` (string): Mirrors the device ID supplied with `create_proxmox_container` and persisted inside the host metadata file for this CT.
 
 ### `proxmox_container_progress`
 

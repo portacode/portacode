@@ -1141,7 +1141,9 @@ class CreateProxmoxContainerHandler(SyncHandler):
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("create_proxmox_container command received")
         request_id = message.get("request_id")
-        device_id = message.get("device_id")
+        device_id = (message.get("device_id") or "").strip()
+        if not device_id:
+            raise ValueError("device_id is required to create a container")
         device_public_key = (message.get("device_public_key") or "").strip()
         device_private_key = (message.get("device_private_key") or "").strip()
         has_device_keypair = bool(device_public_key and device_private_key)
@@ -1241,6 +1243,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             payload["vmid"] = vmid
             payload["created_at"] = datetime.utcnow().isoformat() + "Z"
             payload["status"] = "creating"
+            payload["device_id"] = device_id
             _write_container_record(vmid, payload)
             return proxmox, node, vmid, payload
 
