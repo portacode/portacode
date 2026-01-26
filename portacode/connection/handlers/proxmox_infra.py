@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import secrets
 import shlex
@@ -1121,7 +1122,7 @@ def _instantiate_container(proxmox: Any, node: str, payload: Dict[str, Any]) -> 
             memory=int(payload["ram_mib"]),
             swap=int(payload.get("swap_mb", 0)),
             cores=max(int(payload.get("cores", 1)), 1),
-            cpuunits=int(payload.get("cpuunits", 256)),
+            cpulimit=float(payload.get("cpulimit", payload.get("cpus", 1))),
             net0=payload["net0"],
             unprivileged=int(payload.get("unprivileged", 1)),
             description=payload.get("description", MANAGED_MARKER),
@@ -1235,7 +1236,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
             proxmox = _connect_proxmox(config)
             node = config.get("node") or DEFAULT_NODE_NAME
             payload = _build_container_payload(message, config)
-            payload["cpuunits"] = max(int(payload["cpus"] * 1024), 10)
+            payload["cpulimit"] = float(payload["cpus"])
+            payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
             payload["memory"] = int(payload["ram_mib"])
             payload["node"] = node
             logger.debug(
