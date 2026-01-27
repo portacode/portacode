@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -47,7 +47,7 @@ UNIT_DIR = Path("/etc/systemd/system")
 _MANAGED_CONTAINERS_CACHE_TTL_S = 30.0
 _MANAGED_CONTAINERS_CACHE: Dict[str, Any] = {"timestamp": 0.0, "summary": None}
 _MANAGED_CONTAINERS_CACHE_LOCK = threading.Lock()
-_STARTUP_TEMPLATES_REFRESHED = False
+TEMPLATES_REFRESH_INTERVAL_S = 300
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
 
@@ -197,10 +197,33 @@ def _build_proxmox_client_from_config(config: Dict[str, Any]):
     )
 
 
+def _current_time_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_timestamp(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    text = value
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _templates_need_refresh(config: Dict[str, Any]) -> bool:
+    if not config or not config.get("token_value"):
+        return False
+    last = _parse_iso_timestamp(config.get("templates_last_refreshed") or "")
+    if not last:
+        return True
+    return (datetime.now(timezone.utc) - last).total_seconds() >= TEMPLATES_REFRESH_INTERVAL_S
+
+
 def _ensure_templates_refreshed_on_startup(config: Dict[str, Any]) -> None:
-    global _STARTUP_TEMPLATES_REFRESHED
-    if _STARTUP_TEMPLATES_REFRESHED or not config or not config.get("token_value"):
-        _STARTUP_TEMPLATES_REFRESHED = True
+    if not _templates_need_refresh(config):
         return
     try:
         client = _build_proxmox_client_from_config(config)
@@ -209,10 +232,10 @@ def _ensure_templates_refreshed_on_startup(config: Dict[str, Any]) -> None:
         templates = _list_templates(client, node, storages)
         if templates:
             config["templates"] = templates
+            config["templates_last_refreshed"] = _current_time_iso()
+            _save_config(config)
     except Exception as exc:
         logger.warning("Unable to refresh Proxmox templates on startup: %s", exc)
-    finally:
-        _STARTUP_TEMPLATES_REFRESHED = True
 
 
 def _pick_storage(storages: Iterable[Dict[str, Any]]) -> str:
@@ -473,48 +496,171 @@ def _friendly_step_label(step_name: str) -> str:
     return normalized.capitalize()
 
 
+_NETWORK_WAIT_CMD = (
+    "count=0; "
+    "while [ \"$count\" -lt 20 ]; do "
+    "  if command -v ip >/dev/null 2>&1 && ip route get 1.1.1.1 >/dev/null 2>&1; then break; fi; "
+    "  if [ -f /proc/net/route ] && grep -q '^00000000' /proc/net/route >/dev/null 2>&1; then break; fi; "
+    "  sleep 1; "
+    "  count=$((count+1)); "
+    "done"
+)
+
+_PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
+    "apt": {
+        "update_cmd": "apt-get update -y",
+        "update_step_name": "apt_update",
+        "install_cmd": "apt-get install -y python3 python3-pip sudo --fix-missing",
+        "install_step_name": "install_deps",
+        "update_retries": 4,
+        "install_retries": 5,
+    },
+    "dnf": {
+        "update_cmd": "dnf check-update || true",
+        "update_step_name": "dnf_update",
+        "install_cmd": "dnf install -y python3 python3-pip sudo",
+        "install_step_name": "install_deps",
+        "update_retries": 3,
+        "install_retries": 5,
+    },
+    "yum": {
+        "update_cmd": "yum makecache",
+        "update_step_name": "yum_update",
+        "install_cmd": "yum install -y python3 python3-pip sudo",
+        "install_step_name": "install_deps",
+        "update_retries": 3,
+        "install_retries": 5,
+    },
+    "apk": {
+        "update_cmd": "apk update",
+        "update_step_name": "apk_update",
+        "install_cmd": "apk add --no-cache python3 py3-pip sudo shadow",
+        "install_step_name": "install_deps",
+        "update_retries": 3,
+        "install_retries": 5,
+    },
+    "pacman": {
+        "update_cmd": "pacman -Sy --noconfirm",
+        "update_step_name": "pacman_update",
+        "install_cmd": "pacman -S --noconfirm python python-pip sudo",
+        "install_step_name": "install_deps",
+        "update_retries": 3,
+        "install_retries": 5,
+    },
+    "zypper": {
+        "update_cmd": "zypper refresh",
+        "update_step_name": "zypper_update",
+        "install_cmd": "zypper install -y python3 python3-pip sudo",
+        "install_step_name": "install_deps",
+        "update_retries": 3,
+        "install_retries": 5,
+    },
+}
+
+_UPDATE_RETRY_ON = [
+    "Temporary failure resolving",
+    "Could not resolve",
+    "Failed to fetch",
+]
+
+_INSTALL_RETRY_ON = [
+    "lock-frontend",
+    "Unable to acquire the dpkg frontend lock",
+    "Temporary failure resolving",
+    "Could not resolve",
+    "Failed to fetch",
+]
+
+
 def _build_bootstrap_steps(
     user: str,
     password: str,
     ssh_key: str,
     include_portacode_connect: bool = True,
+    package_manager: str = "apt",
 ) -> List[Dict[str, Any]]:
-    steps = [
-        {
-            "name": "apt_update",
-            "cmd": "apt-get update -y",
-            "retries": 4,
-            "retry_delay_s": 5,
-            "retry_on": [
-                "Temporary failure resolving",
-                "Could not resolve",
-                "Failed to fetch",
-            ],
-        },
-        {
-            "name": "install_deps",
-            "cmd": "apt-get install -y python3 python3-pip sudo --fix-missing",
-            "retries": 5,
-            "retry_delay_s": 5,
-            "retry_on": [
-                "lock-frontend",
-                "Unable to acquire the dpkg frontend lock",
-                "Temporary failure resolving",
-                "Could not resolve",
-                "Failed to fetch",
-            ],
-        },
-        {"name": "user_exists", "cmd": f"id -u {user} >/dev/null 2>&1 || adduser --disabled-password --gecos '' {user}", "retries": 0},
-        {"name": "add_sudo", "cmd": f"usermod -aG sudo {user}", "retries": 0},
+    profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
+    steps: List[Dict[str, Any]] = [
+        {"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0},
     ]
+    update_cmd = profile.get("update_cmd")
+    if update_cmd:
+        steps.append(
+            {
+                "name": profile.get("update_step_name", "package_update"),
+                "cmd": update_cmd,
+                "retries": profile.get("update_retries", 3),
+                "retry_delay_s": 5,
+                "retry_on": _UPDATE_RETRY_ON,
+            }
+        )
+    install_cmd = profile.get("install_cmd")
+    if install_cmd:
+        steps.append(
+            {
+                "name": profile.get("install_step_name", "install_deps"),
+                "cmd": install_cmd,
+                "retries": profile.get("install_retries", 5),
+                "retry_delay_s": 5,
+                "retry_on": _INSTALL_RETRY_ON,
+            }
+        )
+    steps.extend(
+        [
+            {
+                "name": "user_exists",
+                "cmd": (
+                    f"id -u {user} >/dev/null 2>&1 || "
+                    f"(if command -v adduser >/dev/null 2>&1 && adduser --disabled-password --help >/dev/null 2>&1; then "
+                    f"    adduser --disabled-password --gecos '' {user}; "
+                    "else "
+                    f"    useradd -m -s /bin/sh {user}; "
+                    "fi)"
+                ),
+                "retries": 0,
+            },
+            {
+                "name": "add_sudo",
+                "cmd": (
+                    f"if command -v usermod >/dev/null 2>&1; then "
+                    "  if ! getent group sudo >/dev/null 2>&1; then "
+                    "    if command -v groupadd >/dev/null 2>&1; then "
+                    "      groupadd sudo >/dev/null 2>&1 || true; "
+                    "    fi; "
+                    "  fi; "
+                    f"  usermod -aG sudo {user}; "
+                    "else "
+                    "  for grp in wheel sudo; do "
+                    "    if ! getent group \"$grp\" >/dev/null 2>&1 && command -v groupadd >/dev/null 2>&1; then "
+                    "      groupadd \"$grp\" >/dev/null 2>&1 || true; "
+                    "    fi; "
+                    "    addgroup \"$grp\" >/dev/null 2>&1 || true; "
+                    f"    addgroup {user} \"$grp\" >/dev/null 2>&1 || true; "
+                    "  done; "
+                    "fi"
+                ),
+                "retries": 0,
+            },
+        {
+            "name": "add_sudoers",
+            "cmd": (
+                f"printf '%s ALL=(ALL) NOPASSWD:ALL\\n' {shlex.quote(user)} >/etc/sudoers.d/portacode && "
+                "chmod 0440 /etc/sudoers.d/portacode"
+            ),
+            "retries": 0,
+        },
+        ]
+    )
     if password:
         steps.append({"name": "set_password", "cmd": f"echo '{user}:{password}' | chpasswd", "retries": 0})
     if ssh_key:
-        steps.append({
-            "name": "add_ssh_key",
-            "cmd": f"install -d -m 700 /home/{user}/.ssh && echo '{ssh_key}' >> /home/{user}/.ssh/authorized_keys && chown -R {user}:{user} /home/{user}/.ssh",
-            "retries": 0,
-        })
+        steps.append(
+            {
+                "name": "add_ssh_key",
+                "cmd": f"install -d -m 700 /home/{user}/.ssh && echo '{ssh_key}' >> /home/{user}/.ssh/authorized_keys && chown -R {user}:{user} /home/{user}/.ssh",
+                "retries": 0,
+            }
+        )
     steps.extend(
         [
             {"name": "pip_upgrade", "cmd": "python3 -m pip install --upgrade pip", "retries": 0},
@@ -524,6 +670,45 @@ def _build_bootstrap_steps(
     if include_portacode_connect:
         steps.append({"name": "portacode_connect", "type": "portacode_connect", "timeout_s": 30})
     return steps
+
+
+def _guess_package_manager_from_template(template: str) -> str:
+    normalized = (template or "").lower()
+    if "alpine" in normalized:
+        return "apk"
+    if "archlinux" in normalized:
+        return "pacman"
+    if "centos-7" in normalized:
+        return "yum"
+    if any(keyword in normalized for keyword in ("centos-8", "centos-9", "centos-9-stream", "centos-8-stream")):
+        return "dnf"
+    if any(keyword in normalized for keyword in ("rockylinux", "almalinux", "fedora")):
+        return "dnf"
+    if "opensuse" in normalized or "suse" in normalized:
+        return "zypper"
+    if any(keyword in normalized for keyword in ("debian", "ubuntu", "devuan", "turnkeylinux")):
+        return "apt"
+    if normalized.startswith("system/") and "linux" in normalized:
+        return "apt"
+    return "apt"
+
+
+def _detect_package_manager(vmid: int) -> str:
+    candidates = [
+        ("apt", "apt-get"),
+        ("dnf", "dnf"),
+        ("yum", "yum"),
+        ("apk", "apk"),
+        ("pacman", "pacman"),
+        ("zypper", "zypper"),
+    ]
+    for name, binary in candidates:
+        res = _run_pct(vmid, f"command -v {binary} >/dev/null 2>&1")
+        if res.get("returncode") == 0:
+            logger.debug("Detected package manager %s inside container %s", name, vmid)
+            return name
+    logger.warning("Unable to detect package manager inside container %s; defaulting to apt", vmid)
+    return "apt"
 
 
 def _get_storage_type(storages: Iterable[Dict[str, Any]], storage_name: str) -> str:
@@ -713,7 +898,8 @@ def _connect_proxmox(config: Dict[str, Any]) -> Any:
 
 
 def _run_pct(vmid: int, cmd: str, input_text: Optional[str] = None) -> Dict[str, Any]:
-    full = ["pct", "exec", str(vmid), "--", "bash", "-lc", cmd]
+    shell = "/bin/sh"
+    full = ["pct", "exec", str(vmid), "--", shell, "-c", cmd]
     start = time.time()
     proc = subprocess.run(full, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=input_text)
     return {
@@ -723,6 +909,10 @@ def _run_pct(vmid: int, cmd: str, input_text: Optional[str] = None) -> Dict[str,
         "stderr": proc.stderr.strip(),
         "elapsed_s": round(time.time() - start, 2),
     }
+
+
+def _su_command(user: str, command: str) -> str:
+    return f"su - {user} -s /bin/sh -c {shlex.quote(command)}"
 
 
 def _run_pct_check(vmid: int, cmd: str) -> Dict[str, Any]:
@@ -784,7 +974,7 @@ def _push_bytes_to_container(
 
 
 def _resolve_portacode_key_dir(vmid: int, user: str) -> str:
-    data_dir_cmd = f"su - {user} -c 'echo -n ${{XDG_DATA_HOME:-$HOME/.local/share}}'"
+    data_dir_cmd = _su_command(user, "echo -n ${XDG_DATA_HOME:-$HOME/.local/share}")
     data_home = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
     portacode_dir = f"{data_home}/portacode"
     _run_pct_exec_check(vmid, ["mkdir", "-p", portacode_dir])
@@ -801,18 +991,19 @@ def _deploy_device_keypair(vmid: int, user: str, private_key: str, public_key: s
 
 
 def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -> Dict[str, Any]:
-    cmd = ["pct", "exec", str(vmid), "--", "bash", "-lc", f"su - {user} -c 'portacode connect'"]
+    su_connect_cmd = _su_command(user, "portacode connect")
+    cmd = ["pct", "exec", str(vmid), "--", "/bin/sh", "-c", su_connect_cmd]
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     start = time.time()
 
-    data_dir_cmd = f"su - {user} -c 'echo -n ${{XDG_DATA_HOME:-$HOME/.local/share}}'"
+    data_dir_cmd = _su_command(user, "echo -n ${XDG_DATA_HOME:-$HOME/.local/share}")
     data_dir = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
     key_dir = f"{data_dir}/portacode/keys"
     pub_path = f"{key_dir}/id_portacode.pub"
     priv_path = f"{key_dir}/id_portacode"
 
     def file_size(path: str) -> Optional[int]:
-        stat_cmd = f"su - {user} -c 'test -s {path} && stat -c %s {path}'"
+        stat_cmd = _su_command(user, f"test -s {path} && stat -c %s {path}")
         res = _run_pct(vmid, stat_cmd)
         if res["returncode"] != 0:
             return None
@@ -870,7 +1061,7 @@ def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -
     final_pub = file_size(pub_path)
     final_priv = file_size(priv_path)
     if final_pub and final_priv:
-        key_res = _run_pct(vmid, f"su - {user} -c 'cat {pub_path}'")
+        key_res = _run_pct(vmid, _su_command(user, f"cat {pub_path}"))
         if not process_exited:
             proc.terminate()
             try:
@@ -910,7 +1101,7 @@ def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -
     except subprocess.TimeoutExpired:
         proc.kill()
 
-    key_res = _run_pct(vmid, f"su - {user} -c 'cat {pub_path}'")
+    key_res = _run_pct(vmid, _su_command(user, f"cat {pub_path}"))
     return {
         "ok": True,
         "public_key": key_res["stdout"].strip(),
@@ -1003,7 +1194,16 @@ def _bootstrap_portacode(
     total_steps: Optional[int] = None,
     default_public_key: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    actual_steps = steps if steps is not None else _build_bootstrap_steps(user, password, ssh_key)
+    if steps is not None:
+        actual_steps = steps
+    else:
+        detected_manager = _detect_package_manager(vmid)
+        actual_steps = _build_bootstrap_steps(
+            user,
+            password,
+            ssh_key,
+            package_manager=detected_manager,
+        )
     results, ok = _run_setup_steps(
         vmid,
         actual_steps,
@@ -1027,6 +1227,15 @@ def _bootstrap_portacode(
             else:
                 command_text = str(command)
         command_suffix = f" command={command_text}" if command_text else ""
+        stdout = details.get("stdout")
+        stderr = details.get("stderr")
+        if stdout or stderr:
+            logger.debug(
+                "Bootstrap command output%s%s%s",
+                f" stdout={stdout!r}" if stdout else "",
+                " " if stdout and stderr else "",
+                f"stderr={stderr!r}" if stderr else "",
+            )
         if summary:
             logger.warning(
                 "Portacode bootstrap failure summary=%s%s%s",
@@ -1034,10 +1243,15 @@ def _bootstrap_portacode(
                 f" history_len={len(history)}" if history else "",
                 f" command={command_text}" if command_text else "",
             )
-            raise RuntimeError(
-                f"Portacode bootstrap steps failed: {summary}{history_snippet}{command_suffix}"
-            )
-        raise RuntimeError("Portacode bootstrap steps failed.")
+        logger.error(
+            "Portacode bootstrap command failed%s%s%s",
+            f" command={command_text}" if command_text else "",
+            f" stdout={stdout!r}" if stdout else "",
+            f" stderr={stderr!r}" if stderr else "",
+        )
+        raise RuntimeError(
+            f"Portacode bootstrap steps failed: {summary}{history_snippet}{command_suffix}"
+        )
     key_step = next((entry for entry in results if entry.get("name") == "portacode_connect"), None)
     public_key = key_step.get("public_key") if key_step else default_public_key
     if not public_key:
@@ -1104,8 +1318,9 @@ def configure_infrastructure(token_identifier: str, token_value: str, verify_ssl
         "token_value": token_value,
         "verify_ssl": verify_ssl,
         "default_storage": default_storage,
-        "templates": templates,
         "last_verified": datetime.utcnow().isoformat() + "Z",
+        "templates": templates,
+        "templates_last_refreshed": _current_time_iso(),
         "network": network,
         "node_status": status,
     }
@@ -1167,6 +1382,13 @@ def _instantiate_container(proxmox: Any, node: str, payload: Dict[str, Any]) -> 
             ssh_public_keys=payload.get("ssh_public_key") or None,
         )
         status, elapsed = _wait_for_task(proxmox, node, upid)
+        exitstatus = (status or {}).get("exitstatus")
+        if exitstatus and exitstatus.upper() != "OK":
+            msg = status.get("status") or "unknown error"
+            details = status.get("error") or status.get("errmsg") or status.get("description") or status
+            raise RuntimeError(
+                f"Container creation task failed ({exitstatus}): {msg} details={details}"
+            )
         return vmid, elapsed
     except ResourceException as exc:
         raise RuntimeError(f"Failed to create container: {exc}") from exc
@@ -1189,12 +1411,17 @@ class CreateProxmoxContainerHandler(SyncHandler):
         device_public_key = (message.get("device_public_key") or "").strip()
         device_private_key = (message.get("device_private_key") or "").strip()
         has_device_keypair = bool(device_public_key and device_private_key)
+        config_guess = _load_config()
+        template_candidates = config_guess.get("templates") or []
+        template_hint = (message.get("template") or (template_candidates[0] if template_candidates else "")).strip()
+        package_manager = _guess_package_manager_from_template(template_hint)
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
         bootstrap_steps = _build_bootstrap_steps(
             bootstrap_user,
             bootstrap_password,
             bootstrap_ssh_key,
             include_portacode_connect=not has_device_keypair,
+            package_manager=package_manager,
         )
         total_steps = 3 + len(bootstrap_steps) + 2
         current_step_index = 1
@@ -1424,7 +1651,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 on_behalf_of_device=device_id,
             )
 
-            cmd = f"su - {payload['username']} -c 'sudo -S portacode service install'"
+            cmd = _su_command(payload["username"], "sudo -S portacode service install")
             res = _run_pct(vmid, cmd, input_text=payload["password"] + "\n")
 
             if res["returncode"] != 0:
@@ -1556,7 +1783,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             on_behalf_of_device=on_behalf_of_device,
         )
 
-        cmd = f"su - {user} -c 'sudo -S portacode service install'"
+        cmd = _su_command(user, "sudo -S portacode service install")
         res = _run_pct(vmid, cmd, input_text=password + "\n")
 
         if res["returncode"] != 0:
