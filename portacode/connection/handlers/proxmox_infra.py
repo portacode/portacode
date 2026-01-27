@@ -47,6 +47,7 @@ UNIT_DIR = Path("/etc/systemd/system")
 _MANAGED_CONTAINERS_CACHE_TTL_S = 30.0
 _MANAGED_CONTAINERS_CACHE: Dict[str, Any] = {"timestamp": 0.0, "summary": None}
 _MANAGED_CONTAINERS_CACHE_LOCK = threading.Lock()
+_STARTUP_TEMPLATES_REFRESHED = False
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
 
@@ -177,6 +178,41 @@ def _list_templates(client: Any, node: str, storages: Iterable[Dict[str, Any]]) 
             if item.get("content") == "vztmpl" and item.get("volid"):
                 templates.append(item["volid"])
     return templates
+
+
+def _build_proxmox_client_from_config(config: Dict[str, Any]):
+    user = config.get("user")
+    token_name = config.get("token_name")
+    token_value = config.get("token_value")
+    if not user or not token_name or not token_value:
+        raise RuntimeError("Proxmox API credentials are missing")
+    ProxmoxAPI = _ensure_proxmoxer()
+    return ProxmoxAPI(
+        config.get("host", DEFAULT_HOST),
+        user=user,
+        token_name=token_name,
+        token_value=token_value,
+        verify_ssl=config.get("verify_ssl", False),
+        timeout=30,
+    )
+
+
+def _ensure_templates_refreshed_on_startup(config: Dict[str, Any]) -> None:
+    global _STARTUP_TEMPLATES_REFRESHED
+    if _STARTUP_TEMPLATES_REFRESHED or not config or not config.get("token_value"):
+        _STARTUP_TEMPLATES_REFRESHED = True
+        return
+    try:
+        client = _build_proxmox_client_from_config(config)
+        node = config.get("node") or _pick_node(client)
+        storages = client.nodes(node).storage.get()
+        templates = _list_templates(client, node, storages)
+        if templates:
+            config["templates"] = templates
+    except Exception as exc:
+        logger.warning("Unable to refresh Proxmox templates on startup: %s", exc)
+    finally:
+        _STARTUP_TEMPLATES_REFRESHED = True
 
 
 def _pick_storage(storages: Iterable[Dict[str, Any]]) -> str:
@@ -1018,6 +1054,7 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     }
     if not config:
         return {"configured": False, "network": base_network}
+    _ensure_templates_refreshed_on_startup(config)
     return {
         "configured": True,
         "host": config.get("host"),
