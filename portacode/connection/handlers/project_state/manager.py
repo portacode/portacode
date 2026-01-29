@@ -21,6 +21,24 @@ from .git_manager import GitManager
 from .file_system_watcher import FileSystemWatcher
 from ....logging_categories import get_categorized_logger, LogCategory
 
+def _deterministic_file_tab_id(file_path: str) -> str:
+    try:
+        resolved = os.path.abspath(file_path)
+        mtime = int(Path(resolved).stat().st_mtime)
+    except OSError:
+        mtime = "unknown"
+        resolved = os.path.abspath(file_path)
+    return f"{resolved}:{mtime}"
+
+def _deterministic_diff_tab_id(
+    file_path: str,
+    from_ref: str,
+    to_ref: str,
+    from_hash: Optional[str],
+    to_hash: Optional[str]
+) -> str:
+    return f"diff:{os.path.abspath(file_path)}:{from_ref}:{to_ref}:{from_hash or ''}:{to_hash or ''}"
+
 logger = get_categorized_logger(__name__)
 
 # Global singleton instance
@@ -657,10 +675,10 @@ class ProjectStateManager:
         # Create new file tab using tab factory
         from ..tab_factory import get_tab_factory
         tab_factory = get_tab_factory()
-        
+
         try:
             logger.info(f"About to create tab for file: {file_path}")
-            new_tab = await tab_factory.create_file_tab(file_path)
+            new_tab = await tab_factory.create_file_tab(file_path, tab_id=_deterministic_file_tab_id(file_path))
             logger.info(f"Tab created successfully, adding to project state")
             project_state.open_tabs[tab_key] = new_tab
             if set_active:
@@ -842,7 +860,11 @@ class ProjectStateManager:
             diff_title = f"{os.path.basename(file_path)} ({' '.join(title_parts)})"
             
             diff_tab = await tab_factory.create_diff_tab_with_title(
-                file_path, original_content, modified_content, diff_title, 
+                file_path,
+                original_content,
+                modified_content,
+                diff_title,
+                tab_id=_deterministic_diff_tab_id(file_path, from_ref, to_ref, from_hash, to_hash),
                 diff_details=diff_details
             )
             

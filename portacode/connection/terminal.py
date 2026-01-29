@@ -685,6 +685,7 @@ class TerminalManager:
                 try:
                     # Initialize project state
                     project_state = await manager.initialize_project_state(session_name, project_folder_path)
+                    await self._restore_tabs_from_session_metadata(manager, project_state, session)
                     
                     # Send initial project state to the client
                     initial_state_payload = {
@@ -710,6 +711,85 @@ class TerminalManager:
                     
         except Exception as exc:
             logger.exception("terminal_manager: Error initializing project states for new sessions: %s", exc)
+
+    async def _restore_tabs_from_session_metadata(self, manager, project_state, session):
+        """Restore open tabs/active tab from client session metadata if available."""
+        if not session or not project_state:
+            return
+
+        descriptors = session.get("open_tabs") or []
+        if not descriptors:
+            return
+
+        session_id = project_state.client_session_id
+        logger.info("terminal_manager: 🧭 Restoring %d tabs from metadata for session %s", len(descriptors), session_id)
+
+        for descriptor in descriptors:
+            parsed = self._parse_tab_descriptor(descriptor)
+            if not parsed:
+                continue
+
+            tab_type = parsed.get("tab_type")
+            file_path = parsed.get("file_path")
+            metadata = parsed.get("metadata", {})
+
+            if tab_type == "file" and file_path:
+                try:
+                    await manager.open_file(session_id, file_path, set_active=False)
+                except Exception as exc:
+                    logger.warning("terminal_manager: Failed to restore file tab %s for session %s: %s", file_path, session_id, exc)
+                continue
+
+            if tab_type == "diff" and file_path:
+                from_ref = metadata.get("from") or metadata.get("from_ref")
+                to_ref = metadata.get("to") or metadata.get("to_ref")
+                if not from_ref or not to_ref:
+                    logger.warning("terminal_manager: Skipping diff tab %s for session %s because from/to references are missing", file_path, session_id)
+                    continue
+                from_hash = metadata.get("from_hash") or metadata.get("fromHash")
+                to_hash = metadata.get("to_hash") or metadata.get("toHash")
+                try:
+                    await manager.open_diff_tab(session_id, file_path, from_ref, to_ref, from_hash=from_hash, to_hash=to_hash)
+                except Exception as exc:
+                    logger.warning("terminal_manager: Failed to restore diff tab %s for session %s: %s", file_path, session_id, exc)
+                continue
+
+            logger.debug("terminal_manager: Unknown tab descriptor ignored for session %s: %s", session_id, descriptor)
+
+        active_index = session.get("active_tab")
+        try:
+            active_index_int = int(active_index) if active_index is not None else None
+        except (TypeError, ValueError):
+            active_index_int = None
+
+        if active_index_int is not None and active_index_int >= 0:
+            current_tabs = list(project_state.open_tabs.values())
+            if 0 <= active_index_int < len(current_tabs):
+                try:
+                    await manager.set_active_tab(session_id, current_tabs[active_index_int].tab_id)
+                except Exception as exc:
+                    logger.warning("terminal_manager: Failed to set active tab for session %s: %s", session_id, exc)
+            else:
+                logger.debug("terminal_manager: Active tab index %s out of range for session %s", active_index_int, session_id)
+
+    def _parse_tab_descriptor(self, descriptor: str) -> Optional[Dict[str, Any]]:
+        """Parse a URL-friendly tab descriptor string."""
+        if not descriptor:
+            return None
+
+        try:
+            parts = descriptor.split("|")
+            tab_type = parts[0] if parts else None
+            file_path = parts[1] if len(parts) > 1 else None
+            metadata = {}
+            for part in parts[2:]:
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    metadata[key] = value
+            return {"tab_type": tab_type, "file_path": file_path, "metadata": metadata}
+        except Exception as exc:
+            logger.warning("terminal_manager: Failed to parse tab descriptor '%s': %s", descriptor, exc)
+            return None
     
     async def _send_targeted_terminal_list(self, message: Dict[str, Any], target_sessions: List[str]) -> None:
         """Send terminal_list command to specific client sessions.
