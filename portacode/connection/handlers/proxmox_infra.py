@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -248,6 +249,217 @@ def _pick_storage(storages: Iterable[Dict[str, Any]]) -> str:
     return candidates[0].get("storage", "")
 
 
+def _bytes_to_gib(value: Any) -> float:
+    try:
+        return float(value) / 1024**3
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _bytes_to_mib(value: Any) -> float:
+    try:
+        return float(value) / 1024**2
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _size_token_to_gib(token: str) -> float:
+    match = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTP])?([iI]?[bB])?\s*$", token)
+    if not match:
+        return 0.0
+    number = float(match.group(1))
+    unit = (match.group(2) or "").upper()
+    scale = {
+        "": 1,
+        "K": 1024**1,
+        "M": 1024**2,
+        "G": 1024**3,
+        "T": 1024**4,
+        "P": 1024**5,
+    }.get(unit, 1)
+    return (number * scale) / 1024**3
+
+
+def _extract_size_gib(value: Any) -> float:
+    if not value:
+        return 0.0
+    text = str(value)
+    for part in text.split(","):
+        if "size=" in part:
+            token = part.split("=", 1)[1]
+            return _size_token_to_gib(token)
+    return _size_token_to_gib(text)
+
+
+def _extract_storage_token(value: Any) -> str:
+    if not value:
+        return "unknown"
+    text = str(value)
+    if ":" in text:
+        return text.split(":", 1)[0].strip() or "unknown"
+    return text.strip() or "unknown"
+
+
+def _storage_from_lxc(cfg: Dict[str, Any], entry: Dict[str, Any]) -> str:
+    rootfs = cfg.get("rootfs") or entry.get("rootfs")
+    storage = _extract_storage_token(rootfs)
+    if storage != "unknown":
+        return storage
+    for idx in range(0, 10):
+        mp_value = cfg.get(f"mp{idx}")
+        storage = _extract_storage_token(mp_value)
+        if storage != "unknown":
+            return storage
+    return "unknown"
+
+
+def _storage_from_qemu(cfg: Dict[str, Any]) -> str:
+    preferred_keys: List[str] = []
+    for prefix in ("scsi", "virtio", "sata", "ide"):
+        preferred_keys.extend(f"{prefix}{idx}" for idx in range(0, 6))
+    seen = set()
+    for key in preferred_keys:
+        value = cfg.get(key)
+        if value is None:
+            continue
+        seen.add(key)
+        text = str(value)
+        if "media=cdrom" in text or "cloudinit" in text:
+            continue
+        storage = _extract_storage_token(text)
+        if storage != "unknown":
+            return storage
+    for key in sorted(cfg.keys()):
+        if key in seen:
+            continue
+        if not any(key.startswith(prefix) for prefix in ("scsi", "virtio", "sata", "ide")):
+            continue
+        value = cfg.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        if "media=cdrom" in text or "cloudinit" in text:
+            continue
+        storage = _extract_storage_token(text)
+        if storage != "unknown":
+            return storage
+    for key in ("efidisk0", "tpmstate0"):
+        storage = _extract_storage_token(cfg.get(key))
+        if storage != "unknown":
+            return storage
+    return "unknown"
+
+
+def _primary_lxc_disk(cfg: Dict[str, Any], entry: Dict[str, Any]) -> str:
+    return str(cfg.get("rootfs") or entry.get("rootfs") or "")
+
+
+def _primary_qemu_disk(cfg: Dict[str, Any]) -> str:
+    preferred_keys: List[str] = []
+    for prefix in ("scsi", "virtio", "sata", "ide"):
+        preferred_keys.extend(f"{prefix}{idx}" for idx in range(0, 6))
+    seen = set()
+    for key in preferred_keys:
+        value = cfg.get(key)
+        if value is None:
+            continue
+        seen.add(key)
+        text = str(value)
+        if "media=cdrom" in text or "cloudinit" in text:
+            continue
+        return text
+    for key in sorted(cfg.keys()):
+        if key in seen:
+            continue
+        if not any(key.startswith(prefix) for prefix in ("scsi", "virtio", "sata", "ide")):
+            continue
+        value = cfg.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        if "media=cdrom" in text or "cloudinit" in text:
+            continue
+        return text
+    return ""
+
+
+def _pick_container_storage(kind: str, cfg: Dict[str, Any], entry: Dict[str, Any]) -> str:
+    storage = _extract_storage_token(cfg.get("storage") or entry.get("storage"))
+    if storage != "unknown":
+        return storage
+    if kind == "lxc":
+        return _storage_from_lxc(cfg, entry)
+    return _storage_from_qemu(cfg)
+
+
+def _pick_container_disk_gib(kind: str, cfg: Dict[str, Any], entry: Dict[str, Any]) -> float:
+    if kind == "lxc":
+        size = _extract_size_gib(_primary_lxc_disk(cfg, entry))
+        if size:
+            return size
+    else:
+        size = _extract_size_gib(_primary_qemu_disk(cfg))
+        if size:
+            return size
+    for candidate in (entry.get("maxdisk"), entry.get("disk"), cfg.get("disk")):
+        if candidate is None or candidate == 0:
+            continue
+        return _bytes_to_gib(candidate)
+    return 0.0
+
+
+def _to_mib(value: Any) -> float:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if val <= 0:
+        return 0.0
+    # Heuristic: large values are bytes, smaller ones are already MiB.
+    return _bytes_to_mib(val) if val > 10000 else val
+
+
+def _pick_container_ram_mib(kind: str, cfg: Dict[str, Any], entry: Dict[str, Any]) -> float:
+    for candidate in (cfg.get("memory"), entry.get("maxmem"), entry.get("mem")):
+        ram = _to_mib(candidate)
+        if ram:
+            return ram
+    return 0.0
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pick_container_cpu_share(kind: str, cfg: Dict[str, Any], entry: Dict[str, Any]) -> float:
+    if kind == "lxc":
+        for key in ("cpulimit", "cores", "cpus"):
+            val = _safe_float(cfg.get(key))
+            if val:
+                return val
+        return _safe_float(entry.get("cpus"))
+
+    cores = _safe_float(cfg.get("cores"))
+    sockets = _safe_float(cfg.get("sockets")) or 1.0
+    if cores:
+        return cores * sockets
+    val = _safe_float(cfg.get("vcpus"))
+    if val:
+        return val
+    val = _safe_float(entry.get("cpus") or entry.get("maxcpu"))
+    if val:
+        return val
+    return 0.0
+
+
+def _parse_onboot_flag(value: Any) -> bool:
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
 def _write_bridge_config(bridge: str) -> None:
     begin = f"# Portacode INFRA BEGIN {bridge}"
     end = f"# Portacode INFRA END {bridge}"
@@ -432,6 +644,139 @@ def _build_managed_containers_summary(records: List[Dict[str, Any]]) -> Dict[str
     }
 
 
+def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
+    base_summary = _build_managed_containers_summary(records)
+    if not config or not config.get("token_value"):
+        return base_summary
+
+    try:
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("Unable to extend container summary with Proxmox data: %s", exc)
+        return base_summary
+
+    default_storage = (config.get("default_storage") or "").strip()
+    record_map: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        vmid = record.get("vmid")
+        if vmid is None:
+            continue
+        try:
+            vmid_key = str(int(vmid))
+        except (ValueError, TypeError):
+            continue
+        record_map[vmid_key] = record
+
+    managed_entries: List[Dict[str, Any]] = []
+    unmanaged_entries: List[Dict[str, Any]] = []
+    allocated_ram = 0.0
+    allocated_disk = 0.0
+    allocated_cpu = 0.0
+
+    def _process_entries(kind: str, getter: str) -> None:
+        nonlocal allocated_ram, allocated_disk, allocated_cpu
+        entries = getattr(proxmox.nodes(node), getter).get()
+        for entry in entries:
+            vmid = entry.get("vmid")
+            if vmid is None:
+                continue
+            vmid_str = str(vmid)
+            cfg: Dict[str, Any] = {}
+            try:
+                cfg = getattr(proxmox.nodes(node), getter)(vmid_str).config.get() or {}
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug("Failed to load %s config for %s: %s", kind, vmid_str, exc)
+                cfg = {}
+
+            record = record_map.get(vmid_str)
+            description = cfg.get("description") or ""
+            managed = bool(record) or MANAGED_MARKER in description
+            hostname = entry.get("name") or cfg.get("hostname") or (record.get("hostname") if record else None)
+            storage = _pick_container_storage(kind, cfg, entry)
+            disk_gib = _pick_container_disk_gib(kind, cfg, entry)
+            ram_mib = _pick_container_ram_mib(kind, cfg, entry)
+            cpu_share = _pick_container_cpu_share(kind, cfg, entry)
+            reserve_on_boot = _parse_onboot_flag(cfg.get("onboot"))
+            matches_default_storage = bool(default_storage and storage and storage.lower() == default_storage.lower())
+
+            base_entry = {
+                "type": kind,
+                "vmid": vmid_str,
+                "hostname": hostname,
+                "status": (entry.get("status") or "unknown").lower(),
+                "storage": storage,
+                "disk_gib": disk_gib,
+                "ram_mib": ram_mib,
+                "cpu_share": cpu_share,
+                "reserve_on_boot": reserve_on_boot,
+                "matches_default_storage": matches_default_storage,
+                "managed": managed,
+            }
+
+            if managed:
+                merged = base_entry | {
+                    "device_id": record.get("device_id") if record else None,
+                    "template": record.get("template") if record else None,
+                    "created_at": record.get("created_at") if record else None,
+                }
+                managed_entries.append(merged)
+            else:
+                unmanaged_entries.append(base_entry)
+
+            if managed or reserve_on_boot:
+                allocated_ram += ram_mib
+                allocated_cpu += cpu_share
+            if managed or matches_default_storage:
+                allocated_disk += disk_gib
+
+    _process_entries("lxc", "lxc")
+    _process_entries("qemu", "qemu")
+
+    memory_info = {}
+    cpu_info = {}
+    try:
+        node_status = proxmox.nodes(node).status.get()
+        memory_info = node_status.get("memory") or {}
+        cpu_info = node_status.get("cpuinfo") or {}
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("Unable to read node status for resource totals: %s", exc)
+
+    host_total_ram_mib = _bytes_to_mib(memory_info.get("total"))
+    used_ram_mib = _bytes_to_mib(memory_info.get("used"))
+    available_ram_mib = max(host_total_ram_mib - used_ram_mib, 0.0) if host_total_ram_mib else None
+    host_total_cpu_cores = _safe_float(cpu_info.get("cores"))
+    available_cpu_share = max(host_total_cpu_cores - allocated_cpu, 0.0) if host_total_cpu_cores else None
+
+    host_total_disk_gib = None
+    available_disk_gib = None
+    if default_storage:
+        try:
+            storage_status = proxmox.nodes(node).storage(default_storage).status.get()
+            host_total_disk_gib = _bytes_to_gib(storage_status.get("total"))
+            available_disk_gib = _bytes_to_gib(storage_status.get("avail"))
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug("Unable to read storage status for %s: %s", default_storage, exc)
+
+    summary = base_summary.copy()
+    summary["containers"] = managed_entries
+    summary["count"] = len(managed_entries)
+    summary["total_ram_mib"] = int(sum(entry.get("ram_mib") or 0 for entry in managed_entries))
+    summary["total_disk_gib"] = int(sum(entry.get("disk_gib") or 0 for entry in managed_entries))
+    summary["total_cpu_share"] = round(sum(entry.get("cpu_share") or 0 for entry in managed_entries), 2)
+    summary["unmanaged_containers"] = unmanaged_entries
+    summary["allocated_ram_mib"] = round(allocated_ram, 2)
+    summary["allocated_disk_gib"] = round(allocated_disk, 2)
+    summary["allocated_cpu_share"] = round(allocated_cpu, 2)
+    summary["host_total_ram_mib"] = int(host_total_ram_mib) if host_total_ram_mib else None
+    summary["host_total_disk_gib"] = host_total_disk_gib
+    summary["host_total_cpu_cores"] = host_total_cpu_cores if host_total_cpu_cores else None
+    summary["available_ram_mib"] = int(available_ram_mib) if available_ram_mib is not None else None
+    summary["available_disk_gib"] = available_disk_gib
+    summary["available_cpu_share"] = available_cpu_share if available_cpu_share is not None else None
+    return summary
+
+
 def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
     def _refresh_container_statuses(records: List[Dict[str, Any]], config: Dict[str, Any] | None) -> None:
         if not records or not config:
@@ -467,7 +812,7 @@ def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
     config = _load_config()
     records = _load_managed_container_records()
     _refresh_container_statuses(records, config)
-    summary = _build_managed_containers_summary(records)
+    summary = _build_full_container_summary(records, config)
     with _MANAGED_CONTAINERS_CACHE_LOCK:
         _MANAGED_CONTAINERS_CACHE["timestamp"] = now
         _MANAGED_CONTAINERS_CACHE["summary"] = summary

@@ -1136,22 +1136,43 @@ Provides system information in response to a `system_info` action. Handled by [`
                     *   `bridge` (string): The bridge interface configured (typically `vmbr1`).
                     *   `health` (string|null): `"healthy"` when the connectivity verification succeeded.
                 *   `node_status` (object|null): Status response returned by the Proxmox API when validating the token.
-                *   `managed_containers` (object): Cached summary of the Portacode-managed containers:
-                    *   `updated_at` (string): ISO timestamp when this snapshot was last refreshed.
-                    *   `count` (integer): Number of managed containers.
-                    *   `total_ram_mib` (integer): RAM footprint summed across all containers.
-                    *   `total_disk_gib` (integer): Disk footprint summed across all containers.
-                    *   `total_cpu_share` (number): CPU shares requested across all containers.
-                    *   `containers` (array[object]): Container summaries with the following fields:
-                        *   `vmid` (string|null): Numeric CT ID.
-                        *   `hostname` (string|null): Hostname configured in the CT.
-                        *   `template` (string|null): Template identifier used.
-                        *   `storage` (string|null): Storage pool backing the rootfs.
-                        *   `disk_gib` (integer): Rootfs size in GiB.
-                        *   `ram_mib` (integer): Memory size in MiB.
-                        *   `cpu_share` (number): vCPU-equivalent share requested at creation.
-                        *   `status` (string): Lowercase lifecycle status (e.g., `running`, `stopped`, `deleted`).
-                        *   `created_at` (string|null): ISO timestamp recorded when the CT was provisioned.
+                    *   `managed_containers` (object): Cached summary of the Portacode-managed containers:
+                        *   `updated_at` (string): ISO timestamp when this snapshot was last refreshed.
+                        *   `count` (integer): Number of managed containers.
+                        *   `total_ram_mib` (integer): RAM footprint summed across all containers.
+                        *   `total_disk_gib` (integer): Disk footprint summed across all containers.
+                        *   `total_cpu_share` (number): CPU shares requested across all containers.
+                        *   `containers` (array[object]): Container summaries with the following fields:
+                            *   `vmid` (string|null): Numeric CT ID.
+                            *   `hostname` (string|null): Hostname configured in the CT.
+                            *   `template` (string|null): Template identifier used.
+                            *   `storage` (string|null): Storage pool backing the rootfs.
+                            *   `disk_gib` (integer): Rootfs size in GiB.
+                            *   `ram_mib` (integer): Memory size in MiB.
+                            *   `cpu_share` (number): vCPU-equivalent share requested at creation.
+                            *   `status` (string): Lowercase lifecycle status (e.g., `running`, `stopped`, `deleted`).
+                            *   `created_at` (string|null): ISO timestamp recorded when the CT was provisioned.
+                            *   `managed` (boolean): `true` for Portacode-managed entries.
+                            *   `matches_default_storage` (boolean): `true` when this container is backed by the default storage pool used for new Portacode containers.
+                            *   `type` (string): Either `lxc` or `qemu`, indicating whether we enumerated the container from the LXC or QEMU APIs.
+                        *   `unmanaged_containers` (array[object]): Facts about containers Portacode did not provision; fields mirror the managed list but are marked `managed=false`.
+                            *   `reserve_on_boot` (boolean): `true` when the CT is configured to start at boot; this flag is used to decide if its RAM and CPU allocations count toward the available totals.
+                    *   `unmanaged_count` (integer): Number of unmanaged containers detected on the node.
+                    *   `allocated_ram_mib` (integer): Total RAM reserved by both managed and unmanaged containers.
+                    *   `allocated_disk_gib` (integer): Total disk reserved by both managed and unmanaged containers.
+                    *   `allocated_cpu_share` (number): Total CPU shares requested by both managed and unmanaged containers.
+                    *   `available_ram_mib` (integer|null): Remaining RAM after subtracting all reservations from the host total (null when unavailable).
+                    *   `available_disk_gib` (integer|null): Remaining disk GB after subtracting allocations from the host total.
+                    *   `available_cpu_share` (number|null): Remaining CPU shares after allocations.
+                    *   `host_total_ram_mib` (integer|null): Host memory capacity observed via Proxmox.
+                    *   `host_total_disk_gib` (integer|null): Host disk capacity observed via Proxmox.
+                    *   `host_total_cpu_cores` (integer|null): Number of CPU cores reported by Proxmox.
+                    *   `default_storage` (string|null): Storage pool name selected during infrastructure configuration.
+                    *   `default_storage_snapshot` (object|null): Fresh stats for the default storage pool:
+                        *   `storage` (string): Storage pool identifier.
+                        *   `total_gib` (integer|null): Capacity of the storage pool.
+                        *   `avail_gib` (integer|null): Available space remaining.
+                        *   `used_gib` (integer|null): Space already consumed.
     *   `portacode_version` (string): Installed CLI version returned by `portacode.__version__`.
 
 ### `proxmox_infra_configured`
