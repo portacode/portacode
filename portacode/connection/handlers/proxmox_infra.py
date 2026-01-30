@@ -410,6 +410,7 @@ def _build_managed_containers_summary(records: List[Dict[str, Any]]) -> Dict[str
         containers.append(
             {
                 "vmid": str(_as_int(record.get("vmid"))) if record.get("vmid") is not None else None,
+                "device_id": record.get("device_id"),
                 "hostname": record.get("hostname"),
                 "template": record.get("template"),
                 "storage": record.get("storage"),
@@ -876,12 +877,17 @@ def _parse_ctid(message: Dict[str, Any]) -> int:
 
 
 def _ensure_container_managed(
-    proxmox: Any, node: str, vmid: int
+    proxmox: Any, node: str, vmid: int, *, device_id: Optional[str] = None
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     record = _read_container_record(vmid)
     ct_cfg = proxmox.nodes(node).lxc(str(vmid)).config.get()
     if not ct_cfg or MANAGED_MARKER not in (ct_cfg.get("description") or ""):
         raise RuntimeError(f"Container {vmid} is not managed by Portacode.")
+    record_device_id = record.get("device_id")
+    if device_id and str(record_device_id or "") != str(device_id):
+        raise RuntimeError(
+            f"Container {vmid} is managed for device {record_device_id!r}, not {device_id!r}."
+        )
     return record, ct_cfg
 
 
@@ -1835,10 +1841,13 @@ class StartProxmoxContainerHandler(SyncHandler):
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         vmid = _parse_ctid(message)
+        child_device_id = (message.get("child_device_id") or "").strip()
+        if not child_device_id:
+            raise ValueError("child_device_id is required for start_proxmox_container")
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
-        _ensure_container_managed(proxmox, node, vmid)
+        _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         status, elapsed = _start_container(proxmox, node, vmid)
         _update_container_record(vmid, {"status": "running"})
@@ -1865,10 +1874,13 @@ class StopProxmoxContainerHandler(SyncHandler):
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         vmid = _parse_ctid(message)
+        child_device_id = (message.get("child_device_id") or "").strip()
+        if not child_device_id:
+            raise ValueError("child_device_id is required for stop_proxmox_container")
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
-        _ensure_container_managed(proxmox, node, vmid)
+        _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         status, elapsed = _stop_container(proxmox, node, vmid)
         final_status = status.get("status") or "stopped"
@@ -1901,10 +1913,13 @@ class RemoveProxmoxContainerHandler(SyncHandler):
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         vmid = _parse_ctid(message)
+        child_device_id = (message.get("child_device_id") or "").strip()
+        if not child_device_id:
+            raise ValueError("child_device_id is required for remove_proxmox_container")
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
-        _ensure_container_managed(proxmox, node, vmid)
+        _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
         delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
