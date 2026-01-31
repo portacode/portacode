@@ -45,12 +45,36 @@ DNS_SERVER = "1.1.1.1"
 IFACES_PATH = Path("/etc/network/interfaces")
 SYSCTL_PATH = Path("/etc/sysctl.d/99-portacode-forward.conf")
 UNIT_DIR = Path("/etc/systemd/system")
-_MANAGED_CONTAINERS_CACHE_TTL_S = 30.0
-_MANAGED_CONTAINERS_CACHE: Dict[str, Any] = {"timestamp": 0.0, "summary": None}
-_MANAGED_CONTAINERS_CACHE_LOCK = threading.Lock()
+_MANAGED_CONTAINERS_STATE_LOCK = threading.Lock()
+_MANAGED_CONTAINERS_STATE: Dict[str, Any] = {
+    "initialized": False,
+    "base_summary": None,
+    "initial_totals": {"ram_mib": 0, "disk_gib": 0, "cpu_share": 0.0},
+    "records": {},
+    "pending": {},
+}
 TEMPLATES_REFRESH_INTERVAL_S = 300
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
+
+
+def _emit_host_event(
+    handler: SyncHandler,
+    payload: Dict[str, Any],
+) -> None:
+    loop = handler.context.get("event_loop")
+    if not loop or loop.is_closed():
+        logger.debug("host event skipped (no event loop) event=%s", payload.get("event"))
+        return
+
+    future = asyncio.run_coroutine_threadsafe(handler.send_response(payload), loop)
+    future.add_done_callback(
+        lambda fut: logger.warning(
+            "Failed to emit host event %s: %s", payload.get("event"), fut.exception()
+        )
+        if fut.exception()
+        else None
+    )
 
 
 def _emit_progress_event(
@@ -574,10 +598,76 @@ def _ensure_containers_dir() -> None:
     CONTAINERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _invalidate_managed_containers_cache() -> None:
-    with _MANAGED_CONTAINERS_CACHE_LOCK:
-        _MANAGED_CONTAINERS_CACHE["timestamp"] = 0.0
-        _MANAGED_CONTAINERS_CACHE["summary"] = None
+def _copy_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = summary.copy()
+    containers = summary.get("containers")
+    if isinstance(containers, list):
+        snapshot["containers"] = [entry.copy() for entry in containers]
+    unmanaged = summary.get("unmanaged_containers")
+    if isinstance(unmanaged, list):
+        snapshot["unmanaged_containers"] = [entry.copy() for entry in unmanaged]
+    return snapshot
+
+
+def _refresh_container_statuses(records: List[Dict[str, Any]], config: Dict[str, Any] | None) -> None:
+    if not records or not config:
+        return
+    try:
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        statuses = {
+            str(ct.get("vmid")): (ct.get("status") or "unknown").lower()
+            for ct in proxmox.nodes(node).lxc.get()
+        }
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("Failed to refresh container statuses: %s", exc)
+        return
+    for record in records:
+        vmid = record.get("vmid")
+        if vmid is None:
+            continue
+        try:
+            vmid_key = str(int(vmid))
+        except (ValueError, TypeError):
+            continue
+        status = statuses.get(vmid_key)
+        if status:
+            record["status"] = status
+
+
+def _initialize_managed_containers_state(force: bool = False) -> Dict[str, Any]:
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        if _MANAGED_CONTAINERS_STATE["initialized"] and not force:
+            base = _MANAGED_CONTAINERS_STATE["base_summary"]
+            return _copy_summary(base) if base else {}
+
+    config = _load_config()
+    records = _load_managed_container_records()
+    _refresh_container_statuses(records, config)
+    base_summary = _build_full_container_summary(records, config)
+    record_map: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        vmid = record.get("vmid")
+        if vmid is None:
+            continue
+        try:
+            record_map[str(int(vmid))] = record
+        except (TypeError, ValueError):
+            continue
+
+    initial_totals = {
+        "ram_mib": int(base_summary.get("total_ram_mib") or 0),
+        "disk_gib": int(base_summary.get("total_disk_gib") or 0),
+        "cpu_share": float(base_summary.get("total_cpu_share") or 0.0),
+    }
+
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        _MANAGED_CONTAINERS_STATE["initialized"] = True
+        _MANAGED_CONTAINERS_STATE["base_summary"] = base_summary
+        _MANAGED_CONTAINERS_STATE["initial_totals"] = initial_totals
+        _MANAGED_CONTAINERS_STATE["records"] = record_map
+        _MANAGED_CONTAINERS_STATE["pending"] = {}
+    return _copy_summary(base_summary)
 
 
 def _load_managed_container_records() -> List[Dict[str, Any]]:
@@ -777,46 +867,131 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
     return summary
 
 
-def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
-    def _refresh_container_statuses(records: List[Dict[str, Any]], config: Dict[str, Any] | None) -> None:
-        if not records or not config:
-            return
-        try:
-            proxmox = _connect_proxmox(config)
-            node = _get_node_from_config(config)
-            statuses = {
-                str(ct.get("vmid")): (ct.get("status") or "unknown").lower()
-                for ct in proxmox.nodes(node).lxc.get()
-            }
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.debug("Failed to refresh container statuses: %s", exc)
-            return
-        for record in records:
-            vmid = record.get("vmid")
-            if vmid is None:
-                continue
-            try:
-                vmid_key = str(int(vmid))
-            except (ValueError, TypeError):
-                continue
-            status = statuses.get(vmid_key)
-            if status:
-                record["status"] = status
+def _pending_totals(pending: Iterable[Dict[str, Any]]) -> Tuple[int, int, float]:
+    ram_total = 0
+    disk_total = 0
+    cpu_total = 0.0
+    for entry in pending:
+        ram_total += int(entry.get("ram_mib") or 0)
+        disk_total += int(entry.get("disk_gib") or 0)
+        cpu_total += float(entry.get("cpu_share") or 0.0)
+    return ram_total, disk_total, cpu_total
 
-    now = time.monotonic()
-    with _MANAGED_CONTAINERS_CACHE_LOCK:
-        cache_ts = _MANAGED_CONTAINERS_CACHE["timestamp"]
-        cached = _MANAGED_CONTAINERS_CACHE["summary"]
-    if not force and cached and now - cache_ts < _MANAGED_CONTAINERS_CACHE_TTL_S:
-        return cached
-    config = _load_config()
-    records = _load_managed_container_records()
-    _refresh_container_statuses(records, config)
-    summary = _build_full_container_summary(records, config)
-    with _MANAGED_CONTAINERS_CACHE_LOCK:
-        _MANAGED_CONTAINERS_CACHE["timestamp"] = now
-        _MANAGED_CONTAINERS_CACHE["summary"] = summary
+
+def _compose_managed_containers_summary(
+    records: Iterable[Dict[str, Any]],
+    pending: Iterable[Dict[str, Any]],
+    base_summary: Dict[str, Any],
+    initial_totals: Dict[str, Any],
+) -> Dict[str, Any]:
+    managed_summary = _build_managed_containers_summary(list(records))
+    summary = _copy_summary(base_summary)
+    base_by_vmid = {
+        str(entry.get("vmid")): entry
+        for entry in base_summary.get("containers", [])
+        if entry.get("vmid") is not None
+    }
+    default_storage = summary.get("default_storage")
+    merged_containers: List[Dict[str, Any]] = []
+    for entry in managed_summary["containers"]:
+        vmid = str(entry.get("vmid")) if entry.get("vmid") is not None else None
+        base_entry = base_by_vmid.get(vmid) if vmid is not None else None
+        if base_entry:
+            merged = base_entry.copy()
+            merged.update(entry)
+        else:
+            merged = entry.copy()
+            merged.setdefault("managed", True)
+            merged.setdefault("type", "lxc")
+            if default_storage and merged.get("storage"):
+                merged["matches_default_storage"] = (
+                    str(merged["storage"]).lower() == str(default_storage).lower()
+                )
+        merged_containers.append(merged)
+    summary["updated_at"] = managed_summary["updated_at"]
+    summary["count"] = managed_summary["count"]
+    summary["total_ram_mib"] = managed_summary["total_ram_mib"]
+    summary["total_disk_gib"] = managed_summary["total_disk_gib"]
+    summary["total_cpu_share"] = managed_summary["total_cpu_share"]
+    summary["containers"] = merged_containers
+
+    pending_ram, pending_disk, pending_cpu = _pending_totals(pending)
+    delta_ram = managed_summary["total_ram_mib"] - int(initial_totals.get("ram_mib") or 0)
+    delta_disk = managed_summary["total_disk_gib"] - int(initial_totals.get("disk_gib") or 0)
+    delta_cpu = managed_summary["total_cpu_share"] - float(initial_totals.get("cpu_share") or 0.0)
+
+    if "allocated_ram_mib" in summary and summary.get("allocated_ram_mib") is not None:
+        summary["allocated_ram_mib"] = round(float(summary["allocated_ram_mib"]) + delta_ram + pending_ram, 2)
+    if "allocated_disk_gib" in summary and summary.get("allocated_disk_gib") is not None:
+        summary["allocated_disk_gib"] = round(float(summary["allocated_disk_gib"]) + delta_disk + pending_disk, 2)
+    if "allocated_cpu_share" in summary and summary.get("allocated_cpu_share") is not None:
+        summary["allocated_cpu_share"] = round(float(summary["allocated_cpu_share"]) + delta_cpu + pending_cpu, 2)
+
+    if "available_ram_mib" in summary and summary.get("available_ram_mib") is not None:
+        available_ram = float(summary["available_ram_mib"]) - delta_ram - pending_ram
+        summary["available_ram_mib"] = max(int(available_ram), 0)
+    if "available_disk_gib" in summary and summary.get("available_disk_gib") is not None:
+        available_disk = float(summary["available_disk_gib"]) - delta_disk - pending_disk
+        summary["available_disk_gib"] = max(available_disk, 0.0)
+    if "available_cpu_share" in summary and summary.get("available_cpu_share") is not None:
+        available_cpu = float(summary["available_cpu_share"]) - delta_cpu - pending_cpu
+        summary["available_cpu_share"] = max(available_cpu, 0.0)
+
     return summary
+
+
+def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
+    _initialize_managed_containers_state(force=force)
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        base_summary = _MANAGED_CONTAINERS_STATE.get("base_summary") or {}
+        records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
+        pending = list(_MANAGED_CONTAINERS_STATE.get("pending", {}).values())
+        initial_totals = _MANAGED_CONTAINERS_STATE.get("initial_totals", {})
+    if not base_summary:
+        return {}
+    return _compose_managed_containers_summary(records, pending, base_summary, initial_totals)
+
+
+def _reserve_container_resources(payload: Dict[str, Any], *, device_id: str, request_id: Optional[str]) -> str:
+    _initialize_managed_containers_state()
+    ram_mib = int(payload.get("ram_mib") or 0)
+    disk_gib = int(payload.get("disk_gib") or 0)
+    cpu_share = float(payload.get("cpus") or 0.0)
+    reservation_id = secrets.token_hex(8)
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        base_summary = _MANAGED_CONTAINERS_STATE.get("base_summary") or {}
+        records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
+        pending = list(_MANAGED_CONTAINERS_STATE.get("pending", {}).values())
+        initial_totals = _MANAGED_CONTAINERS_STATE.get("initial_totals", {})
+        summary = _compose_managed_containers_summary(records, pending, base_summary, initial_totals)
+
+        available_ram = summary.get("available_ram_mib")
+        if available_ram is not None and ram_mib > available_ram:
+            raise RuntimeError("Not enough RAM to create this container.")
+        available_disk = summary.get("available_disk_gib")
+        if available_disk is not None and disk_gib > available_disk:
+            raise RuntimeError("Not enough disk space to create this container.")
+        available_cpu = summary.get("available_cpu_share")
+        if available_cpu is not None and cpu_share > available_cpu:
+            raise RuntimeError("Not enough CPU capacity to create this container.")
+
+        _MANAGED_CONTAINERS_STATE["pending"][reservation_id] = {
+            "reservation_id": reservation_id,
+            "device_id": device_id,
+            "request_id": request_id,
+            "ram_mib": ram_mib,
+            "disk_gib": disk_gib,
+            "cpu_share": cpu_share,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+    return reservation_id
+
+
+def _release_container_reservation(reservation_id: Optional[str]) -> None:
+    if not reservation_id:
+        return
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        _MANAGED_CONTAINERS_STATE.get("pending", {}).pop(reservation_id, None)
 
 
 def _format_rootfs(storage: str, disk_gib: int, storage_type: str) -> str:
@@ -1102,23 +1277,6 @@ def _start_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any]
         logger.info("Container %s already running (%ss)", vmid, uptime)
         return status, 0.0
 
-    node_status = proxmox.nodes(node).status.get()
-    mem_total_mb = int(node_status.get("memory", {}).get("total", 0) // (1024**2))
-    cores_total = int(node_status.get("cpuinfo", {}).get("cores", 0))
-
-    running = _list_running_managed(proxmox, node)
-    used_mem_mb = sum(int(cfg.get("memory", 0)) for _, cfg in running)
-    used_cores = sum(int(cfg.get("cores", 0)) for _, cfg in running)
-
-    target_cfg = proxmox.nodes(node).lxc(vmid).config.get()
-    target_mem_mb = int(target_cfg.get("memory", 0))
-    target_cores = int(target_cfg.get("cores", 0))
-
-    if mem_total_mb and used_mem_mb + target_mem_mb > mem_total_mb:
-        raise RuntimeError("Not enough RAM to start this container safely.")
-    if cores_total and used_cores + target_cores > cores_total:
-        raise RuntimeError("Not enough CPU cores to start this container safely.")
-
     upid = proxmox.nodes(node).lxc(vmid).status.start.post()
     return _wait_for_task(proxmox, node, upid)
 
@@ -1136,11 +1294,25 @@ def _delete_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any
     return _wait_for_task(proxmox, node, upid)
 
 
-def _write_container_record(vmid: int, payload: Dict[str, Any]) -> None:
+def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
+    _initialize_managed_containers_state()
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        if reservation_id:
+            _MANAGED_CONTAINERS_STATE["pending"].pop(reservation_id, None)
+        _MANAGED_CONTAINERS_STATE["records"][str(vmid)] = payload.copy()
+
+
+def _unregister_container_record(vmid: int) -> None:
+    _initialize_managed_containers_state()
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        _MANAGED_CONTAINERS_STATE["records"].pop(str(vmid), None)
+
+
+def _write_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
     _ensure_containers_dir()
     path = CONTAINERS_DIR / f"ct-{vmid}.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _invalidate_managed_containers_cache()
+    _register_container_record(vmid, payload, reservation_id=reservation_id)
 
 
 def _read_container_record(vmid: int) -> Dict[str, Any]:
@@ -1160,7 +1332,7 @@ def _remove_container_record(vmid: int) -> None:
     path = CONTAINERS_DIR / f"ct-{vmid}.json"
     if path.exists():
         path.unlink()
-        _invalidate_managed_containers_cache()
+    _unregister_container_record(vmid)
 
 
 def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1708,12 +1880,14 @@ def _allocate_vmid(proxmox: Any) -> int:
     return int(proxmox.cluster.nextid.get())
 
 
-def _instantiate_container(proxmox: Any, node: str, payload: Dict[str, Any]) -> Tuple[int, float]:
+def _instantiate_container(
+    proxmox: Any, node: str, payload: Dict[str, Any], vmid: Optional[int] = None
+) -> Tuple[int, float]:
     from proxmoxer.core import ResourceException
 
     storage_type = _get_storage_type(proxmox.nodes(node).storage.get(), payload["storage"])
     rootfs = _format_rootfs(payload["storage"], payload["disk_gib"], storage_type)
-    vmid = _allocate_vmid(proxmox)
+    vmid = vmid or _allocate_vmid(proxmox)
     if not payload.get("hostname"):
         payload["hostname"] = f"ct{vmid}"
     try:
@@ -1743,6 +1917,43 @@ def _instantiate_container(proxmox: Any, node: str, payload: Dict[str, Any]) -> 
         return vmid, elapsed
     except ResourceException as exc:
         raise RuntimeError(f"Failed to create container: {exc}") from exc
+
+
+def _cleanup_failed_container(
+    proxmox: Any, node: str, vmid: int, provisioning_id: Optional[str]
+) -> None:
+    from proxmoxer.core import ResourceException
+
+    try:
+        cfg = proxmox.nodes(node).lxc(str(vmid)).config.get()
+    except ResourceException as exc:
+        msg = str(exc).lower()
+        if "does not exist" in msg or "not found" in msg:
+            return
+        logger.warning("Failed to inspect container %s after create failure: %s", vmid, exc)
+        return
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("Failed to inspect container %s after create failure: %s", vmid, exc)
+        return
+
+    description = (cfg or {}).get("description") or ""
+    if provisioning_id and provisioning_id not in description:
+        logger.warning(
+            "Skipping cleanup for vmid=%s; provisioning marker mismatch", vmid
+        )
+        return
+
+    try:
+        status = proxmox.nodes(node).lxc(str(vmid)).status.current.get()
+        if status.get("status") == "running":
+            _stop_container(proxmox, node, vmid)
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("Failed to stop container %s after create failure: %s", vmid, exc)
+
+    try:
+        _delete_container(proxmox, node, vmid)
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("Failed to delete container %s after create failure: %s", vmid, exc)
 
 
 class CreateProxmoxContainerHandler(SyncHandler):
@@ -1847,219 +2058,277 @@ class CreateProxmoxContainerHandler(SyncHandler):
             _validate_environment,
         )
 
-        def _create_container():
-            proxmox = _connect_proxmox(config)
-            node = config.get("node") or DEFAULT_NODE_NAME
-            payload = _build_container_payload(message, config)
-            payload["cpulimit"] = float(payload["cpus"])
-            payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
-            payload["memory"] = int(payload["ram_mib"])
-            payload["node"] = node
-            logger.debug(
-                "Provisioning container node=%s template=%s ram=%s cpu=%s storage=%s",
-                node,
-                payload["template"],
-                payload["ram_mib"],
-                payload["cpus"],
-                payload["storage"],
-            )
-            vmid, _ = _instantiate_container(proxmox, node, payload)
-            payload["vmid"] = vmid
-            payload["created_at"] = datetime.utcnow().isoformat() + "Z"
-            payload["status"] = "creating"
-            payload["device_id"] = device_id
-            _write_container_record(vmid, payload)
-            return proxmox, node, vmid, payload
+        node = config.get("node") or DEFAULT_NODE_NAME
+        payload = _build_container_payload(message, config)
+        payload["cpulimit"] = float(payload["cpus"])
+        payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
+        payload["memory"] = int(payload["ram_mib"])
+        payload["node"] = node
 
-        proxmox, node, vmid, payload = _run_lifecycle_step(
-            "create_container",
-            "Creating container",
-            "Provisioning the LXC container…",
-            "Container created.",
-            _create_container,
+        reservation_id = _reserve_container_resources(
+            payload, device_id=device_id, request_id=request_id
         )
+        provisioning_id = secrets.token_hex(6)
+        payload["description"] = f"{payload.get('description', MANAGED_MARKER)};provisioning_id={provisioning_id}"
 
-        def _start_container_step():
-            _start_container(proxmox, node, vmid)
+        def _provision_background() -> None:
+            nonlocal current_step_index
+            proxmox: Any = None
+            vmid: Optional[int] = None
+            created_record = False
+            try:
+                def _create_container():
+                    nonlocal proxmox, vmid, created_record
+                    proxmox = _connect_proxmox(config)
+                    logger.debug(
+                        "Provisioning container node=%s template=%s ram=%s cpu=%s storage=%s",
+                        node,
+                        payload["template"],
+                        payload["ram_mib"],
+                        payload["cpus"],
+                        payload["storage"],
+                    )
+                    try:
+                        vmid = _allocate_vmid(proxmox)
+                        vmid, _ = _instantiate_container(proxmox, node, payload, vmid=vmid)
+                    except Exception:
+                        _release_container_reservation(reservation_id)
+                        if vmid is not None:
+                            _cleanup_failed_container(proxmox, node, vmid, provisioning_id)
+                        raise
+                    payload["vmid"] = vmid
+                    payload["created_at"] = datetime.utcnow().isoformat() + "Z"
+                    payload["status"] = "creating"
+                    payload["device_id"] = device_id
+                    try:
+                        _write_container_record(vmid, payload, reservation_id=reservation_id)
+                        created_record = True
+                    except Exception:
+                        _release_container_reservation(reservation_id)
+                        _cleanup_failed_container(proxmox, node, vmid, provisioning_id)
+                        raise
+                    return proxmox, node, vmid, payload
 
-        _run_lifecycle_step(
-            "start_container",
-            "Starting container",
-            "Booting the container…",
-            "Container startup completed.",
-            _start_container_step,
-        )
-        _update_container_record(vmid, {"status": "running"})
-
-        def _bootstrap_progress_callback(
-            step_index: int,
-            total: int,
-            step: Dict[str, Any],
-            status: str,
-            result: Optional[Dict[str, Any]],
-        ):
-            label = step.get("display_name") or _friendly_step_label(step.get("name", "bootstrap"))
-            error_summary = (result or {}).get("error_summary") or (result or {}).get("error")
-            attempt = (result or {}).get("attempt")
-            if status == "in_progress":
-                message_text = f"{label} is running…"
-            elif status == "completed":
-                message_text = f"{label} completed."
-            elif status == "retrying":
-                attempt_desc = f" (attempt {attempt})" if attempt else ""
-                message_text = f"{label} failed{attempt_desc}; retrying…"
-            else:
-                message_text = f"{label} failed"
-                if error_summary:
-                    message_text += f": {error_summary}"
-            details: Dict[str, Any] = {}
-            if attempt:
-                details["attempt"] = attempt
-            if error_summary:
-                details["error_summary"] = error_summary
-            _emit_progress_event(
-                self,
-                step_index=step_index,
-                total_steps=total,
-                step_name=step.get("name", "bootstrap"),
-                step_label=label,
-                status=status,
-                message=message_text,
-                phase="bootstrap",
-                request_id=request_id,
-                details=details or None,
-                on_behalf_of_device=device_id,
-            )
-
-        public_key, steps = _bootstrap_portacode(
-            vmid,
-            payload["username"],
-            payload["password"],
-            payload["ssh_public_key"],
-            steps=bootstrap_steps,
-            progress_callback=_bootstrap_progress_callback,
-            start_index=current_step_index,
-            total_steps=total_steps,
-            default_public_key=device_public_key if has_device_keypair else None,
-        )
-        current_step_index += len(bootstrap_steps)
-
-        service_installed = False
-        if has_device_keypair:
-            logger.info(
-                "deploying dashboard-provided Portacode keypair (device_id=%s) into container %s",
-                device_id,
-                vmid,
-            )
-            _deploy_device_keypair(
-                vmid,
-                payload["username"],
-                device_private_key,
-                device_public_key,
-            )
-            service_installed = True
-            service_start_index = current_step_index
-
-            auth_step_name = "setup_device_authentication"
-            auth_label = "Setting up device authentication"
-            _emit_progress_event(
-                self,
-                step_index=service_start_index,
-                total_steps=total_steps,
-                step_name=auth_step_name,
-                step_label=auth_label,
-                status="in_progress",
-                message="Notifying the server of the new device…",
-                phase="service",
-                request_id=request_id,
-                on_behalf_of_device=device_id,
-            )
-            _emit_progress_event(
-                self,
-                step_index=service_start_index,
-                total_steps=total_steps,
-                step_name=auth_step_name,
-                step_label=auth_label,
-                status="completed",
-                message="Authentication metadata recorded.",
-                phase="service",
-                request_id=request_id,
-                on_behalf_of_device=device_id,
-            )
-
-            install_step = service_start_index + 1
-            install_label = "Launching Portacode service"
-            _emit_progress_event(
-                self,
-                step_index=install_step,
-                total_steps=total_steps,
-                step_name="launch_portacode_service",
-                step_label=install_label,
-                status="in_progress",
-                message="Running sudo portacode service install…",
-                phase="service",
-                request_id=request_id,
-                on_behalf_of_device=device_id,
-            )
-
-            cmd = _su_command(payload["username"], "sudo -S portacode service install")
-            res = _run_pct(vmid, cmd, input_text=payload["password"] + "\n")
-
-            if res["returncode"] != 0:
-                _emit_progress_event(
-                    self,
-                    step_index=install_step,
-                    total_steps=total_steps,
-                    step_name="launch_portacode_service",
-                    step_label=install_label,
-                    status="failed",
-                    message=f"{install_label} failed: {res.get('stderr') or res.get('stdout')}",
-                    phase="service",
-                    request_id=request_id,
-                    details={
-                        "stderr": res.get("stderr"),
-                        "stdout": res.get("stdout"),
-                    },
-                    on_behalf_of_device=device_id,
+                proxmox, _, vmid, payload_local = _run_lifecycle_step(
+                    "create_container",
+                    "Creating container",
+                    "Provisioning the LXC container…",
+                    "Container created.",
+                    _create_container,
                 )
-                raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-            _emit_progress_event(
-                self,
-                step_index=install_step,
-                total_steps=total_steps,
-                step_name="launch_portacode_service",
-                step_label=install_label,
-                status="completed",
-                message="Portacode service install finished.",
-                phase="service",
-                request_id=request_id,
-                on_behalf_of_device=device_id,
-            )
+                def _start_container_step():
+                    _start_container(proxmox, node, vmid)
 
-            logger.info("create_proxmox_container: portacode service install completed inside ct %s", vmid)
+                _run_lifecycle_step(
+                    "start_container",
+                    "Starting container",
+                    "Booting the container…",
+                    "Container startup completed.",
+                    _start_container_step,
+                )
+                _update_container_record(vmid, {"status": "running"})
 
-            current_step_index += 2
+                def _bootstrap_progress_callback(
+                    step_index: int,
+                    total: int,
+                    step: Dict[str, Any],
+                    status: str,
+                    result: Optional[Dict[str, Any]],
+                ):
+                    label = step.get("display_name") or _friendly_step_label(step.get("name", "bootstrap"))
+                    error_summary = (result or {}).get("error_summary") or (result or {}).get("error")
+                    attempt = (result or {}).get("attempt")
+                    if status == "in_progress":
+                        message_text = f"{label} is running…"
+                    elif status == "completed":
+                        message_text = f"{label} completed."
+                    elif status == "retrying":
+                        attempt_desc = f" (attempt {attempt})" if attempt else ""
+                        message_text = f"{label} failed{attempt_desc}; retrying…"
+                    else:
+                        message_text = f"{label} failed"
+                        if error_summary:
+                            message_text += f": {error_summary}"
+                    details: Dict[str, Any] = {}
+                    if attempt:
+                        details["attempt"] = attempt
+                    if error_summary:
+                        details["error_summary"] = error_summary
+                    _emit_progress_event(
+                        self,
+                        step_index=step_index,
+                        total_steps=total,
+                        step_name=step.get("name", "bootstrap"),
+                        step_label=label,
+                        status=status,
+                        message=message_text,
+                        phase="bootstrap",
+                        request_id=request_id,
+                        details=details or None,
+                        on_behalf_of_device=device_id,
+                    )
+
+                public_key, steps = _bootstrap_portacode(
+                    vmid,
+                    payload_local["username"],
+                    payload_local["password"],
+                    payload_local["ssh_public_key"],
+                    steps=bootstrap_steps,
+                    progress_callback=_bootstrap_progress_callback,
+                    start_index=current_step_index,
+                    total_steps=total_steps,
+                    default_public_key=device_public_key if has_device_keypair else None,
+                )
+                current_step_index += len(bootstrap_steps)
+
+                service_installed = False
+                if has_device_keypair:
+                    logger.info(
+                        "deploying dashboard-provided Portacode keypair (device_id=%s) into container %s",
+                        device_id,
+                        vmid,
+                    )
+                    _deploy_device_keypair(
+                        vmid,
+                        payload_local["username"],
+                        device_private_key,
+                        device_public_key,
+                    )
+                    service_installed = True
+                    service_start_index = current_step_index
+
+                    auth_step_name = "setup_device_authentication"
+                    auth_label = "Setting up device authentication"
+                    _emit_progress_event(
+                        self,
+                        step_index=service_start_index,
+                        total_steps=total_steps,
+                        step_name=auth_step_name,
+                        step_label=auth_label,
+                        status="in_progress",
+                        message="Notifying the server of the new device…",
+                        phase="service",
+                        request_id=request_id,
+                        on_behalf_of_device=device_id,
+                    )
+                    _emit_progress_event(
+                        self,
+                        step_index=service_start_index,
+                        total_steps=total_steps,
+                        step_name=auth_step_name,
+                        step_label=auth_label,
+                        status="completed",
+                        message="Authentication metadata recorded.",
+                        phase="service",
+                        request_id=request_id,
+                        on_behalf_of_device=device_id,
+                    )
+
+                    install_step = service_start_index + 1
+                    install_label = "Launching Portacode service"
+                    _emit_progress_event(
+                        self,
+                        step_index=install_step,
+                        total_steps=total_steps,
+                        step_name="launch_portacode_service",
+                        step_label=install_label,
+                        status="in_progress",
+                        message="Running sudo portacode service install…",
+                        phase="service",
+                        request_id=request_id,
+                        on_behalf_of_device=device_id,
+                    )
+
+                    cmd = _su_command(payload_local["username"], "sudo -S portacode service install")
+                    res = _run_pct(vmid, cmd, input_text=payload_local["password"] + "\n")
+
+                    if res["returncode"] != 0:
+                        _emit_progress_event(
+                            self,
+                            step_index=install_step,
+                            total_steps=total_steps,
+                            step_name="launch_portacode_service",
+                            step_label=install_label,
+                            status="failed",
+                            message=f"{install_label} failed: {res.get('stderr') or res.get('stdout')}",
+                            phase="service",
+                            request_id=request_id,
+                            details={
+                                "stderr": res.get("stderr"),
+                                "stdout": res.get("stdout"),
+                            },
+                            on_behalf_of_device=device_id,
+                        )
+                        raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
+
+                    _emit_progress_event(
+                        self,
+                        step_index=install_step,
+                        total_steps=total_steps,
+                        step_name="launch_portacode_service",
+                        step_label=install_label,
+                        status="completed",
+                        message="Portacode service install finished.",
+                        phase="service",
+                        request_id=request_id,
+                        on_behalf_of_device=device_id,
+                    )
+
+                    logger.info(
+                        "create_proxmox_container: portacode service install completed inside ct %s", vmid
+                    )
+
+                    current_step_index += 2
+
+                _emit_host_event(
+                    self,
+                    {
+                        "event": "proxmox_container_created",
+                        "success": True,
+                        "message": f"Container {vmid} is ready and Portacode key captured.",
+                        "ctid": str(vmid),
+                        "public_key": public_key,
+                        "container": {
+                            "vmid": vmid,
+                            "hostname": payload_local["hostname"],
+                            "template": payload_local["template"],
+                            "storage": payload_local["storage"],
+                            "disk_gib": payload_local["disk_gib"],
+                            "ram_mib": payload_local["ram_mib"],
+                            "cpus": payload_local["cpus"],
+                        },
+                        "setup_steps": steps,
+                        "device_id": device_id,
+                        "on_behalf_of_device": device_id,
+                        "service_installed": service_installed,
+                        "request_id": request_id,
+                    },
+                )
+            except Exception as exc:
+                if reservation_id and not created_record:
+                    _release_container_reservation(reservation_id)
+                if vmid is not None and proxmox and node:
+                    _cleanup_failed_container(proxmox, node, vmid, provisioning_id)
+                    _remove_container_record(vmid)
+                _emit_host_event(
+                    self,
+                    {
+                        "event": "error",
+                        "message": str(exc),
+                        "device_id": device_id,
+                        "request_id": request_id,
+                    },
+                )
+
+        threading.Thread(target=_provision_background, daemon=True).start()
 
         return {
-            "event": "proxmox_container_created",
+            "event": "proxmox_container_accepted",
             "success": True,
-            "message": f"Container {vmid} is ready and Portacode key captured.",
-            "ctid": str(vmid),
-            "public_key": public_key,
-            "container": {
-                "vmid": vmid,
-                "hostname": payload["hostname"],
-                "template": payload["template"],
-                "storage": payload["storage"],
-                "disk_gib": payload["disk_gib"],
-                "ram_mib": payload["ram_mib"],
-                "cpus": payload["cpus"],
-            },
-            "setup_steps": steps,
+            "message": "Provisioning accepted; resources reserved.",
             "device_id": device_id,
-            "on_behalf_of_device": device_id,
-            "service_installed": service_installed,
+            "request_id": request_id,
         }
 
 
