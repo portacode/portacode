@@ -1071,7 +1071,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "zypper": {
         "update_cmd": "zypper refresh",
         "update_step_name": "zypper_update",
-        "install_cmd": "zypper install -y python3 python3-pip sudo",
+        "install_cmd": "zypper install -y python311 python311-pip sudo",
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -1101,6 +1101,7 @@ def _build_bootstrap_steps(
     package_manager: str = "apt",
 ) -> List[Dict[str, Any]]:
     profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
+    python_cmd = "python3.11" if package_manager == "zypper" else "python3"
     steps: List[Dict[str, Any]] = [
         {"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0},
     ]
@@ -1178,14 +1179,19 @@ def _build_bootstrap_steps(
         steps.append(
             {
                 "name": "add_ssh_key",
-                "cmd": f"install -d -m 700 /home/{user}/.ssh && echo '{ssh_key}' >> /home/{user}/.ssh/authorized_keys && chown -R {user}:{user} /home/{user}/.ssh",
+                "cmd": f"install -d -m 700 /home/{user}/.ssh && echo '{ssh_key}' >> /home/{user}/.ssh/authorized_keys && chown -R {user}:$(id -gn {shlex.quote(user)}) /home/{user}/.ssh",
                 "retries": 0,
             }
         )
     steps.extend(
         [
-            {"name": "pip_upgrade", "cmd": "python3 -m pip install --upgrade pip", "retries": 0},
-            {"name": "install_portacode", "cmd": "python3 -m pip install --upgrade portacode", "retries": 0},
+            {"name": "pip_upgrade", "cmd": f"{python_cmd} -m pip install --upgrade pip", "retries": 0},
+            {"name": "install_portacode", "cmd": f"{python_cmd} -m pip install --upgrade portacode", "retries": 0},
+            {
+                "name": "ensure_portacode_path",
+                "cmd": "if [ ! -f /etc/profile.d/portacode_path.sh ]; then printf 'export PATH=/usr/local/bin:$PATH\\n' >/etc/profile.d/portacode_path.sh; fi",
+                "retries": 0,
+            },
         ]
     )
     if include_portacode_connect:
@@ -1438,6 +1444,14 @@ def _su_command(user: str, command: str) -> str:
     return f"su - {user} -s /bin/sh -c {shlex.quote(command)}"
 
 
+def _resolve_user_group(vmid: int, user: str) -> str:
+    res = _run_pct(vmid, f"id -gn {shlex.quote(user)}")
+    group = (res.get("stdout") or "").strip()
+    if group:
+        return f"{user}:{group}"
+    return f"{user}:{user}"
+
+
 def _resolve_portacode_cli_path(vmid: int, user: str) -> str:
     """Resolve the full path to the portacode CLI inside the container."""
     res = _run_pct(vmid, _su_command(user, "command -v portacode"))
@@ -1474,12 +1488,13 @@ def _push_bytes_to_container(
 ) -> None:
     logger.debug("Preparing to push %d bytes to container vmid=%s path=%s for user=%s", len(data), vmid, path, user)
     tmp_path: Optional[str] = None
+    owner = _resolve_user_group(vmid, user)
     try:
         parent = Path(path).parent
         parent_str = parent.as_posix()
         if parent_str not in {"", ".", "/"}:
             _run_pct_exec_check(vmid, ["mkdir", "-p", parent_str])
-            _run_pct_exec_check(vmid, ["chown", "-R", f"{user}:{user}", parent_str])
+            _run_pct_exec_check(vmid, ["chown", "-R", owner, parent_str])
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(data)
@@ -1491,7 +1506,7 @@ def _push_bytes_to_container(
         if push_res.returncode != 0:
             raise RuntimeError(push_res.stderr or push_res.stdout or f"pct push returned {push_res.returncode}")
 
-        _run_pct_exec_check(vmid, ["chown", f"{user}:{user}", path])
+        _run_pct_exec_check(vmid, ["chown", owner, path])
         _run_pct_exec_check(vmid, ["chmod", format(mode, "o"), path])
         logger.debug("Successfully pushed %d bytes to vmid=%s path=%s", len(data), vmid, path)
     except Exception as exc:
@@ -1510,7 +1525,8 @@ def _resolve_portacode_key_dir(vmid: int, user: str) -> str:
     data_home = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
     portacode_dir = f"{data_home}/portacode"
     _run_pct_exec_check(vmid, ["mkdir", "-p", portacode_dir])
-    _run_pct_exec_check(vmid, ["chown", "-R", f"{user}:{user}", portacode_dir])
+    owner = _resolve_user_group(vmid, user)
+    _run_pct_exec_check(vmid, ["chown", "-R", owner, portacode_dir])
     return f"{portacode_dir}/keys"
 
 
@@ -1523,7 +1539,8 @@ def _deploy_device_keypair(vmid: int, user: str, private_key: str, public_key: s
 
 
 def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -> Dict[str, Any]:
-    su_connect_cmd = _su_command(user, "portacode connect")
+    cli_path = _resolve_portacode_cli_path(vmid, user)
+    su_connect_cmd = _su_command(user, f"{shlex.quote(cli_path)} connect")
     cmd = ["pct", "exec", str(vmid), "--", "/bin/sh", "-c", su_connect_cmd]
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     start = time.time()
