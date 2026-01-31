@@ -6,6 +6,7 @@ runs ``portacode connect`` automatically at login / boot.
 Platforms implemented:
 
 • Linux (systemd **user** service)        – no root privileges required
+• Linux (OpenRC service)                  – system-wide (e.g., Alpine)
 • macOS (launchd LaunchAgent plist)       – per-user
 • Windows (Task Scheduler *ONLOGON* task) – highest privilege, current user
 
@@ -26,6 +27,7 @@ import os
 from typing import Protocol
 import shutil
 import pwd
+import tempfile
 
 __all__ = [
     "ServiceManager",
@@ -197,6 +199,129 @@ class _SystemdUserService:
                 "journalctl", "--user", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
             ], text=True, capture_output=True).stdout
             return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
+
+
+# ---------------------------------------------------------------------------
+# Linux – OpenRC implementation (e.g., Alpine)
+# ---------------------------------------------------------------------------
+class _OpenRCService:
+    NAME = "portacode"
+
+    def __init__(self) -> None:
+        self.init_path = Path("/etc/init.d") / self.NAME
+        self.wrapper_path = Path("/usr/local/share/portacode/connect_service.sh")
+        self.user = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
+        try:
+            self.home = Path(pwd.getpwnam(self.user).pw_dir)
+        except KeyError:
+            self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
+        self.python = shutil.which("python3") or sys.executable
+        self.log_dir = Path("/var/log/portacode")
+        self.log_path = self.log_dir / "connect.log"
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        prefix = ["sudo"] if os.geteuid() != 0 else []
+        cmd = [*prefix, *args]
+        return subprocess.run(cmd, text=True, capture_output=True)
+
+    def _write_init_script(self) -> None:
+        self._write_wrapper_script()
+        script = textwrap.dedent(f"""
+            #!/sbin/openrc-run
+            description="Portacode persistent connection"
+
+            command="{self.wrapper_path}"
+            command_user="{self.user}"
+            command_background="yes"
+            pidfile="/run/portacode.pid"
+            directory="{self.home}"
+
+            depend() {{
+                need net
+            }}
+
+            start_pre() {{
+                checkpath --directory --mode 0755 /var/log/portacode
+                checkpath --directory --mode 0755 /usr/local/share/portacode
+                touch "{self.log_path}"
+                chown {self.user} "{self.log_path}"
+                chown {self.user} /var/log/portacode
+            }}
+        """).lstrip()
+
+        tmp_path = Path(tempfile.gettempdir()) / f"portacode-init-{os.getpid()}"
+        tmp_path.write_text(script)
+        if os.geteuid() != 0:
+            self._run("install", "-m", "755", str(tmp_path), str(self.init_path))
+        else:
+            self.init_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(tmp_path, self.init_path)
+            self.init_path.chmod(0o755)
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+    
+    def _write_wrapper_script(self) -> None:
+        script = textwrap.dedent(f"""
+            #!/bin/sh
+            cd "{self.home}"
+            exec "{self.python}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+        """).lstrip()
+        tmp_path = Path(tempfile.gettempdir()) / f"portacode-wrapper-{os.getpid()}"
+        tmp_path.write_text(script)
+        if os.geteuid() != 0:
+            self._run("install", "-m", "755", str(tmp_path), str(self.wrapper_path))
+        else:
+            self.wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(tmp_path, self.wrapper_path)
+            self.wrapper_path.chmod(0o755)
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+
+    def install(self) -> None:
+        self._write_init_script()
+        self._run("rc-update", "add", self.NAME, "default")
+        self._run("rc-service", self.NAME, "start")
+
+    def uninstall(self) -> None:
+        self._run("rc-service", self.NAME, "stop")
+        self._run("rc-update", "del", self.NAME, "default")
+        if self.init_path.exists():
+            if os.geteuid() != 0:
+                self._run("rm", "-f", str(self.init_path))
+            else:
+                self.init_path.unlink()
+
+    def start(self) -> None:
+        self._run("rc-service", self.NAME, "start")
+
+    def stop(self) -> None:
+        self._run("rc-service", self.NAME, "stop")
+
+    def status(self) -> str:
+        res = self._run("rc-service", self.NAME, "status")
+        out = (res.stdout or res.stderr or "").strip().lower()
+        if "started" in out or "running" in out:
+            return "running"
+        if "stopped" in out:
+            return "stopped"
+        return out or "unknown"
+
+    def status_verbose(self) -> str:
+        res = self._run("rc-service", self.NAME, "status")
+        status = res.stdout or res.stderr or ""
+        log_tail = "<no logs>"
+        try:
+            if self.log_path.exists():
+                with self.log_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+                log_tail = "".join(lines[-20:]) or "<no logs>"
+        except Exception:
+            pass
+        return (status or "").rstrip() + "\n--- recent logs ---\n" + log_tail
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +547,11 @@ class _WindowsTask:
 def get_manager(system_mode: bool = False) -> ServiceManager:
     system = platform.system().lower()
     if system == "linux":
-        return _SystemdUserService(system_mode=system_mode)  # type: ignore[return-value]
+        if shutil.which("systemctl"):
+            return _SystemdUserService(system_mode=system_mode)  # type: ignore[return-value]
+        if shutil.which("rc-service") or Path("/sbin/openrc").exists():
+            return _OpenRCService()  # type: ignore[return-value]
+        raise RuntimeError("Unsupported Linux init system (no systemctl or rc-service found)")
     if system == "darwin":
         return _LaunchdService()      # type: ignore[return-value]
     if system.startswith("windows") or system == "windows":
