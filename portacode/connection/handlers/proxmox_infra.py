@@ -116,6 +116,7 @@ def _emit_progress_event(
         payload["details"] = details
     if on_behalf_of_device:
         payload["on_behalf_of_device"] = str(on_behalf_of_device)
+        payload["bypass_session_gate"] = True
 
     future = asyncio.run_coroutine_threadsafe(handler.send_response(payload), loop)
     future.add_done_callback(
@@ -2331,6 +2332,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         "setup_steps": steps,
                         "device_id": device_id,
                         "on_behalf_of_device": device_id,
+                        "bypass_session_gate": True,
                         "service_installed": service_installed,
                         "request_id": request_id,
                     },
@@ -2357,7 +2359,6 @@ class CreateProxmoxContainerHandler(SyncHandler):
             "event": "proxmox_container_accepted",
             "success": True,
             "message": "Provisioning accepted; resources reserved.",
-            "device_id": device_id,
             "request_id": request_id,
         }
 

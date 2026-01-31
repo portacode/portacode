@@ -62,16 +62,18 @@ class BaseHandler(ABC):
         # Get client session manager from context
         client_session_manager = self.context.get("client_session_manager")
 
+        bypass_session_gate = bool(payload.get("bypass_session_gate"))
         if client_session_manager and client_session_manager.has_interested_clients():
             # Get target sessions
             target_sessions = client_session_manager.get_target_sessions(project_id)
-            if not target_sessions:
+            if not target_sessions and not bypass_session_gate:
                 logger.debug("handler: No target sessions found, skipping response send")
                 return
 
             # Add session targeting information
             enhanced_payload = dict(payload)
-            enhanced_payload["client_sessions"] = target_sessions
+            if target_sessions:
+                enhanced_payload["client_sessions"] = target_sessions
 
             # Add backward compatibility reply_channel (first session if not provided)
             if not reply_channel:
