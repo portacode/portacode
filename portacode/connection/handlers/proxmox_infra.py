@@ -1438,6 +1438,15 @@ def _su_command(user: str, command: str) -> str:
     return f"su - {user} -s /bin/sh -c {shlex.quote(command)}"
 
 
+def _resolve_portacode_cli_path(vmid: int, user: str) -> str:
+    """Resolve the full path to the portacode CLI inside the container."""
+    res = _run_pct(vmid, _su_command(user, "command -v portacode"))
+    path = (res.get("stdout") or "").strip()
+    if path:
+        return path
+    return "portacode"
+
+
 def _run_pct_check(vmid: int, cmd: str) -> Dict[str, Any]:
     res = _run_pct(vmid, cmd)
     if res["returncode"] != 0:
@@ -2240,7 +2249,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         on_behalf_of_device=device_id,
                     )
 
-                    cmd = _su_command(payload_local["username"], "sudo -S portacode service install")
+                    cli_path = _resolve_portacode_cli_path(vmid, payload_local["username"])
+                    cmd = _su_command(
+                        payload_local["username"],
+                        f"sudo -S {shlex.quote(cli_path)} service install",
+                    )
                     res = _run_pct(vmid, cmd, input_text=payload_local["password"] + "\n")
 
                     if res["returncode"] != 0:
@@ -2403,7 +2416,8 @@ class StartPortacodeServiceHandler(SyncHandler):
             on_behalf_of_device=on_behalf_of_device,
         )
 
-        cmd = _su_command(user, "sudo -S portacode service install")
+        cli_path = _resolve_portacode_cli_path(vmid, user)
+        cmd = _su_command(user, f"sudo -S {shlex.quote(cli_path)} service install")
         res = _run_pct(vmid, cmd, input_text=password + "\n")
 
         if res["returncode"] != 0:
