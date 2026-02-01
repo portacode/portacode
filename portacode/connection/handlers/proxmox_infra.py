@@ -33,6 +33,44 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 NET_SETUP_SCRIPT = REPO_ROOT / "proxmox_management" / "net_setup.py"
 CONTAINERS_DIR = CONFIG_DIR / "containers"
 MANAGED_MARKER = "portacode-managed:true"
+DEVICE_ID_MARKER = "device_id="
+PROVISIONING_ID_MARKER = "provisioning_id="
+
+
+def _sanitize_description_value(value: Any) -> str:
+    return str(value).strip().replace(";", "_")
+
+
+def _build_managed_description(
+    base: Optional[str],
+    *,
+    device_id: Optional[str] = None,
+    provisioning_id: Optional[str] = None,
+) -> str:
+    parts = [part for part in (base or "").split(";") if part]
+    if MANAGED_MARKER not in parts:
+        parts.insert(0, MANAGED_MARKER)
+    if device_id:
+        device_id_value = _sanitize_description_value(device_id)
+        if not any(part.startswith(DEVICE_ID_MARKER) for part in parts):
+            parts.append(f"{DEVICE_ID_MARKER}{device_id_value}")
+    if provisioning_id:
+        provisioning_value = _sanitize_description_value(provisioning_id)
+        if not any(part.startswith(PROVISIONING_ID_MARKER) for part in parts):
+            parts.append(f"{PROVISIONING_ID_MARKER}{provisioning_value}")
+    return ";".join(parts)
+
+
+def _extract_marker_value(description: str, prefix: str) -> Optional[str]:
+    for part in description.split(";"):
+        part = part.strip()
+        if part.startswith(prefix):
+            return part[len(prefix) :].strip()
+    return None
+
+
+def _parse_device_id_from_description(description: str) -> Optional[str]:
+    return _extract_marker_value(description, DEVICE_ID_MARKER)
 
 DEFAULT_HOST = "localhost"
 DEFAULT_NODE_NAME = os.uname().nodename.split(".", 1)[0]
@@ -1400,6 +1438,10 @@ def _parse_ctid(message: Dict[str, Any]) -> int:
     raise ValueError("ctid is required")
 
 
+class _DeviceLookupError(ValueError):
+    pass
+
+
 def _resolve_vmid_for_device(device_id: str) -> int:
     _initialize_managed_containers_state()
     records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
@@ -1416,21 +1458,77 @@ def _resolve_vmid_for_device(device_id: str) -> int:
             return int(str(vmid).strip())
         except ValueError:
             raise ValueError("ctid must be an integer") from None
-    raise ValueError("ctid is required for remove_proxmox_container")
+    raise _DeviceLookupError(
+        f"No managed container record found for device_id {device_id!r}."
+    )
+
+
+def _resolve_vmid_for_device_in_proxmox(
+    proxmox: Any, node: str, device_id: str
+) -> int:
+    device_id_value = str(device_id).strip()
+    matches: List[int] = []
+    try:
+        containers = proxmox.nodes(node).lxc.get()
+    except Exception as exc:  # pragma: no cover - proxmox failure
+        raise _DeviceLookupError(
+            f"Unable to query Proxmox containers for device_id {device_id_value!r}: {exc}"
+        ) from exc
+    for entry in containers or []:
+        vmid = entry.get("vmid")
+        if vmid is None:
+            continue
+        try:
+            cfg = proxmox.nodes(node).lxc(str(vmid)).config.get()
+        except Exception:
+            continue
+        description = (cfg or {}).get("description") or ""
+        if MANAGED_MARKER not in description:
+            continue
+        desc_device_id = _parse_device_id_from_description(description)
+        if desc_device_id is None:
+            continue
+        if str(desc_device_id) != device_id_value:
+            continue
+        matches.append(int(str(vmid).strip()))
+    if not matches:
+        raise _DeviceLookupError(
+            f"No managed container found for device_id {device_id_value!r}. It may already be deleted."
+        )
+    if len(matches) > 1:
+        raise _DeviceLookupError(
+            f"Multiple managed containers found for device_id {device_id_value!r}: {matches}."
+        )
+    return matches[0]
 
 
 def _ensure_container_managed(
     proxmox: Any, node: str, vmid: int, *, device_id: Optional[str] = None
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    record = _read_container_record(vmid)
+    try:
+        record = _read_container_record(vmid)
+    except FileNotFoundError:
+        record = {}
     ct_cfg = proxmox.nodes(node).lxc(str(vmid)).config.get()
-    if not ct_cfg or MANAGED_MARKER not in (ct_cfg.get("description") or ""):
+    description = (ct_cfg or {}).get("description") or ""
+    if not ct_cfg or MANAGED_MARKER not in description:
         raise RuntimeError(f"Container {vmid} is not managed by Portacode.")
     record_device_id = record.get("device_id")
-    if device_id and str(record_device_id or "") != str(device_id):
-        raise RuntimeError(
-            f"Container {vmid} is managed for device {record_device_id!r}, not {device_id!r}."
-        )
+    description_device_id = _parse_device_id_from_description(description)
+    if device_id:
+        device_id_value = str(device_id)
+        if description_device_id and str(description_device_id) != device_id_value:
+            raise RuntimeError(
+                f"Container {vmid} is managed for device {description_device_id!r}, not {device_id_value!r}."
+            )
+        if record_device_id and str(record_device_id) != device_id_value:
+            raise RuntimeError(
+                f"Container {vmid} is managed for device {record_device_id!r}, not {device_id_value!r}."
+            )
+        if not description_device_id and not record_device_id:
+            raise RuntimeError(
+                f"Container {vmid} is missing a device_id marker; refusing to operate without ctid."
+            )
     return record, ct_cfg
 
 
@@ -2115,7 +2213,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
             payload, device_id=device_id, request_id=request_id
         )
         provisioning_id = secrets.token_hex(6)
-        payload["description"] = f"{payload.get('description', MANAGED_MARKER)};provisioning_id={provisioning_id}"
+        payload["description"] = _build_managed_description(
+            payload.get("description"),
+            device_id=device_id,
+            provisioning_id=provisioning_id,
+        )
 
         def _provision_background() -> None:
             nonlocal current_step_index
@@ -2508,13 +2610,16 @@ class StartProxmoxContainerHandler(SyncHandler):
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for start_proxmox_container")
-        try:
-            vmid = _parse_ctid(message)
-        except ValueError:
-            vmid = _resolve_vmid_for_device(child_device_id)
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            try:
+                vmid = _resolve_vmid_for_device(child_device_id)
+            except _DeviceLookupError:
+                vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
         _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         status, elapsed = _start_container(proxmox, node, vmid)
@@ -2544,13 +2649,16 @@ class StopProxmoxContainerHandler(SyncHandler):
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for stop_proxmox_container")
-        try:
-            vmid = _parse_ctid(message)
-        except ValueError:
-            vmid = _resolve_vmid_for_device(child_device_id)
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            try:
+                vmid = _resolve_vmid_for_device(child_device_id)
+            except _DeviceLookupError:
+                vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
         _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         status, elapsed = _stop_container(proxmox, node, vmid)
@@ -2586,14 +2694,30 @@ class RemoveProxmoxContainerHandler(SyncHandler):
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for remove_proxmox_container")
-        try:
-            vmid = _parse_ctid(message)
-        except ValueError:
-            vmid = _resolve_vmid_for_device(child_device_id)
         request_id = message.get("request_id")
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            try:
+                vmid = _resolve_vmid_for_device(child_device_id)
+            except _DeviceLookupError:
+                try:
+                    vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
+                except _DeviceLookupError as exc:
+                    infra = get_infra_snapshot()
+                    return {
+                        "event": "proxmox_container_action",
+                        "action": "remove",
+                        "success": False,
+                        "message": str(exc),
+                        "status": "not_found",
+                        "child_device_id": child_device_id,
+                        "request_id": request_id,
+                        "infra": infra,
+                    }
         _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
@@ -2613,7 +2737,6 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             },
             "status": "deleted",
             "child_device_id": child_device_id,
-            "on_behalf_of_device": child_device_id,
             "request_id": request_id,
             "infra": infra,
         }

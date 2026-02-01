@@ -394,7 +394,7 @@ Stops a running Portacode-managed container. Handled by [`StopProxmoxContainerHa
 
 **Payload Fields:**
 
-*   `ctid` (string, optional): Identifier of the container to stop. If omitted, the handler resolves the CTID from the managed container records using `child_device_id`.
+*   `ctid` (string, optional): Identifier of the container to stop. If omitted, the handler resolves the CTID from managed container records and, if needed, by scanning managed container descriptions for the matching `device_id` marker.
 *   `child_device_id` (string, required): Dashboard `Device.id` that owns the container; the handler rejects the request if the CT is mapped to another device.
 
 **Responses:**
@@ -408,12 +408,13 @@ Deletes a managed container from Proxmox (stopping it first if necessary) and re
 
 **Payload Fields:**
 
-*   `ctid` (string, optional): Identifier of the container to delete. If omitted, the handler resolves the CTID from the managed container records using `child_device_id`.
+*   `ctid` (string, optional): Identifier of the container to delete. If omitted, the handler resolves the CTID from managed container records and, if needed, by scanning managed container descriptions for the matching `device_id` marker.
 *   `child_device_id` (string, required): Dashboard `Device.id` that should own the container metadata being purged.
 
 **Responses:**
 
 *   Emits a [`proxmox_container_action`](#proxmox_container_action-event) event with `action="remove"` and the refreshed infra snapshot after deletion.
+*   If no managed container matches the requested `child_device_id`, emits a `proxmox_container_action` event with `success=false`, `status="not_found"`, and a human-readable message (no error event).
 *   Emits an [`error`](#error) event on failure.
 
 ### `proxmox_container_created`
