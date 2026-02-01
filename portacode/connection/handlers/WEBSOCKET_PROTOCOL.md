@@ -380,7 +380,7 @@ Starts a previously provisioned, Portacode-managed LXC container. Handled by [`S
 
 **Payload Fields:**
 
-*   `ctid` (string, required): Identifier of the container to start.
+*   `ctid` (string, optional): Identifier of the container to start. If omitted, the handler resolves the CTID from the managed container records using `child_device_id`.
 *   `child_device_id` (string, required): Dashboard `Device.id` of the container that triggered the request; the handler validates the CT belongs to that device before issuing the start.
 
 **Responses:**
@@ -394,7 +394,7 @@ Stops a running Portacode-managed container. Handled by [`StopProxmoxContainerHa
 
 **Payload Fields:**
 
-*   `ctid` (string, required): Identifier of the container to stop.
+*   `ctid` (string, optional): Identifier of the container to stop. If omitted, the handler resolves the CTID from the managed container records using `child_device_id`.
 *   `child_device_id` (string, required): Dashboard `Device.id` that owns the container; the handler rejects the request if the CT is mapped to another device.
 
 **Responses:**
@@ -408,7 +408,7 @@ Deletes a managed container from Proxmox (stopping it first if necessary) and re
 
 **Payload Fields:**
 
-*   `ctid` (string, required): Identifier of the container to delete.
+*   `ctid` (string, optional): Identifier of the container to delete. If omitted, the handler resolves the CTID from the managed container records using `child_device_id`.
 *   `child_device_id` (string, required): Dashboard `Device.id` that should own the container metadata being purged.
 
 **Responses:**

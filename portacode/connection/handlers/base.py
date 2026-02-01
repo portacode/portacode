@@ -91,15 +91,24 @@ class BaseHandler(ABC):
                 payload["reply_channel"] = reply_channel
             await self.control_channel.send(payload)
     
-    async def send_error(self, message: str, reply_channel: Optional[str] = None, project_id: str = None) -> None:
+    async def send_error(
+        self,
+        message: str,
+        reply_channel: Optional[str] = None,
+        project_id: str = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         """Send an error response with client session awareness.
         
         Args:
             message: Error message
             reply_channel: Optional reply channel for backward compatibility
             project_id: Optional project filter for targeting specific sessions
+            request_id: Optional request_id to correlate error with a request
         """
         payload = {"event": "error", "message": message}
+        if request_id:
+            payload["request_id"] = request_id
         await self.send_response(payload, reply_channel, project_id)
 
 
@@ -165,7 +174,12 @@ class AsyncHandler(BaseHandler):
             logger.exception("handler: Error in async handler %s: %s", self.command_name, exc)
             # Extract project_id from original message for error targeting
             project_id = message.get("project_id")
-            await self.send_error(str(exc), reply_channel, project_id)
+            await self.send_error(
+                str(exc),
+                reply_channel,
+                project_id,
+                request_id=message.get("request_id"),
+            )
 
 
 class SyncHandler(BaseHandler):
@@ -218,4 +232,9 @@ class SyncHandler(BaseHandler):
             logger.exception("Error in sync handler %s: %s", self.command_name, exc)
             # Extract project_id from original message for error targeting
             project_id = message.get("project_id")
-            await self.send_error(str(exc), reply_channel, project_id) 
+            await self.send_error(
+                str(exc),
+                reply_channel,
+                project_id,
+                request_id=message.get("request_id"),
+            )

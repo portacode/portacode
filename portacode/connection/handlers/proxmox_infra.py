@@ -1400,6 +1400,25 @@ def _parse_ctid(message: Dict[str, Any]) -> int:
     raise ValueError("ctid is required")
 
 
+def _resolve_vmid_for_device(device_id: str) -> int:
+    _initialize_managed_containers_state()
+    records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
+    for record in records:
+        record_device_id = record.get("device_id")
+        if record_device_id is None:
+            continue
+        if str(record_device_id) != str(device_id):
+            continue
+        vmid = record.get("vmid")
+        if vmid is None:
+            continue
+        try:
+            return int(str(vmid).strip())
+        except ValueError:
+            raise ValueError("ctid must be an integer") from None
+    raise ValueError("ctid is required for remove_proxmox_container")
+
+
 def _ensure_container_managed(
     proxmox: Any, node: str, vmid: int, *, device_id: Optional[str] = None
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -2486,10 +2505,13 @@ class StartProxmoxContainerHandler(SyncHandler):
         return "start_proxmox_container"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        vmid = _parse_ctid(message)
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for start_proxmox_container")
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            vmid = _resolve_vmid_for_device(child_device_id)
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
@@ -2519,10 +2541,13 @@ class StopProxmoxContainerHandler(SyncHandler):
         return "stop_proxmox_container"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        vmid = _parse_ctid(message)
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for stop_proxmox_container")
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            vmid = _resolve_vmid_for_device(child_device_id)
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
@@ -2558,10 +2583,14 @@ class RemoveProxmoxContainerHandler(SyncHandler):
         return "remove_proxmox_container"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        vmid = _parse_ctid(message)
         child_device_id = (message.get("child_device_id") or "").strip()
         if not child_device_id:
             raise ValueError("child_device_id is required for remove_proxmox_container")
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            vmid = _resolve_vmid_for_device(child_device_id)
+        request_id = message.get("request_id")
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
@@ -2583,6 +2612,9 @@ class RemoveProxmoxContainerHandler(SyncHandler):
                 "delete_exitstatus": delete_status.get("exitstatus"),
             },
             "status": "deleted",
+            "child_device_id": child_device_id,
+            "on_behalf_of_device": child_device_id,
+            "request_id": request_id,
             "infra": infra,
         }
 

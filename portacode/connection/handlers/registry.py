@@ -106,12 +106,25 @@ class CommandRegistry:
         except Exception as exc:
             logger.exception("registry: Error dispatching command %s: %s", command_name, exc)
             # Send session-aware error response
-            await self._send_session_aware_error(str(exc), reply_channel, message.get("project_id"))
+            await self._send_session_aware_error(
+                str(exc),
+                reply_channel,
+                message.get("project_id"),
+                request_id=message.get("request_id"),
+            )
             return False
     
-    async def _send_session_aware_error(self, message: str, reply_channel: Optional[str] = None, project_id: str = None) -> None:
+    async def _send_session_aware_error(
+        self,
+        message: str,
+        reply_channel: Optional[str] = None,
+        project_id: str = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         """Send an error response with client session awareness."""
         error_payload = {"event": "error", "message": message}
+        if request_id:
+            error_payload["request_id"] = request_id
         
         # Get client session manager from context
         client_session_manager = self.context.get("client_session_manager")
