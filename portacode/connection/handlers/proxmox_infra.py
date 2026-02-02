@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import threading
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1295,12 +1296,21 @@ def _validate_positive_number(value: Any, default: float) -> float:
 
 
 def _wait_for_task(proxmox: Any, node: str, upid: str) -> Tuple[Dict[str, Any], float]:
+    from proxmoxer.core import ResourceException
     start = time.time()
+    poll = 2.0 
     while True:
-        status = proxmox.nodes(node).tasks(upid).status.get()
+        try:
+            status = proxmox.nodes(node).tasks(upid).status.get()
+        except ResourceException as e:
+            if str(e).startswith("599 "):
+                # transient proxy glitch; task may still be running
+                time.sleep(poll + random.random() * 0.5)  # small jitter
+                continue
+            raise
         if status.get("status") == "stopped":
             return status, time.time() - start
-        time.sleep(1)
+        time.sleep(poll)
 
 
 def _list_running_managed(proxmox: Any, node: str) -> List[Tuple[str, Dict[str, Any]]]:
