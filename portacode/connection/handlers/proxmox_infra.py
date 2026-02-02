@@ -20,7 +20,7 @@ import threading
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import platformdirs
 
@@ -916,6 +916,27 @@ def _pending_totals(pending: Iterable[Dict[str, Any]]) -> Tuple[int, int, float]
         disk_total += int(entry.get("disk_gib") or 0)
         cpu_total += float(entry.get("cpu_share") or 0.0)
     return ram_total, disk_total, cpu_total
+
+
+def _collect_reserved_ctids_locked() -> Set[int]:
+    """Return CTIDs already recorded or pending while holding the state lock."""
+    ctids: Set[int] = set()
+    records = _MANAGED_CONTAINERS_STATE.get("records", {})
+    for key in records:
+        try:
+            ctids.add(int(str(key)))
+        except (TypeError, ValueError):
+            continue
+    pending = _MANAGED_CONTAINERS_STATE.get("pending", {})
+    for entry in pending.values():
+        candidate = entry.get("ctid")
+        if candidate is None:
+            continue
+        try:
+            ctids.add(int(candidate))
+        except (TypeError, ValueError):
+            continue
+    return ctids
 
 
 def _compose_managed_containers_summary(
@@ -2034,6 +2055,37 @@ def _allocate_vmid(proxmox: Any) -> int:
     return int(proxmox.cluster.nextid.get())
 
 
+def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
+    """Allocate a CTID while holding the managed-state lock to prevent races."""
+    while True:
+        with _MANAGED_CONTAINERS_STATE_LOCK:
+            entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
+            if entry is None:
+                raise RuntimeError("Reservation missing while claiming CTID")
+            existing_ctid = entry.get("ctid")
+            if existing_ctid is not None:
+                try:
+                    return int(existing_ctid)
+                except (TypeError, ValueError):
+                    pass
+        ctid_candidate = _allocate_vmid(proxmox)
+        with _MANAGED_CONTAINERS_STATE_LOCK:
+            entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
+            if entry is None:
+                raise RuntimeError("Reservation missing while claiming CTID")
+            existing_ctid = entry.get("ctid")
+            if existing_ctid is not None:
+                try:
+                    return int(existing_ctid)
+                except (TypeError, ValueError):
+                    pass
+            reserved_ctids = _collect_reserved_ctids_locked()
+            if ctid_candidate in reserved_ctids:
+                continue
+            entry["ctid"] = ctid_candidate
+            return ctid_candidate
+
+
 def _instantiate_container(
     proxmox: Any, node: str, payload: Dict[str, Any], vmid: Optional[int] = None
 ) -> Tuple[int, float]:
@@ -2247,7 +2299,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         payload["storage"],
                     )
                     try:
-                        vmid = _allocate_vmid(proxmox)
+                        ctid = _claim_ctid_for_reservation(reservation_id, proxmox)
+                        vmid = ctid
                         vmid, _ = _instantiate_container(proxmox, node, payload, vmid=vmid)
                     except Exception:
                         _release_container_reservation(reservation_id)
