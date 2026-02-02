@@ -339,6 +339,21 @@ Configures a Proxmox node for Portacode infrastructure usage (API token validati
 *   On success, the device will emit a [`proxmox_infra_configured`](#proxmox_infra_configured-event) event with the persisted infra snapshot.
 *   On failure, the device will emit an [`error`](#error) event with details (e.g., permission issues, missing proxmoxer/dnsmasq, missing root privileges, or failed network verification).
 
+### `setup_cloudflare_tunnel`
+
+Creates (or reuses) a Cloudflare named tunnel for a Proxmox infrastructure node and installs the `cloudflared` systemd service. Handled by [`CloudflareTunnelSetupHandler`](./cloudflare_tunnel.py).
+
+**Payload Fields:**
+
+*   `device_id` (string, required): Device ID of the Proxmox node. Used to build a stable tunnel name.
+*   `timeout` (integer, optional): Seconds to wait for the user to complete Cloudflare login (defaults to 600).
+
+**Responses:**
+
+*   On success, the device will emit a [`cloudflare_tunnel_configured`](#cloudflare_tunnel_configured-event) event with the updated tunnel metadata.
+*   During login, the device will emit a [`cloudflare_tunnel_login`](#cloudflare_tunnel_login-event) event containing the login URL.
+*   On failure, the device will emit an [`error`](#error) event.
+
 ### `revert_proxmox_infra`
 
 Reverts the Proxmox infrastructure network changes and clears the stored API token. Handled by [`RevertProxmoxInfraHandler`](./proxmox_infra.py).
@@ -1137,6 +1152,19 @@ Provides system information in response to a `system_info` action. Handled by [`
                     *   `bridge` (string): The bridge interface configured (typically `vmbr1`).
                     *   `health` (string|null): `"healthy"` when the connectivity verification succeeded.
                 *   `node_status` (object|null): Status response returned by the Proxmox API when validating the token.
+    *   `cloudflare_tunnel` (object, optional): Cloudflare tunnel metadata when configured:
+        *   `configured` (boolean): True when a tunnel has been connected.
+        *   `connected` (boolean): True when the last setup completed successfully.
+        *   `domain` (string|null): The Cloudflare zone name selected during login.
+        *   `tunnel_name` (string|null): The tunnel name used on the device.
+        *   `tunnel_id` (string|null): Cloudflare tunnel UUID.
+        *   `credentials_file` (string|null): Path to the tunnel credentials JSON file.
+        *   `config_path` (string|null): Default `cloudflared` config path.
+        *   `cert_path` (string|null): Path to the Cloudflare origin cert.
+        *   `cloudflared_version` (string|null): Output of `cloudflared --version` at setup time.
+        *   `service_installed` (boolean|null): True when the systemd service was installed and enabled.
+        *   `tunnel_existed` (boolean|null): True if the tunnel already existed before setup.
+        *   `updated_at` (string|null): ISO timestamp of the last update.
                     *   `managed_containers` (object): Cached summary of the Portacode-managed containers:
                         *   `updated_at` (string): ISO timestamp when this snapshot was last refreshed.
                         *   `count` (integer): Number of managed containers.
@@ -1195,6 +1223,26 @@ Emitted after a successful `revert_proxmox_infra` action. Indicates the infra co
 *   `success` (boolean): True when the revert completed.
 *   `message` (string): Summary (e.g., "Proxmox infrastructure configuration reverted").
 *   `infra` (object): Snapshot with `configured=false` (matching [`system_info`](#system_info-event) `proxmox.infra`).
+
+### <a name="cloudflare_tunnel_login-event"></a>`cloudflare_tunnel_login`
+
+Emitted when the device starts `cloudflared tunnel login` and captures the Cloudflare authorization URL.
+
+**Event Fields:**
+
+*   `status` (string): Always `pending` while waiting for login.
+*   `login_url` (string): URL the user must open in a browser to complete authentication.
+*   `message` (string): UI-friendly prompt text.
+
+### <a name="cloudflare_tunnel_configured-event"></a>`cloudflare_tunnel_configured`
+
+Emitted after a successful `setup_cloudflare_tunnel` action. The event reports the updated tunnel metadata.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the tunnel setup completed.
+*   `message` (string): Summary (e.g., "Cloudflare tunnel ready for example.com.").
+*   `cloudflare_tunnel` (object): The stored tunnel metadata (same as `system_info.cloudflare_tunnel`).
 
 ### `proxmox_container_created`
 

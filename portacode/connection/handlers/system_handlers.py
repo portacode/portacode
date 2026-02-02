@@ -314,6 +314,14 @@ def _get_proxmox_info() -> Dict[str, Any]:
     return info
 
 
+def _get_cloudflare_tunnel_state() -> Dict[str, Any]:
+    try:
+        from portacode.tunneling.state import load_state
+    except Exception:
+        return {}
+    return load_state()
+
+
 def _get_os_info() -> Dict[str, Any]:
     """Get operating system information with robust error handling."""
     try:
@@ -426,6 +434,7 @@ class SystemInfoHandler(SyncHandler):
         info["user_context"] = _get_user_context()
         info["playwright"] = _get_playwright_info()
         info["proxmox"] = _get_proxmox_info()
+        info["cloudflare_tunnel"] = _get_cloudflare_tunnel_state()
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__

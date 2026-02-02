@@ -59,6 +59,7 @@ from .handlers import (
     StartProxmoxContainerHandler,
     StopProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
+    CloudflareTunnelSetupHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -487,6 +488,7 @@ class TerminalManager:
         self._command_registry.register(StopProxmoxContainerHandler)
         self._command_registry.register(RemoveProxmoxContainerHandler)
         self._command_registry.register(RevertProxmoxInfraHandler)
+        self._command_registry.register(CloudflareTunnelSetupHandler)
         self._command_registry.register(UpdatePortacodeHandler)
 
     # ---------------------------------------------------------------------
