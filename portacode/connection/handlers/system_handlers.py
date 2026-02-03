@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from portacode import __version__
 import psutil
@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - py<3.8
 
 from .base import SyncHandler
 from .proxmox_infra import get_infra_snapshot
+from portacode.tunneling.forwarding_state import load_forwarding_state
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +323,21 @@ def _get_cloudflare_tunnel_state() -> Dict[str, Any]:
     return load_state()
 
 
+def _get_cloudflare_forwarding_state() -> Dict[str, Any]:
+    try:
+        state = load_forwarding_state()
+    except Exception:
+        return {"rules": []}
+    rules: List[Dict[str, Any]] = []
+    for entry in state.get("rules") or []:
+        hostname = entry.get("hostname")
+        destination = entry.get("destination")
+        if not hostname or not destination:
+            continue
+        rules.append({"hostname": hostname, "destination": destination})
+    return {"rules": rules, "updated_at": state.get("updated_at")}
+
+
 def _get_os_info() -> Dict[str, Any]:
     """Get operating system information with robust error handling."""
     try:
@@ -435,6 +451,7 @@ class SystemInfoHandler(SyncHandler):
         info["playwright"] = _get_playwright_info()
         info["proxmox"] = _get_proxmox_info()
         info["cloudflare_tunnel"] = _get_cloudflare_tunnel_state()
+        info["cloudflare_forwarding"] = _get_cloudflare_forwarding_state()
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__

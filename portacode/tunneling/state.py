@@ -13,6 +13,7 @@ import platformdirs
 
 CONFIG_DIR = Path(platformdirs.user_config_dir("portacode"))
 STATE_PATH = CONFIG_DIR / "cloudflare_tunnel.json"
+SYSTEM_CONFIG_PATH = Path("/etc/cloudflared/config.yml")
 
 
 def _current_time_iso() -> str:
@@ -27,7 +28,13 @@ def default_cert_path() -> Path:
     return default_cloudflared_dir() / "cert.pem"
 
 
+def _running_as_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def default_config_path() -> Path:
+    if _running_as_root():
+        return SYSTEM_CONFIG_PATH
     return default_cloudflared_dir() / "config.yml"
 
 
@@ -61,12 +68,22 @@ def update_state(patch: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def clear_state() -> None:
+    if STATE_PATH.exists():
+        try:
+            STATE_PATH.unlink()
+        except OSError:
+            pass
+
+
 __all__ = [
     "CONFIG_DIR",
     "STATE_PATH",
     "default_cert_path",
     "default_config_path",
     "credentials_path_for_tunnel",
+    "SYSTEM_CONFIG_PATH",
+    "clear_state",
     "load_state",
     "save_state",
     "update_state",

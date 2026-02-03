@@ -51,6 +51,7 @@ from .proxmox_infra import (
     RemoveProxmoxContainerHandler,
 )
 from .cloudflare_tunnel import CloudflareTunnelSetupHandler
+from .cloudflare_forwarding import CloudflareForwardingHandler
 
 __all__ = [
     "BaseHandler",
@@ -96,4 +97,5 @@ __all__ = [
     "UpdatePortacodeHandler",
     "RevertProxmoxInfraHandler",
     "CloudflareTunnelSetupHandler",
+    "CloudflareForwardingHandler",
 ] 

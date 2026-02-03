@@ -8,17 +8,24 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .base import SyncHandler
 from portacode.tunneling.ensure_cloudflared import ensure_cloudflared_installed
 from portacode.tunneling.cloudflared_login import run_login
 from portacode.tunneling.get_domain import get_authenticated_domain
-from portacode.tunneling.service_install import ensure_tunnel_and_service
+from portacode.tunneling.service_install import (
+    download_tunnel_credentials,
+    ensure_tunnel_and_service,
+)
 from portacode.tunneling.state import (
+    clear_state,
     credentials_path_for_tunnel,
     default_cert_path,
+    default_cloudflared_dir,
     default_config_path,
+    load_state,
     update_state,
 )
 
@@ -65,10 +72,45 @@ def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def _safe_remove(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("Failed to remove %s: %s", path, exc)
+
+
+def _reset_previous_installation() -> None:
+    previous = load_state()
+    _safe_remove(default_cert_path())
+    _safe_remove(default_cloudflared_dir() / "config.yml")
+    if previous.get("tunnel_id") and previous.get("credentials_file"):
+        previous_path = Path(previous["credentials_file"])
+        if previous_path.exists():
+            logger.debug("Preserving existing credentials file %s", previous_path)
+        else:
+            logger.debug("Credentials file %s missing, will regenerate if needed", previous_path)
+    clear_state()
+
+
 def _build_tunnel_name(device_id: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9-]+", "-", device_id.strip()).strip("-")
     normalized = normalized.lower() or "device"
     return f"portacode-proxmox-{normalized}"
+
+
+def _ensure_tunnel_with_credentials(tunnel_name: str, config_path: Path) -> TunnelInfo:
+    tunnel_info = ensure_tunnel_and_service(tunnel_name, config_path=config_path)
+    credentials_path = Path(credentials_path_for_tunnel(tunnel_info.tunnel_id))
+    if credentials_path.exists():
+        return tunnel_info
+
+    download_tunnel_credentials(tunnel_info.tunnel_id, credentials_path)
+    if not credentials_path.exists():
+        raise RuntimeError(
+            f"Cloudflare credentials file {credentials_path} still missing after downloading token."
+        )
+    return tunnel_info
 
 
 class CloudflareTunnelSetupHandler(SyncHandler):
@@ -88,6 +130,7 @@ class CloudflareTunnelSetupHandler(SyncHandler):
         timeout_value: Optional[int] = int(timeout) if timeout else 600
 
         _ensure_pyyaml()
+        _reset_previous_installation()
 
         version = ensure_cloudflared_installed()
         cert_path = default_cert_path()
@@ -111,7 +154,8 @@ class CloudflareTunnelSetupHandler(SyncHandler):
 
         domain = get_authenticated_domain(str(cert_path))
         tunnel_name = _build_tunnel_name(device_id)
-        tunnel_info = ensure_tunnel_and_service(tunnel_name, config_path=default_config_path())
+        config_path = default_config_path()
+        tunnel_info = _ensure_tunnel_with_credentials(tunnel_name, config_path=config_path)
 
         state = update_state(
             {
@@ -121,7 +165,7 @@ class CloudflareTunnelSetupHandler(SyncHandler):
                 "tunnel_id": tunnel_info.tunnel_id,
                 "tunnel_existed": tunnel_info.existed,
                 "credentials_file": str(credentials_path_for_tunnel(tunnel_info.tunnel_id)),
-                "config_path": str(default_config_path()),
+                "config_path": str(config_path),
                 "cert_path": str(cert_path),
                 "cloudflared_version": version,
                 "service_installed": True,

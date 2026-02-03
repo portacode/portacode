@@ -343,6 +343,8 @@ Configures a Proxmox node for Portacode infrastructure usage (API token validati
 
 Creates (or reuses) a Cloudflare named tunnel for a Proxmox infrastructure node and installs the `cloudflared` systemd service. Handled by [`CloudflareTunnelSetupHandler`](./cloudflare_tunnel.py).
 
+When invoked multiple times (e.g., via “Reconnect Domain”), the handler now removes the prior Cloudflare certificate/config, uninstalls the existing service, clears the saved tunnel metadata, and reruns `cloudflared tunnel login` so the user sees a fresh login URL and can reauthenticate even if a previous domain/cert is already present.
+
 **Payload Fields:**
 
 *   `device_id` (string, required): Device ID of the Proxmox node. Used to build a stable tunnel name.
@@ -353,6 +355,28 @@ Creates (or reuses) a Cloudflare named tunnel for a Proxmox infrastructure node 
 *   On success, the device will emit a [`cloudflare_tunnel_configured`](#cloudflare_tunnel_configured-event) event with the updated tunnel metadata.
 *   During login, the device will emit a [`cloudflare_tunnel_login`](#cloudflare_tunnel_login-event) event containing the login URL.
 *   On failure, the device will emit an [`error`](#error) event.
+
+### `configure_cloudflare_forwarding`
+
+Applies a list of ingress rules for the authenticated Cloudflare domain, regenerates the active Cloudflare tunnel config (written to `/etc/cloudflared/config.yml` when the node runs as root, otherwise to `~/.cloudflared/config.yml`), routes the hostnames through the named tunnel, refreshes the DNS records (`cloudflared tunnel route dns`), and reloads the `cloudflared` systemd service. Handled by [`CloudflareForwardingHandler`](./cloudflare_forwarding.py). This command requires the node to have completed the Cloudflare login flow so the authenticated domain and tunnel metadata are available.
+
+**Payload Fields:**
+
+*   `rules` (array, optional): Each entry must be an object with:
+    *   `hostname` (string, required): The fully-qualified hostname receiving traffic. It must either match the authenticated domain or be a subdomain of it.
+    *   `destination` (string, required): The origin receiving the forwarded traffic. Supports:
+        *   Any absolute `http://` or `https://` URL (e.g., `https://127.0.0.1:8888`).
+        *   A device-aware shorthand using square brackets to name the target device ID (`http://[123]:8000`). Such rules look up the container’s VMID, resolve its current IP via `dnsmasq` leases (`/var/lib/misc/portacode_dnsmasq.leases`), and substitute the service endpoint before regenerating the tunnel config.
+            *   This device lookup feature depends on the Proxmox infrastructure configuration; on generic Linux hosts the handler skips the lookup and only URL-based destinations are supported.
+*   When `rules` is omitted, the handler re-applies the last stored configuration (found under `~/.config/portacode/cloudflare_forwarding.json`) so that it can refresh service endpoints if DHCP addresses changed.
+*   An empty `rules` array removes all custom ingress entries (only the default `http_status:404` target remains).
+
+During each invocation the handler persists the canonical rule list along with timestamps, recomputes the `ingress` block, writes it to the system config path (normally `/etc/cloudflared/config.yml` for root-owned installs), and reloads `cloudflared` so the tunnel immediately uses the new targets. If a rule references a device that no longer exists or lacks a DHCP lease, the command fails before touching the config.
+
+**Responses:**
+
+*   On success, the device will emit a [`cloudflare_forwarding_configured`](#cloudflare_forwarding_configured-event) event with the persisted rules.
+*   On failure, the device will emit an [`error`](#error) event describing why the config could not be applied.
 
 ### `revert_proxmox_infra`
 
@@ -1237,6 +1261,18 @@ Emitted when the device starts `cloudflared tunnel login` and captures the Cloud
 ### <a name="cloudflare_tunnel_configured-event"></a>`cloudflare_tunnel_configured`
 
 Emitted after a successful `setup_cloudflare_tunnel` action. The event reports the updated tunnel metadata.
+
+### `cloudflare_forwarding_configured`
+
+Emitted after `configure_cloudflare_forwarding` applies a new set of tunnel ingress rules or reloads the previously saved configuration.
+
+**Event Fields:**
+
+*   `success` (boolean): True when the Cloudflare config generation, DNS routing, and service reload all completed.
+*   `message` (string): Human-readable summary (e.g., "Cloudflare ingress configured for 2 rule(s).").
+*   `rules` (array): The persisted rule list, each entry containing:
+    *   `hostname` (string): Hostname receiving the tunnel traffic.
+    *   `destination` (string): The original destination string used to build the rule (URL or device shorthand).
 
 **Event Fields:**
 
