@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -191,22 +192,37 @@ def _resolve_service_endpoint(
 
 def _build_ingress_entries(
     rules: List[Dict[str, Any]], proxmox: Optional[Any], node: Optional[str]
-) -> List[Dict[str, str]]:
-    entries: List[Dict[str, str]] = []
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
     leases = _load_leases() if proxmox else []
     device_ip_cache: Dict[str, str] = {}
     for rule in rules:
         parsed = rule["parsed"]
         service = _resolve_service_endpoint(parsed, proxmox, node, leases, device_ip_cache)
-        entry: Dict[str, str] = {"hostname": rule["hostname"], "service": service}
+        entry: Dict[str, Any] = {"hostname": rule["hostname"], "service": service}
         path = parsed.get("path", "")
         if path:
             entry["path"] = path
+        parsed_service = urlparse(service)
+        host = parsed_service.hostname
+        if parsed_service.scheme == "https" and host:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                entry["originRequest"] = {"noTLSVerify": True}
         entries.append(entry)
     return entries
 
 
-def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, str]]) -> None:
+def _format_config_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, Any]]) -> None:
     config_path = Path(default_config_path())
     config_path.parent.mkdir(parents=True, exist_ok=True)
     credentials = state.get("credentials_file") or ""
@@ -226,6 +242,11 @@ def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, str
             if "path" in entry:
                 lines.append(f"    path: {entry['path']}")
             lines.append(f"    service: {entry['service']}")
+            origin_request = entry.get("originRequest")
+            if origin_request:
+                lines.append("    originRequest:")
+                for key, value in origin_request.items():
+                    lines.append(f"      {key}: {_format_config_value(value)}")
         else:
             lines.append(f"  - service: {entry['service']}")
     lines.append("  - service: http_status:404")
