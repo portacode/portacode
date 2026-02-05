@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from pwd import getpwuid
 from typing import Any, Dict, List, Optional
 
 from portacode import __version__
@@ -41,6 +42,11 @@ _CGROUP_CPU_STAT = "cpu.stat"
 _CGROUP_CPU_MAX = "cpu.max"
 _last_cgroup_usage: Optional[int] = None
 _last_cgroup_time: Optional[float] = None
+
+
+FALLBACK_UNIX = "/bin/sh"
+FALLBACK_WINDOWS = "cmd.exe"
+BASH_PATHS = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
 
 def _cpu_monitor():
     """Background thread to update CPU usage every 5 seconds."""
@@ -145,6 +151,41 @@ def _get_playwright_info() -> Dict[str, Any]:
         result["error"] = str(exc)
 
     return result
+
+
+def _is_executable(path: str) -> bool:
+    return bool(path and os.path.isfile(path) and os.access(path, os.X_OK))
+
+
+def _resolve_default_shell(system: str) -> str:
+    """Prefer bash when available and otherwise fall back to configured shell."""
+    if system != "Windows":
+        for bash_path in BASH_PATHS:
+            if _is_executable(bash_path):
+                return bash_path
+
+    candidate = ""
+    try:
+        candidate = getpwuid(os.geteuid()).pw_shell or ""
+    except Exception:
+        candidate = ""
+
+    if not candidate and system in {"Linux", "Darwin"}:
+        candidate = os.environ.get("SHELL", "")
+
+    if not candidate and system == "Windows":
+        candidate = os.environ.get("COMSPEC", "")
+
+    if not candidate:
+        candidate = FALLBACK_WINDOWS if system == "Windows" else FALLBACK_UNIX
+
+    if system != "Windows" and not _is_executable(candidate):
+        for alt in ("/usr/bin/env", candidate):
+            if _is_executable(alt):
+                candidate = alt
+                break
+
+    return candidate
 
 
 def _resolve_cgroup_path() -> Path:
@@ -343,25 +384,24 @@ def _get_os_info() -> Dict[str, Any]:
     try:
         system = platform.system()
         logger.debug("Detected system: %s", system)
-        
+        default_shell = _resolve_default_shell(system)
+        default_cwd = os.path.expanduser('~')
+
         if system == "Linux":
             os_type = "Linux"
-            default_shell = os.environ.get('SHELL', '/bin/bash')
-            default_cwd = os.path.expanduser('~')
-            
             # Try to get more specific Linux distribution info
             try:
                 import distro
+
                 os_version = f"{distro.name()} {distro.version()}"
                 logger.debug("Using distro package for OS version: %s", os_version)
             except ImportError:
                 logger.debug("distro package not available, trying /etc/os-release")
-                # Fallback to basic platform info
                 try:
-                    with open('/etc/os-release', 'r') as f:
+                    with open("/etc/os-release", "r") as f:
                         for line in f:
-                            if line.startswith('PRETTY_NAME='):
-                                os_version = line.split('=')[1].strip().strip('"')
+                            if line.startswith("PRETTY_NAME="):
+                                os_version = line.split("=", 1)[1].strip().strip('"')
                                 logger.debug("Found OS version from /etc/os-release: %s", os_version)
                                 break
                         else:
@@ -370,24 +410,18 @@ def _get_os_info() -> Dict[str, Any]:
                 except FileNotFoundError:
                     os_version = f"{system} {platform.release()}"
                     logger.debug("Using platform.release() fallback for OS version: %s", os_version)
-                    
+
         elif system == "Darwin":  # macOS
             os_type = "macOS"
             os_version = f"macOS {platform.mac_ver()[0]}"
-            default_shell = os.environ.get('SHELL', '/bin/bash')
-            default_cwd = os.path.expanduser('~')
-            
+
         elif system == "Windows":
             os_type = "Windows"
             os_version = f"{platform.system()} {platform.release()}"
-            default_shell = os.environ.get('COMSPEC', 'cmd.exe')
-            default_cwd = os.path.expanduser('~')
-            
+
         else:
             os_type = system
             os_version = f"{system} {platform.release()}"
-            default_shell = "/bin/sh"  # Safe fallback
-            default_cwd = os.path.expanduser('~')
         
         result = {
             "os_type": os_type,
@@ -406,9 +440,9 @@ def _get_os_info() -> Dict[str, Any]:
         return {
             "os_type": "Unknown",
             "os_version": "Unknown",
-            "architecture": platform.machine() if hasattr(platform, 'machine') else "Unknown",
-            "default_shell": "/bin/bash",  # Safe fallback
-            "default_cwd": os.path.expanduser('~') if hasattr(os.path, 'expanduser') else "",
+            "architecture": platform.machine() if hasattr(platform, "machine") else "Unknown",
+            "default_shell": _resolve_default_shell(platform.system()),
+            "default_cwd": os.path.expanduser("~") if hasattr(os.path, "expanduser") else "",
         }
 
 
