@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 from .base import AsyncHandler
 from .session import SessionManager
@@ -275,4 +276,136 @@ class TerminalListHandler(AsyncHandler):
             "event": "terminal_list",
             "sessions": sessions,
             "project_id": requested_project_id,
-        } 
+        }
+
+
+class TerminalExecHandler(AsyncHandler):
+    """Handler for running one-off commands and returning structured results."""
+
+    OUTPUT_FLUSH_INTERVAL_S = 1.0
+
+    @property
+    def command_name(self) -> str:
+        return "terminal_exec"
+
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a command on the host and capture stdout, stderr, and the exit code."""
+        command = message.get("command")
+        if not command:
+            raise ValueError("command is required for terminal_exec")
+
+        cwd = message.get("cwd")
+        env_spec = message.get("env")
+        timeout_param = message.get("timeout")
+        timeout_value: Optional[float] = None
+        if timeout_param is not None:
+            try:
+                timeout_value = float(timeout_param)
+                if timeout_value <= 0:
+                    raise ValueError("timeout must be a positive number of seconds")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("timeout must be a positive number") from exc
+
+        env = None
+        if env_spec is not None:
+            if not isinstance(env_spec, dict):
+                raise ValueError("env must be an object/dict of environment variables")
+            env = {str(k): str(v) for k, v in env_spec.items()}
+
+        project_id = message.get("project_id")
+
+        pending_stdout: List[str] = []
+        pending_stderr: List[str] = []
+        final_stdout: List[str] = []
+        final_stderr: List[str] = []
+        pending_lock = asyncio.Lock()
+        stop_event = asyncio.Event()
+
+        async def _append_pending(bucket: List[str], text: str) -> None:
+            async with pending_lock:
+                bucket.append(text)
+
+        async def _read_stream(stream, pending: List[str], archive: List[str]) -> None:
+            while True:
+                chunk = await stream.read(1024)
+                if not chunk:
+                    break
+                text = chunk.decode(errors="replace")
+                await _append_pending(pending, text)
+                archive.append(text)
+
+        async def _flush_pending() -> None:
+            async with pending_lock:
+                stdout_chunk = "".join(pending_stdout)
+                stderr_chunk = "".join(pending_stderr)
+                pending_stdout.clear()
+                pending_stderr.clear()
+            if not stdout_chunk and not stderr_chunk:
+                return
+            payload: Dict[str, Any] = {
+                "event": "terminal_exec_output",
+                "command": command,
+            }
+            if stdout_chunk:
+                payload["stdout"] = stdout_chunk
+            if stderr_chunk:
+                payload["stderr"] = stderr_chunk
+            if project_id is not None:
+                payload["project_id"] = project_id
+            await self.send_response(payload, project_id=project_id)
+
+        async def _streaming_flusher() -> None:
+            try:
+                while True:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=self.OUTPUT_FLUSH_INTERVAL_S)
+                        break
+                    except asyncio.TimeoutError:
+                        await _flush_pending()
+                await _flush_pending()
+            except asyncio.CancelledError:
+                await _flush_pending()
+                raise
+
+        start = time.monotonic()
+        process = await asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_task = asyncio.create_task(_read_stream(process.stdout, pending_stdout, final_stdout))
+        stderr_task = asyncio.create_task(_read_stream(process.stderr, pending_stderr, final_stderr))
+        flusher_task = asyncio.create_task(_streaming_flusher())
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_value)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise TimeoutError(
+                f"terminal_exec timed out after {timeout_value}s" if timeout_value is not None else "terminal_exec timed out"
+            )
+        finally:
+            stop_event.set()
+            await asyncio.gather(stdout_task, stderr_task, flusher_task, return_exceptions=True)
+
+        duration = time.monotonic() - start
+        stdout = "".join(final_stdout)
+        stderr = "".join(final_stderr)
+
+        response: Dict[str, Any] = {
+            "event": "terminal_exec_result",
+            "command": command,
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "duration_s": round(duration, 3),
+        }
+        if cwd is not None:
+            response["cwd"] = cwd
+        if project_id is not None:
+            response["project_id"] = project_id
+        return response

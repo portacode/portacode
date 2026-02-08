@@ -32,6 +32,11 @@ The handler system consists of:
    - Lists all active terminal sessions
    - Returns session metadata and buffer contents
 
+5. **`TerminalExecHandler`** - `terminal_exec`
+   - Runs a command on the device with structured stdout/stderr capture
+   - Returns the return code, duration, and any captured output for client-side assertion
+   - Streams periodic `terminal_exec_output` events (every ~1s when there is data) so callers can show progress during long-running commands
+
 ### System Handlers (`system_handlers.py`)
 
 1. **`SystemInfoHandler`** - `system_info`

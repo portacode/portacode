@@ -12,6 +12,7 @@ from .terminal_handlers import (
     TerminalSendHandler,
     TerminalStopHandler,
     TerminalListHandler,
+    TerminalExecHandler,
 )
 from .system_handlers import SystemInfoHandler
 from .update_handler import UpdatePortacodeHandler
@@ -62,6 +63,7 @@ __all__ = [
     "TerminalSendHandler",
     "TerminalStopHandler",
     "TerminalListHandler",
+    "TerminalExecHandler",
     "SystemInfoHandler",
     "ConfigureProxmoxInfraHandler",
     "CreateProxmoxContainerHandler",

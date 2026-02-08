@@ -43,6 +43,7 @@ This document describes the complete protocol for communicating with devices thr
     - [`terminal_send`](#terminal_send)
     - [`terminal_stop`](#terminal_stop)
     - [`terminal_list`](#terminal_list)
+    - [`terminal_exec`](#terminal_exec)
   - [System Actions](#system-actions)
     - [`system_info`](#system_info)
     - [`update_portacode_cli`](#update_portacode_cli)
@@ -80,7 +81,9 @@ This document describes the complete protocol for communicating with devices thr
   - [Terminal Events](#terminal-events)
     - [`terminal_started`](#terminal_started)
     - [`terminal_data`](#terminal_data)
+    - [`terminal_exec_output`](#terminal_exec_output)
     - [`terminal_exit`](#terminal_exit)
+    - [`terminal_exec_result`](#terminal_exec_result)
     - [`terminal_send_ack`](#terminal_send_ack)
     - [`terminal_stopped`](#terminal_stopped)
     - [`terminal_stop_completed`](#terminal_stop_completed)
@@ -311,6 +314,23 @@ Requests a list of all active terminal sessions. Handled by [`terminal_list`](./
 **Responses:**
 
 *   On success, the device will respond with a [`terminal_list`](#terminal_list-event) event.
+
+### `terminal_exec`
+
+Runs a command directly on the device host and waits for it to finish, returning structured stdout/stderr output along with the exit code. Handled by [`terminal_exec`](./terminal_handlers.py).
+
+**Payload Fields:**
+
+*   `command` (string, mandatory): The shell command to execute (runs via `/bin/sh -c …` on Unix devices).
+*   `cwd` (string, optional): Working directory to execute the command in.
+*   `timeout` (number, optional): Maximum time in seconds to wait for the command; the handler kills the process if it exceeds this duration.
+*   `env` (object, optional): Extra environment variables (string keys/values) that should override the process environment.
+
+**Responses:**
+
+*   While the command is running, the device periodically emits [`terminal_exec_output`](#terminal_exec_output) events (roughly once per second when new output exists) so clients can show live progress.
+*   On success, the device emits a [`terminal_exec_result`](#terminal_exec_result) event that includes the exit code, captured stdout/stderr, and command duration.
+*   On failure (including timeouts) a generic [`error`](#error) event is sent.
 
 ### `system_info`
 
@@ -1066,6 +1086,17 @@ The `data` field contains the exact bytes output by the terminal process, decode
 "Progress: [████████████████████] 100%\r"   // Progress bar with carriage return
 ```
 
+### <a name="terminal_exec_output"></a>`terminal_exec_output`
+
+Reports incremental output chunks for the command executed via `terminal_exec`. This event is emitted repeatedly (roughly every second when new data is available) so UI clients can display live progress while the command runs.
+
+**Event Fields:**
+
+*   `command` (string, mandatory): The exact command line supplied to `terminal_exec`.
+*   `stdout` (string, optional): Newly captured stdout since the previous `terminal_exec_output`.
+*   `stderr` (string, optional): Newly captured stderr since the previous `terminal_exec_output`.
+*   `project_id` (string, optional): The project ID included with the original `terminal_exec` request, if any.
+
 **Security Note**: The `device_id` field is automatically injected by the server based on the authenticated connection - the device cannot and should not specify its own ID. The `project_id` and `client_sessions` fields are added by the device's terminal manager for proper routing and filtering.
 
 ### <a name="terminal_link_request"></a>`terminal_link_request`
@@ -1093,6 +1124,20 @@ Notifies the server that a terminal session has terminated. This can be due to t
 *   `terminal_id` (string, mandatory): The ID of the terminal session that has exited.
 *   `returncode` (integer, mandatory): The exit code of the terminal process.
 *   `project_id` (string, optional): The project ID associated with the terminal.
+
+### <a name="terminal_exec_result"></a>`terminal_exec_result`
+
+Reports the result of a non-interactive command executed via the `terminal_exec` action. Handled by [`terminal_exec`](./terminal_handlers.py).
+
+**Event Fields:**
+
+*   `command` (string, mandatory): The command line that was executed.
+*   `returncode` (integer, mandatory): The exit code produced by the command.
+*   `stdout` (string, mandatory): Collected standard output (UTF-8 decoded with replacement for invalid bytes).
+*   `stderr` (string, mandatory): Collected standard error (UTF-8 decoded with replacement for invalid bytes).
+*   `duration_s` (number, mandatory): Total time in seconds that the command ran (rounded to milliseconds precision).
+*   `cwd` (string, optional): Working directory, if the command ran inside a custom `cwd`.
+*   `project_id` (string, optional): The project ID provided with the original `terminal_exec` request.
 
 ### <a name="terminal_send_ack"></a>`terminal_send_ack`
 
