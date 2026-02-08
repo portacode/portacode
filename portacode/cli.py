@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from multiprocessing import Process
 from pathlib import Path
@@ -22,6 +23,7 @@ from .keypair import (
 )
 from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
+from .updater import build_pip_install_command
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
@@ -544,3 +546,48 @@ def service_status(verbose: bool) -> None:  # noqa: D401
             click.echo(mgr.status_verbose())
     except Exception as exc:
         click.echo(click.style(f"Failed: {exc}", fg="red")) 
+
+
+def _restart_service_manager() -> None:
+    """Stop then start the installed Portacode system service."""
+    from .service import get_manager
+
+    mgr = get_manager(system_mode=True)
+    try:
+        mgr.stop()
+    except Exception:
+        # Allow start to proceed even if stopping fails (e.g., service already stopped).
+        pass
+
+    mgr.start()
+
+
+def _restart_service_and_report(message: str = "Restarting Portacode service…") -> None:
+    """Helper used by CLI commands to restart and surface friendly output."""
+    click.echo(message)
+    try:
+        _restart_service_manager()
+    except Exception as exc:
+        raise click.ClickException(f"Restart failed: {exc}") from exc
+    click.echo(click.style("✔ Service restarted", fg="green"))
+
+
+@cli.command("restart")
+def restart_command() -> None:
+    """Restart the installed Portacode system service."""
+    _restart_service_and_report()
+
+
+@cli.command("setversion")
+@click.argument("version", required=True)
+def set_version_command(version: str) -> None:
+    """Install a specific Portacode version and restart the system service."""
+    click.echo(f"Installing Portacode {version}…")
+    result = subprocess.run(
+        build_pip_install_command(version=version), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        error_msg = (result.stderr or result.stdout or "").strip() or "unknown error"
+        raise click.ClickException(f"Failed to install Portacode {version}: {error_msg}")
+    click.echo(click.style(f"✔ Portacode {version} installed", fg="green"))
+    _restart_service_and_report()
