@@ -352,7 +352,7 @@ class TerminalExecHandler(AsyncHandler):
                 payload["stderr"] = stderr_chunk
             if project_id is not None:
                 payload["project_id"] = project_id
-            await self.send_response(payload, project_id=project_id)
+            await self._broadcast_terminal_exec_payload(payload)
 
         async def _streaming_flusher() -> None:
             try:
@@ -409,3 +409,18 @@ class TerminalExecHandler(AsyncHandler):
         if project_id is not None:
             response["project_id"] = project_id
         return response
+
+    async def _broadcast_terminal_exec_payload(self, payload: Dict[str, Any]) -> None:
+        """Send terminal_exec events to all currently connected client sessions."""
+        target_sessions = self._gather_client_session_channels()
+        enhanced_payload = dict(payload)
+        if target_sessions:
+            enhanced_payload["client_sessions"] = target_sessions
+        enhanced_payload["bypass_session_gate"] = True
+        await self.control_channel.send(enhanced_payload)
+
+    def _gather_client_session_channels(self) -> List[str]:
+        manager = self.context.get("client_session_manager")
+        if not manager:
+            return []
+        return list(manager.get_sessions().keys())

@@ -82,6 +82,24 @@ services:
         options:
           max-size: "50m"   # rotate when log hits 50 MB
           max-file: "3"     # keep 3 old files
+  automation-worker:
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "manage.py", "run_automation_workers", "--workers", "3"]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
   reacher:
     image: reacherhq/backend:latest
     env_file:
