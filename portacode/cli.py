@@ -572,10 +572,16 @@ def _restart_service_and_report(message: str = "Restarting Portacode service…"
     click.echo(click.style("✔ Service restarted", fg="green"))
 
 
+def _exit_for_systemd_restart(message: str = "Restarting Portacode service…") -> None:
+    """Ask the service manager to restart by exiting with a non-zero code."""
+    click.echo(message)
+    sys.exit(42)
+
+
 @cli.command("restart")
 def restart_command() -> None:
     """Restart the installed Portacode system service."""
-    _restart_service_and_report()
+    _exit_for_systemd_restart()
 
 
 @cli.command("setversion")
@@ -590,4 +596,4 @@ def set_version_command(version: str) -> None:
         error_msg = (result.stderr or result.stdout or "").strip() or "unknown error"
         raise click.ClickException(f"Failed to install Portacode {version}: {error_msg}")
     click.echo(click.style(f"✔ Portacode {version} installed", fg="green"))
-    _restart_service_and_report()
+    _exit_for_systemd_restart()
