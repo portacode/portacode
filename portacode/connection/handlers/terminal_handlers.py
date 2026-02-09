@@ -297,6 +297,8 @@ class TerminalExecHandler(AsyncHandler):
         cwd = message.get("cwd")
         env_spec = message.get("env")
         timeout_param = message.get("timeout")
+        automation_task_id = message.get("automation_task_id")
+        automation_step_index = message.get("automation_step_index")
         timeout_value: Optional[float] = None
         if timeout_param is not None:
             try:
@@ -352,6 +354,10 @@ class TerminalExecHandler(AsyncHandler):
                 payload["stderr"] = stderr_chunk
             if project_id is not None:
                 payload["project_id"] = project_id
+            if automation_task_id is not None:
+                payload["automation_task_id"] = automation_task_id
+            if automation_step_index is not None:
+                payload["automation_step_index"] = automation_step_index
             await self._broadcast_terminal_exec_payload(payload)
 
         async def _streaming_flusher() -> None:
@@ -404,6 +410,10 @@ class TerminalExecHandler(AsyncHandler):
             "stderr": stderr,
             "duration_s": round(duration, 3),
         }
+        if automation_task_id is not None:
+            response["automation_task_id"] = automation_task_id
+        if automation_step_index is not None:
+            response["automation_step_index"] = automation_step_index
         if cwd is not None:
             response["cwd"] = cwd
         if project_id is not None:

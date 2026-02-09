@@ -325,6 +325,8 @@ Runs a command directly on the device host and waits for it to finish, returning
 *   `cwd` (string, optional): Working directory to execute the command in.
 *   `timeout` (number, optional): Maximum time in seconds to wait for the command; the handler kills the process if it exceeds this duration.
 *   `env` (object, optional): Extra environment variables (string keys/values) that should override the process environment.
+*   `automation_task_id` (number, optional): The primary key of the AutomationTask that triggered this command. When present, the device echoes it on every `terminal_exec_output`/`terminal_exec_result` event so UIs can tie the stream back to that task.
+*   `automation_step_index` (number, optional): Zero-based index into the AutomationTask’s `instructions` list. Included in the emitted events alongside `automation_task_id` so clients know exactly which step generated the output.
 
 **Responses:**
 
@@ -1096,6 +1098,8 @@ Reports incremental output chunks for the command executed via `terminal_exec`. 
 *   `stdout` (string, optional): Newly captured stdout since the previous `terminal_exec_output`.
 *   `stderr` (string, optional): Newly captured stderr since the previous `terminal_exec_output`.
 *   `project_id` (string, optional): The project ID included with the original `terminal_exec` request, if any.
+*   `automation_task_id` (number, optional): The AutomationTask primary key provided by the command sender.
+*   `automation_step_index` (number, optional): Zero-based index into the AutomationTask instructions list that identifies which step produced this output.
 
 **Security Note**: The `device_id` field is automatically injected by the server based on the authenticated connection - the device cannot and should not specify its own ID. The `project_id` and `client_sessions` fields are added by the device's terminal manager for proper routing and filtering.
 
@@ -1138,6 +1142,8 @@ Reports the result of a non-interactive command executed via the `terminal_exec`
 *   `duration_s` (number, mandatory): Total time in seconds that the command ran (rounded to milliseconds precision).
 *   `cwd` (string, optional): Working directory, if the command ran inside a custom `cwd`.
 *   `project_id` (string, optional): The project ID provided with the original `terminal_exec` request.
+*   `automation_task_id` (number, optional): The primary key of the AutomationTask that submitted this command (echoed from the command payload).
+*   `automation_step_index` (number, optional): The zero-based index into the AutomationTask’s instructions list, matching the originating step that emitted this result.
 
 ### <a name="terminal_send_ack"></a>`terminal_send_ack`
 
