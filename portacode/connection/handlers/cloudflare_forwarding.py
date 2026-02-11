@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import re
 import threading
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -18,6 +20,9 @@ from .proxmox_infra import (
     _DeviceLookupError,
     _ensure_infra_configured,
     _get_node_from_config,
+    _run_pct_exec,
+    _run_pct_exec_check,
+    _run_pct_push,
     _resolve_vmid_for_device,
     _resolve_vmid_for_device_in_proxmox,
 )
@@ -33,6 +38,22 @@ DEVICE_DEST_PATTERN = re.compile(
 )
 CONTAINER_SUBDOMAIN_RE = re.compile(r"^(?:(?P<index>\d+)_)?(?P<device_id>\d+)$")
 _FORWARDING_UPDATE_LOCK = threading.RLock()
+EXPOSED_SERVICES_JSON_PATH = "/etc/portacode/exposed_services.json"
+EXPOSED_SERVICES_ENV_PATH = "/etc/portacode/exposed_services.env"
+EXPOSED_SERVICES_PROFILE_PATH = "/etc/profile.d/portacode_exposed_services.sh"
+SYSTEM_ENV_PATH = "/etc/environment"
+SYSTEM_ENV_D_PATH = "/etc/environment.d/90-portacode-exposed-services.conf"
+DEFAULT_ENV_PATH = "/etc/default/portacode_exposed_services"
+SYSTEMD_MANAGER_DROPIN_PATH = "/etc/systemd/system.conf.d/90-portacode-exposed-services.conf"
+OPENRC_ENV_PATH = "/etc/conf.d/portacode_exposed_services"
+GLOBAL_SHELL_HOOK_PATHS = (
+    "/etc/profile",
+    "/etc/bash.bashrc",
+    "/etc/bash/bashrc",
+    "/etc/zsh/zshenv",
+)
+MANAGED_BLOCK_BEGIN = "# >>> PORTACODE_EXPOSED_SERVICES >>>"
+MANAGED_BLOCK_END = "# <<< PORTACODE_EXPOSED_SERVICES <<<"
 
 def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
@@ -361,6 +382,242 @@ def _normalize_container_rule_specs(
     return normalized
 
 
+def _push_root_file_to_container(vmid: int, path: str, data: bytes, mode: int = 0o644) -> None:
+    tmp_path: Optional[str] = None
+    try:
+        parent = str(Path(path).parent)
+        if parent not in {"", ".", "/"}:
+            _run_pct_exec_check(vmid, ["mkdir", "-p", parent])
+            _run_pct_exec_check(vmid, ["chown", "root:root", parent])
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+        res = _run_pct_push(vmid, tmp_path, path)
+        if res.returncode != 0:
+            raise RuntimeError(res.stderr or res.stdout or f"pct push returned {res.returncode}")
+        _run_pct_exec_check(vmid, ["chown", "root:root", path])
+        _run_pct_exec_check(vmid, ["chmod", format(mode, "o"), path])
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _shell_quote_single(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _build_exposed_services_env(exposed_ports: List[Dict[str, Any]]) -> str:
+    hosts = [str(item.get("hostname") or "").strip() for item in exposed_ports if item.get("hostname")]
+    urls = [str(item.get("url") or "").strip() for item in exposed_ports if item.get("url")]
+    ports = [str(item.get("port")) for item in exposed_ports if item.get("port") is not None]
+    primary_url = urls[0] if urls else ""
+    primary_host = hosts[0] if hosts else ""
+    payload_json = json.dumps(exposed_ports, separators=(",", ":"))
+
+    lines = [
+        "# Managed by portacode: do not edit manually.",
+        f"PORTACODE_EXPOSED_SERVICES_JSON={_shell_quote_single(payload_json)}",
+        f"PORTACODE_EXPOSED_PORTS={_shell_quote_single(','.join(ports))}",
+        f"PORTACODE_PUBLIC_HOSTS={_shell_quote_single(','.join(hosts))}",
+        f"PORTACODE_PUBLIC_URLS={_shell_quote_single(','.join(urls))}",
+        f"PORTACODE_PRIMARY_PUBLIC_URL={_shell_quote_single(primary_url)}",
+        f"PORTACODE_PRIMARY_PUBLIC_HOST={_shell_quote_single(primary_host)}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _build_exposed_services_env_map(exposed_ports: List[Dict[str, Any]]) -> Dict[str, str]:
+    hosts = [str(item.get("hostname") or "").strip() for item in exposed_ports if item.get("hostname")]
+    urls = [str(item.get("url") or "").strip() for item in exposed_ports if item.get("url")]
+    ports = [str(item.get("port")) for item in exposed_ports if item.get("port") is not None]
+    primary_url = urls[0] if urls else ""
+    primary_host = hosts[0] if hosts else ""
+    payload_json = json.dumps(exposed_ports, separators=(",", ":"))
+    return {
+        "PORTACODE_EXPOSED_SERVICES_JSON": payload_json,
+        "PORTACODE_EXPOSED_PORTS": ",".join(ports),
+        "PORTACODE_PUBLIC_HOSTS": ",".join(hosts),
+        "PORTACODE_PUBLIC_URLS": ",".join(urls),
+        "PORTACODE_PRIMARY_PUBLIC_URL": primary_url,
+        "PORTACODE_PRIMARY_PUBLIC_HOST": primary_host,
+    }
+
+
+def _format_etc_environment_value(value: str) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _merge_system_environment(existing_text: str, env_map: Dict[str, str]) -> str:
+    kept_lines: List[str] = []
+    managed_keys = set(env_map.keys())
+    for raw_line in (existing_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            kept_lines.append(raw_line)
+            continue
+        if stripped.startswith("#"):
+            kept_lines.append(raw_line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in managed_keys:
+            continue
+        kept_lines.append(raw_line)
+
+    for key in sorted(managed_keys):
+        kept_lines.append(f"{key}={_format_etc_environment_value(env_map[key])}")
+
+    merged = "\n".join(kept_lines).rstrip() + "\n"
+    return merged
+
+
+def _build_exposed_services_profile_script() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# Managed by portacode: loads exposure env vars for new shell sessions.\n"
+        f'if [ -f "{EXPOSED_SERVICES_ENV_PATH}" ]; then\n'
+        "  set -a\n"
+        f'  . "{EXPOSED_SERVICES_ENV_PATH}"\n'
+        "  set +a\n"
+        "fi\n"
+    )
+
+
+def _build_shell_hook_block() -> str:
+    return (
+        f"{MANAGED_BLOCK_BEGIN}\n"
+        "# Managed by portacode: loads exposure env vars for shell sessions.\n"
+        f'if [ -f "{EXPOSED_SERVICES_ENV_PATH}" ]; then\n'
+        "  set -a\n"
+        f'  . "{EXPOSED_SERVICES_ENV_PATH}"\n'
+        "  set +a\n"
+        "fi\n"
+        f"{MANAGED_BLOCK_END}\n"
+    )
+
+
+def _strip_managed_block(text: str) -> str:
+    source = text or ""
+    pattern = re.compile(
+        rf"(?ms)^\s*{re.escape(MANAGED_BLOCK_BEGIN)}\n.*?^\s*{re.escape(MANAGED_BLOCK_END)}\n?"
+    )
+    cleaned = re.sub(pattern, "", source)
+    return cleaned.rstrip() + ("\n" if cleaned.strip() else "")
+
+
+def _upsert_managed_shell_hook(vmid: int, path: str, mode: int = 0o644) -> None:
+    current = _run_pct_exec(vmid, ["cat", path])
+    existing_text = current.stdout if current.returncode == 0 else ""
+    merged = _strip_managed_block(existing_text) + _build_shell_hook_block()
+    _push_root_file_to_container(vmid, path, merged.encode("utf-8"), mode=mode)
+
+
+def _build_environmentd_content(env_map: Dict[str, str]) -> str:
+    lines = ["# Managed by portacode: exposed services environment."]
+    for key in sorted(env_map.keys()):
+        lines.append(f"{key}={_format_etc_environment_value(env_map[key])}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_default_env_content(env_map: Dict[str, str]) -> str:
+    lines = ["# Managed by portacode: exposed services environment."]
+    for key in sorted(env_map.keys()):
+        lines.append(f"{key}={_shell_quote_single(env_map[key])}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_systemd_default_environment(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _build_systemd_manager_dropin(env_map: Dict[str, str]) -> str:
+    lines = [
+        "# Managed by portacode: exposed services environment.",
+        "[Manager]",
+    ]
+    for key in sorted(env_map.keys()):
+        assignment = f"{key}={_format_systemd_default_environment(env_map[key])}"
+        lines.append(f'DefaultEnvironment="{assignment}"')
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_openrc_env_content(env_map: Dict[str, str]) -> str:
+    lines = [
+        "# Managed by portacode: exposed services environment.",
+        "# Sourced by OpenRC scripts that include /etc/conf.d/* shell assignments.",
+    ]
+    for key in sorted(env_map.keys()):
+        lines.append(f"{key}={_shell_quote_single(env_map[key])}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _best_effort_refresh_service_env(vmid: int) -> None:
+    # Refresh managers if they exist so newly activated units/services can pick up updates.
+    _run_pct_exec(
+        vmid,
+        [
+            "sh",
+            "-lc",
+            "if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reexec >/dev/null 2>&1 || true; fi",
+        ],
+    )
+    _run_pct_exec(
+        vmid,
+        [
+            "sh",
+            "-lc",
+            "if command -v env-update >/dev/null 2>&1; then env-update >/dev/null 2>&1 || true; fi",
+        ],
+    )
+
+
+def _sync_exposed_services_into_container(
+    container_device_id: str,
+    exposed_ports: List[Dict[str, Any]],
+    proxmox: Any,
+    node: str,
+) -> None:
+    vmid = _resolve_device_vmid(container_device_id, proxmox, node)
+    services_payload = {
+        "device_id": container_device_id,
+        "exposed_services": exposed_ports,
+    }
+    json_data = (json.dumps(services_payload, indent=2) + "\n").encode("utf-8")
+    env_map = _build_exposed_services_env_map(exposed_ports)
+    env_data = _build_exposed_services_env(exposed_ports).encode("utf-8")
+    profile_data = _build_exposed_services_profile_script().encode("utf-8")
+    envd_data = _build_environmentd_content(env_map).encode("utf-8")
+    default_env_data = _build_default_env_content(env_map).encode("utf-8")
+    systemd_dropin_data = _build_systemd_manager_dropin(env_map).encode("utf-8")
+    openrc_env_data = _build_openrc_env_content(env_map).encode("utf-8")
+
+    _push_root_file_to_container(vmid, EXPOSED_SERVICES_JSON_PATH, json_data, mode=0o644)
+    _push_root_file_to_container(vmid, EXPOSED_SERVICES_ENV_PATH, env_data, mode=0o644)
+    _push_root_file_to_container(vmid, EXPOSED_SERVICES_PROFILE_PATH, profile_data, mode=0o755)
+    for hook_path in GLOBAL_SHELL_HOOK_PATHS:
+        _upsert_managed_shell_hook(vmid, hook_path, mode=0o644)
+
+    current_env = _run_pct_exec(vmid, ["cat", SYSTEM_ENV_PATH])
+    existing_text = current_env.stdout if current_env.returncode == 0 else ""
+    merged_environment = _merge_system_environment(existing_text, env_map)
+    _push_root_file_to_container(vmid, SYSTEM_ENV_PATH, merged_environment.encode("utf-8"), mode=0o644)
+    _push_root_file_to_container(vmid, SYSTEM_ENV_D_PATH, envd_data, mode=0o644)
+    _push_root_file_to_container(vmid, DEFAULT_ENV_PATH, default_env_data, mode=0o644)
+    _push_root_file_to_container(vmid, SYSTEMD_MANAGER_DROPIN_PATH, systemd_dropin_data, mode=0o644)
+    _push_root_file_to_container(vmid, OPENRC_ENV_PATH, openrc_env_data, mode=0o644)
+    _best_effort_refresh_service_env(vmid)
+
+
 def _rule_targets_container(rule: Dict[str, Any], container_device_id: str, domain: str) -> bool:
     parsed = rule.get("parsed")
     if isinstance(parsed, dict) and parsed.get("type") == "device":
@@ -421,6 +678,27 @@ def set_container_forwarding_rules(
             )
 
         merged_rules = preserved_rules + new_rules
+
+        # Ensure the child container receives updated exposure metadata first.
+        infra_config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(infra_config)
+        node = _get_node_from_config(infra_config)
+        try:
+            _sync_exposed_services_into_container(
+                normalized_device_id,
+                exposed_ports,
+                proxmox,
+                node,
+            )
+        except Exception:
+            if exposed_ports:
+                raise
+            logger.warning(
+                "Failed to sync empty exposure metadata into container %s; continuing with forwarding cleanup",
+                normalized_device_id,
+                exc_info=True,
+            )
+
         persisted = _apply_and_persist_forwarding_rules(merged_rules, tunnel_state=tunnel_state)
 
     return {

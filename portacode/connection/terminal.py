@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict
 from typing import Any, Dict, Optional, List
 
@@ -72,6 +73,16 @@ from .handlers.project_aware_file_handlers import (
 from .handlers.session import SessionManager
 
 logger = logging.getLogger(__name__)
+EXPOSED_SERVICES_MONITOR_PATH = "/etc/portacode/exposed_services.json"
+EXPOSED_SERVICES_MONITOR_INTERVAL_S = 2.0
+PORTACODE_EXPOSED_ENV_KEYS = (
+    "PORTACODE_EXPOSED_SERVICES_JSON",
+    "PORTACODE_EXPOSED_PORTS",
+    "PORTACODE_PUBLIC_HOSTS",
+    "PORTACODE_PUBLIC_URLS",
+    "PORTACODE_PRIMARY_PUBLIC_URL",
+    "PORTACODE_PRIMARY_PUBLIC_HOST",
+)
 
 class ClientSessionManager:
     """Manages connected client sessions for the device."""
@@ -374,6 +385,7 @@ class TerminalManager:
     def __init__(self, mux: Multiplexer, debug: bool = False):
         self.mux = mux
         self.debug = debug
+        self._last_exposed_services_signature = "__unset__"
         self._session_manager = None  # Initialize as None first
         self._client_session_manager = ClientSessionManager()  # Initialize client session manager
         self._client_session_manager.set_terminal_manager(self)  # Set reference for cleanup
@@ -446,6 +458,14 @@ class TerminalManager:
             except Exception:
                 pass
         self._system_info_task = asyncio.create_task(self._periodic_system_info())
+
+        # Start exposed-services file monitor for realtime updates.
+        if getattr(self, "_exposed_services_task", None):
+            try:
+                self._exposed_services_task.cancel()
+            except Exception:
+                pass
+        self._exposed_services_task = asyncio.create_task(self._watch_exposed_services())
         
         # For initial connections, request client sessions after control loop starts
         if is_initial:
@@ -573,6 +593,90 @@ class TerminalManager:
             except Exception as exc:
                 logger.exception("Error in periodic system info: %s", exc)
                 continue
+
+    def _read_exposed_services_snapshot(self) -> Dict[str, Any]:
+        path = EXPOSED_SERVICES_MONITOR_PATH
+        if not os.path.exists(path):
+            return {"signature": "__missing__", "services": []}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = handle.read()
+            payload = json.loads(raw)
+        except Exception:
+            return {"signature": "__invalid__", "services": []}
+
+        services = payload.get("exposed_services")
+        if not isinstance(services, list):
+            services = []
+        normalized = []
+        for item in services:
+            if not isinstance(item, dict):
+                continue
+            port = item.get("port")
+            hostname = item.get("hostname")
+            url = item.get("url")
+            try:
+                port_value = int(port)
+            except (TypeError, ValueError):
+                continue
+            if not hostname:
+                continue
+            normalized.append(
+                {
+                    "port": port_value,
+                    "hostname": str(hostname),
+                    "url": str(url) if url else f"https://{hostname}",
+                }
+            )
+        return {"signature": raw, "services": normalized}
+
+    def _build_exposed_services_env_map(self, services: List[Dict[str, Any]]) -> Dict[str, str]:
+        hosts = [str(item.get("hostname") or "").strip() for item in services if item.get("hostname")]
+        urls = [str(item.get("url") or "").strip() for item in services if item.get("url")]
+        ports = [str(item.get("port")) for item in services if item.get("port") is not None]
+        primary_url = urls[0] if urls else ""
+        primary_host = hosts[0] if hosts else ""
+        payload_json = json.dumps(services, separators=(",", ":"))
+        return {
+            "PORTACODE_EXPOSED_SERVICES_JSON": payload_json,
+            "PORTACODE_EXPOSED_PORTS": ",".join(ports),
+            "PORTACODE_PUBLIC_HOSTS": ",".join(hosts),
+            "PORTACODE_PUBLIC_URLS": ",".join(urls),
+            "PORTACODE_PRIMARY_PUBLIC_URL": primary_url,
+            "PORTACODE_PRIMARY_PUBLIC_HOST": primary_host,
+        }
+
+    def _apply_exposed_services_env_to_process(self, services: List[Dict[str, Any]]) -> None:
+        env_map = self._build_exposed_services_env_map(services)
+        for key in PORTACODE_EXPOSED_ENV_KEYS:
+            os.environ[key] = env_map.get(key, "")
+
+    async def _watch_exposed_services(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(EXPOSED_SERVICES_MONITOR_INTERVAL_S)
+                snapshot = self._read_exposed_services_snapshot()
+                signature = snapshot.get("signature")
+                if signature == self._last_exposed_services_signature:
+                    continue
+                self._last_exposed_services_signature = signature
+                services = snapshot.get("services") or []
+
+                # Keep the running agent env in sync so newly spawned PTY sessions
+                # inherit updated PORTACODE_* variables immediately.
+                self._apply_exposed_services_env_to_process(services)
+
+                if not self._client_session_manager.has_interested_clients():
+                    continue
+
+                payload = {
+                    "event": "exposed_services_updated",
+                    "exposed_services": services,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self._send_session_aware(payload)
+            except Exception as exc:
+                logger.exception("Error in exposed-services watcher: %s", exc)
 
     async def _send_initial_data_to_clients(self, newly_added_sessions: List[str] = None):
         """Send initial system info and terminal list to connected clients.
