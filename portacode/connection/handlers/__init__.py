@@ -52,7 +52,10 @@ from .proxmox_infra import (
     RemoveProxmoxContainerHandler,
 )
 from .cloudflare_tunnel import CloudflareTunnelSetupHandler
-from .cloudflare_forwarding import CloudflareForwardingHandler
+from .cloudflare_forwarding import (
+    CloudflareForwardingHandler,
+    ConfigureProxmoxContainerExposePortsHandler,
+)
 
 __all__ = [
     "BaseHandler",
@@ -100,4 +103,5 @@ __all__ = [
     "RevertProxmoxInfraHandler",
     "CloudflareTunnelSetupHandler",
     "CloudflareForwardingHandler",
-] 
+    "ConfigureProxmoxContainerExposePortsHandler",
+]

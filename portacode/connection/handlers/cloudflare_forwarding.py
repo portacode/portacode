@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -30,6 +31,8 @@ DEVICE_DEST_PATTERN = re.compile(
     r"^(https?)://\[(?P<device_id>\d+)\](?::(?P<port>\d+))?(?P<path>/.*)?$",
     re.IGNORECASE,
 )
+CONTAINER_SUBDOMAIN_RE = re.compile(r"^(?:(?P<index>\d+)_)?(?P<device_id>\d+)$")
+_FORWARDING_UPDATE_LOCK = threading.RLock()
 
 def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
@@ -273,6 +276,162 @@ def _reload_cloudflared_service() -> None:
         _call_subprocess(["/bin/systemctl", "restart", "cloudflared"], check=True)
 
 
+def _load_tunnel_state() -> Dict[str, Any]:
+    tunnel_state = load_state()
+    if not tunnel_state.get("configured"):
+        raise RuntimeError("Cloudflare tunnel is not configured yet.")
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    tunnel_name = tunnel_state.get("tunnel_name")
+    if not domain or not tunnel_name:
+        raise RuntimeError("Cloudflare domain or tunnel name missing from state.")
+    return tunnel_state
+
+
+def _sanitize_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return [
+        {"hostname": rule["hostname"], "destination": rule["destination"]}
+        for rule in rules
+    ]
+
+
+def _apply_and_persist_forwarding_rules(
+    rules: List[Dict[str, Any]],
+    *,
+    tunnel_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    tunnel_name = tunnel_state.get("tunnel_name")
+    if not domain or not tunnel_name:
+        raise RuntimeError("Cloudflare domain or tunnel name missing from state.")
+
+    requires_proxmox = any(rule["parsed"]["type"] == "device" for rule in rules)
+    proxmox = node = None
+    if requires_proxmox:
+        infra_config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(infra_config)
+        node = _get_node_from_config(infra_config)
+
+    entries = _build_ingress_entries(rules, proxmox, node)
+    _write_cloudflared_config(tunnel_state, entries)
+    hostnames = [entry["hostname"] for entry in entries if entry.get("hostname")]
+    if hostnames:
+        _route_dns(hostnames, tunnel_name)
+    _reload_cloudflared_service()
+    state = persist_forwarding_state(rules)
+    return {
+        "rules": _sanitize_rules(rules),
+        "updated_at": state.get("updated_at"),
+    }
+
+
+def _normalize_subdomain_label(subdomain: Any, device_id: str, index: int) -> str:
+    candidate = str(subdomain or "").strip().lower().rstrip(".")
+    if not candidate:
+        candidate = device_id if index == 0 else f"{index}_{device_id}"
+    if "." in candidate:
+        raise ValueError("subdomain must be a single hostname label")
+    if not CONTAINER_SUBDOMAIN_RE.match(candidate):
+        raise ValueError("subdomain must follow '<device_id>' or '<index>_<device_id>' format")
+    return candidate
+
+
+def _normalize_container_rule_specs(
+    container_device_id: Any,
+    container_rules: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    device_id = str(container_device_id or "").strip()
+    if not device_id or not device_id.isdigit():
+        raise ValueError("container device_id must be a numeric value")
+    if not isinstance(container_rules, list):
+        raise ValueError("rules must be a list")
+
+    normalized: List[Dict[str, Any]] = []
+    for index, rule in enumerate(container_rules):
+        if not isinstance(rule, dict):
+            raise ValueError("each container rule must be an object")
+        label = _normalize_subdomain_label(rule.get("subdomain"), device_id, index)
+        raw_port = rule.get("port")
+        try:
+            port = int(str(raw_port).strip())
+        except (TypeError, ValueError):
+            raise ValueError("each container rule requires a valid integer port") from None
+        if port < 1 or port > 65535:
+            raise ValueError("container rule ports must be between 1 and 65535")
+        normalized.append({"subdomain": label, "port": port})
+    return normalized
+
+
+def _rule_targets_container(rule: Dict[str, Any], container_device_id: str, domain: str) -> bool:
+    parsed = rule.get("parsed")
+    if isinstance(parsed, dict) and parsed.get("type") == "device":
+        if str(parsed.get("device_id") or "").strip() == container_device_id:
+            return True
+
+    hostname = str(rule.get("hostname") or "").strip().lower().rstrip(".")
+    if not hostname:
+        return False
+    suffix = f".{domain}"
+    if not hostname.endswith(suffix):
+        return False
+    label = hostname[: -len(suffix)]
+    match = CONTAINER_SUBDOMAIN_RE.match(label)
+    if not match:
+        return False
+    return str(match.group("device_id")) == container_device_id
+
+
+def set_container_forwarding_rules(
+    container_device_id: Any,
+    container_rules: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not _is_root():
+        raise RuntimeError("Root privileges are required to manage cloudflared config.")
+
+    tunnel_state = _load_tunnel_state()
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    normalized_specs = _normalize_container_rule_specs(container_device_id, container_rules)
+    normalized_device_id = str(container_device_id).strip()
+
+    with _FORWARDING_UPDATE_LOCK:
+        stored = load_forwarding_state().get("rules", [])
+        existing_rules = _normalize_rules(stored, domain, from_storage=True)
+        preserved_rules = [
+            rule
+            for rule in existing_rules
+            if not _rule_targets_container(rule, normalized_device_id, domain)
+        ]
+        new_rules: List[Dict[str, Any]] = []
+        exposed_ports: List[Dict[str, Any]] = []
+        for spec in normalized_specs:
+            hostname = f"{spec['subdomain']}.{domain}"
+            destination = f"http://[{normalized_device_id}]:{spec['port']}"
+            new_rules.append(
+                {
+                    "hostname": hostname,
+                    "destination": destination,
+                    "parsed": _parse_destination(destination),
+                }
+            )
+            exposed_ports.append(
+                {
+                    "port": spec["port"],
+                    "hostname": hostname,
+                    "url": f"https://{hostname}",
+                }
+            )
+
+        merged_rules = preserved_rules + new_rules
+        persisted = _apply_and_persist_forwarding_rules(merged_rules, tunnel_state=tunnel_state)
+
+    return {
+        "device_id": normalized_device_id,
+        "domain": domain,
+        "rules": persisted["rules"],
+        "updated_at": persisted["updated_at"],
+        "exposed_ports": exposed_ports,
+    }
+
+
 class CloudflareForwardingHandler(SyncHandler):
     @property
     def command_name(self) -> str:
@@ -282,13 +441,8 @@ class CloudflareForwardingHandler(SyncHandler):
         if not _is_root():
             raise RuntimeError("Root privileges are required to manage cloudflared config.")
 
-        tunnel_state = load_state()
-        if not tunnel_state.get("configured"):
-            raise RuntimeError("Cloudflare tunnel is not configured yet.")
-        domain = tunnel_state.get("domain")
-        tunnel_name = tunnel_state.get("tunnel_name")
-        if not domain or not tunnel_name:
-            raise RuntimeError("Cloudflare domain or tunnel name missing from state.")
+        tunnel_state = _load_tunnel_state()
+        domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
 
         device_id = str(message.get("device_id") or "").strip()
         if not device_id:
@@ -300,32 +454,67 @@ class CloudflareForwardingHandler(SyncHandler):
             rules = _normalize_rules(stored, domain, from_storage=True)
         else:
             rules = _normalize_rules(user_rules, domain)
-        state = persist_forwarding_state(rules)
 
-        requires_proxmox = any(rule["parsed"]["type"] == "device" for rule in rules)
-        proxmox = node = None
-        infra_config = None
-        if requires_proxmox:
-            infra_config = _ensure_infra_configured()
-            proxmox = _connect_proxmox(infra_config)
-            node = _get_node_from_config(infra_config)
-        entries = _build_ingress_entries(rules, proxmox, node)
-        _write_cloudflared_config(tunnel_state, entries)
-        hostnames = [entry["hostname"] for entry in entries if entry.get("hostname")]
-        if hostnames:
-            _route_dns(hostnames, tunnel_name)
-        _reload_cloudflared_service()
-
-        sanitized_rules = [
-            {"hostname": rule["hostname"], "destination": rule["destination"]}
-            for rule in rules
-        ]
+        with _FORWARDING_UPDATE_LOCK:
+            persisted = _apply_and_persist_forwarding_rules(rules, tunnel_state=tunnel_state)
 
         return {
             "event": "cloudflare_forwarding_configured",
             "success": True,
             "message": f"Cloudflare ingress configured for {len(rules)} rule(s).",
-            "rules": sanitized_rules,
-            "updated_at": state.get("updated_at"),
+            "rules": persisted["rules"],
+            "updated_at": persisted["updated_at"],
             "device_id": device_id,
+        }
+
+
+class ConfigureProxmoxContainerExposePortsHandler(SyncHandler):
+    @property
+    def command_name(self) -> str:
+        return "configure_proxmox_container_expose_ports"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        child_device_id = str(message.get("child_device_id") or "").strip()
+        if not child_device_id or not child_device_id.isdigit():
+            raise ValueError("child_device_id is required")
+
+        raw_ports = message.get("expose_ports")
+        if raw_ports is None:
+            raw_ports = []
+        if not isinstance(raw_ports, list):
+            raise ValueError("expose_ports must be a list of integers")
+
+        seen: set[int] = set()
+        normalized_ports: List[int] = []
+        for raw in raw_ports:
+            try:
+                port = int(str(raw).strip())
+            except (TypeError, ValueError):
+                raise ValueError("expose_ports must contain valid integers") from None
+            if port < 1 or port > 65535:
+                raise ValueError("expose_ports entries must be between 1 and 65535")
+            if port in seen:
+                continue
+            seen.add(port)
+            normalized_ports.append(port)
+        if len(normalized_ports) > 3:
+            raise ValueError("A maximum of 3 ports can be exposed")
+
+        desired_rules = []
+        for index, port in enumerate(normalized_ports):
+            if index == 0:
+                subdomain = child_device_id
+            else:
+                subdomain = f"{index}_{child_device_id}"
+            desired_rules.append({"subdomain": subdomain, "port": port})
+
+        updated = set_container_forwarding_rules(child_device_id, desired_rules)
+        return {
+            "event": "proxmox_container_expose_ports_configured",
+            "success": True,
+            "message": f"Applied {len(updated['exposed_ports'])} expose-port rule(s) for device {child_device_id}.",
+            "child_device_id": child_device_id,
+            "rules": updated["rules"],
+            "updated_at": updated["updated_at"],
+            "exposed_ports": updated["exposed_ports"],
         }

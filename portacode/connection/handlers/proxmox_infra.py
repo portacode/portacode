@@ -2783,6 +2783,17 @@ class RemoveProxmoxContainerHandler(SyncHandler):
                     }
         _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
 
+        # Clear Cloudflare forwarding rules for this container before deletion so
+        # stale routes cannot remain after the managed record is removed.
+        from .cloudflare_forwarding import set_container_forwarding_rules
+
+        try:
+            set_container_forwarding_rules(child_device_id, [])
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "cloudflare tunnel is not configured yet" not in msg and "domain or tunnel name missing" not in msg:
+                raise
+
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
         delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
         _remove_container_record(vmid)
