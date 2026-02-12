@@ -76,6 +76,49 @@ def _build_child_env() -> Dict[str, str]:
     return env
 
 
+def _shell_argv_for_session(shell: str) -> List[str]:
+    """
+    Return argv to launch an interactive terminal session.
+
+    Use a login shell where possible so distros that configure prompts and PATH
+    in /etc/profile (notably Alpine / BusyBox ash) get a normal login env.
+    """
+    shell = shell or "/bin/sh"
+    base = os.path.basename(shell)
+    argv = [shell]
+
+    # Common shells: prefer login mode if supported.
+    if base in {"bash", "zsh", "ksh"}:
+        argv += ["--login"]
+    elif base in {"sh", "ash", "dash"}:
+        argv += ["-l"]
+    elif base == "fish":
+        argv += ["-l"]
+
+    return argv
+
+
+def _preexec_setup_controlling_tty(slave_fd: int) -> None:
+    """
+    Put the child into a new session and attach the PTY slave as the controlling tty.
+
+    Without TIOCSCTTY, shells like BusyBox ash print:
+      "/bin/sh: can't access tty; job control turned off"
+    because /dev/tty is unavailable.
+    """
+    if _IS_WINDOWS:
+        return
+    os.setsid()
+    try:
+        import fcntl
+        import termios
+
+        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+    except Exception:
+        # Best-effort: even if this fails, the session can still function.
+        pass
+
+
 _LINK_EVENT_DISPATCHER: Optional["LinkEventDispatcher"] = None
 
 class LinkEventDispatcher:
@@ -824,15 +867,21 @@ class SessionManager:
                 import pty
                 master_fd, slave_fd = pty.openpty()
                 _configure_pty_window_size(slave_fd, TERMINAL_ROWS, TERMINAL_COLUMNS)
+                shell_argv = _shell_argv_for_session(shell)
                 proc = await asyncio.create_subprocess_exec(
-                    shell,
+                    *shell_argv,
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
-                    preexec_fn=os.setsid,
+                    preexec_fn=lambda: _preexec_setup_controlling_tty(slave_fd),
                     cwd=cwd,
                     env=env,
                 )
+                # Parent doesn't need the slave end once the child is spawned.
+                try:
+                    os.close(slave_fd)
+                except OSError:
+                    pass
                 # Wrap master_fd into a StreamReader
                 loop = asyncio.get_running_loop()
                 reader = asyncio.StreamReader()
@@ -840,7 +889,7 @@ class SessionManager:
                 await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, "rb", buffering=0))
                 proc.stdout = reader
                 # Use writer for stdin - create a simple file-like wrapper
-                proc.stdin = os.fdopen(master_fd, "wb", buffering=0)
+                proc.stdin = os.fdopen(os.dup(master_fd), "wb", buffering=0)
             except Exception:
                 logger.warning("Failed to allocate PTY, falling back to pipes")
                 proc = await asyncio.create_subprocess_exec(

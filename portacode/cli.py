@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import json
 import socket
+from typing import Optional, Tuple
 
 import click
 import pyperclip
@@ -52,14 +53,14 @@ def cli() -> None:
     help="Project folder to register during pairing (repeat for multiple paths)",
 )
 def connect(
-    gateway: str | None,
+    gateway: Optional[str],
     detach: bool,
     debug: bool,
-    log_categories: str | None,
+    log_categories: Optional[str],
     non_interactive: bool,
-    pairing_code_opt: str | None,
-    device_name_opt: str | None,
-    project_paths_opt: tuple[str, ...],
+    pairing_code_opt: Optional[str],
+    device_name_opt: Optional[str],
+    project_paths_opt: Tuple[str, ...],
 ) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
@@ -356,7 +357,7 @@ def _terminate_process(pid: int):
 @cli.command()
 @click.argument("message", nargs=1)
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
-def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – Click callback
+def send_control(message: str, gateway: Optional[str]) -> None:  # noqa: D401 – Click callback
     """Send a raw JSON *control* message on channel 0 and print replies.
 
     Example::
@@ -412,7 +413,7 @@ def send_control(message: str, gateway: str | None) -> None:  # noqa: D401 – C
 
 @cli.command("revert_proxmox_infra")
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
-def revert_proxmox_infra(gateway: str | None) -> None:  # noqa: D401 – Click callback
+def revert_proxmox_infra(gateway: Optional[str]) -> None:  # noqa: D401 – Click callback
     """Revert the Proxmox infrastructure configuration stored on this device."""
 
     target_gateway = gateway or os.getenv(GATEWAY_ENV) or GATEWAY_URL
@@ -517,6 +518,15 @@ def service_start() -> None:  # noqa: D401
         click.echo(click.style(f"Failed: {exc}", fg="red"))
 
 
+@service.command("restart")
+def service_restart() -> None:  # noqa: D401
+    """Restart the service (Linux: system service only)."""
+    try:
+        _restart_service_and_report()
+    except Exception as exc:
+        click.echo(click.style(f"Failed: {exc}", fg="red"))
+
+
 @service.command("stop")
 def service_stop() -> None:  # noqa: D401
     """Stop the service if running (Linux: system service only)."""
@@ -550,16 +560,9 @@ def service_status(verbose: bool) -> None:  # noqa: D401
 
 def _restart_service_manager() -> None:
     """Stop then start the installed Portacode system service."""
-    from .service import get_manager
+    from .restart import restart_service
 
-    mgr = get_manager(system_mode=True)
-    try:
-        mgr.stop()
-    except Exception:
-        # Allow start to proceed even if stopping fails (e.g., service already stopped).
-        pass
-
-    mgr.start()
+    restart_service(system_mode=True)
 
 
 def _restart_service_and_report(message: str = "Restarting Portacode service…") -> None:
@@ -569,19 +572,65 @@ def _restart_service_and_report(message: str = "Restarting Portacode service…"
         _restart_service_manager()
     except Exception as exc:
         raise click.ClickException(f"Restart failed: {exc}") from exc
-    click.echo(click.style("✔ Service restarted", fg="green"))
+    try:
+        from .service import get_manager
+
+        st = get_manager(system_mode=True).status()
+    except Exception:
+        st = "unknown"
+    click.echo(click.style(f"✔ Service restarted (status: {st})", fg="green"))
 
 
 def _exit_for_systemd_restart(message: str = "Restarting Portacode service…") -> None:
     """Ask the service manager to restart by exiting with a non-zero code."""
+    from .restart import request_restart
+
     click.echo(message)
-    sys.exit(42)
+    # This intentionally exits with a non-zero code so a supervisor (e.g. systemd)
+    # can restart the process.
+    request_restart(method="exit", in_service=True)
 
 
 @cli.command("restart")
-def restart_command() -> None:
+@click.option(
+    "--method",
+    type=click.Choice(["auto", "systemctl", "exit"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help=(
+        "How to restart. "
+        "'exit' asks the supervisor (systemd) to restart by exiting 42; "
+        "'systemctl' runs a real service restart; "
+        "'auto' uses 'exit' when running under systemd and otherwise uses 'systemctl'."
+    ),
+)
+@click.option("--verbose", "-v", is_flag=True, help="Print detailed service status/logs on failure.")
+def restart_command(method: str, verbose: bool) -> None:
     """Restart the installed Portacode system service."""
-    _exit_for_systemd_restart()
+    method = method.lower()
+    try:
+        from .restart import request_restart, running_under_systemd
+        from .service import get_manager
+
+        in_service = running_under_systemd() and not (sys.stdin.isatty() or sys.stdout.isatty())
+        click.echo("Restarting Portacode service…")
+        request_restart(method=method, in_service=in_service)
+        st = get_manager(system_mode=True).status()
+        click.echo(click.style(f"✔ Service restarted (status: {st})", fg="green"))
+    except SystemExit:
+        raise
+    except Exception:
+        if verbose:
+            try:
+                from .service import get_manager
+
+                mgr = get_manager(system_mode=True)
+                click.echo("\n--- diagnostics ---")
+                if hasattr(mgr, "status_verbose"):
+                    click.echo(mgr.status_verbose())
+            except Exception:
+                pass
+        raise
 
 
 @cli.command("setversion")
@@ -596,4 +645,8 @@ def set_version_command(version: str) -> None:
         error_msg = (result.stderr or result.stdout or "").strip() or "unknown error"
         raise click.ClickException(f"Failed to install Portacode {version}: {error_msg}")
     click.echo(click.style(f"✔ Portacode {version} installed", fg="green"))
-    _exit_for_systemd_restart()
+    from .restart import request_restart, running_under_systemd
+
+    in_service = running_under_systemd() and not (sys.stdin.isatty() or sys.stdout.isatty())
+    click.echo("Restarting Portacode service…")
+    request_restart(method="auto", in_service=in_service)

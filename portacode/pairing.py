@@ -5,7 +5,7 @@ import json
 import os
 import socket
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import websockets
 
@@ -28,7 +28,7 @@ async def _pair_device(
     public_key_b64: str,
     pairing_code: str,
     device_name: str,
-    project_paths: list[str] | None = None,
+    project_paths: Optional[List[str]] = None,
     timeout: float = 300.0,
 ) -> PairingResult:
     async with websockets.connect(url) as ws:
@@ -81,7 +81,7 @@ def pair_device_with_code(
     keypair,
     pairing_code: str,
     device_name: Optional[str] = None,
-    project_paths: list[str] | None = None,
+    project_paths: Optional[List[str]] = None,
     *,
     timeout: float = 300.0,
 ) -> PairingResult:

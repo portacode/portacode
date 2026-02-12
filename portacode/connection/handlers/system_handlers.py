@@ -301,7 +301,7 @@ def _get_cgroup_cpu_percent() -> Optional[float]:
     return max(0.0, min(percent, 100.0))
 
 
-def _run_probe_command(cmd: list[str]) -> str | None:
+def _run_probe_command(cmd: List[str]) -> Optional[str]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3)
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
@@ -309,7 +309,7 @@ def _run_probe_command(cmd: list[str]) -> str | None:
     return result.stdout.strip()
 
 
-def _parse_pveversion(output: str) -> str | None:
+def _parse_pveversion(output: str) -> Optional[str]:
     first_token = output.split(None, 1)[0] if output else ""
     if not first_token:
         return None
@@ -318,14 +318,14 @@ def _parse_pveversion(output: str) -> str | None:
     return first_token
 
 
-def _parse_dpkg_version(output: str) -> str | None:
+def _parse_dpkg_version(output: str) -> Optional[str]:
     for line in output.splitlines():
         if line.lower().startswith("version:"):
             return line.split(":", 1)[1].strip()
     return None
 
 
-def _get_proxmox_version() -> str | None:
+def _get_proxmox_version() -> Optional[str]:
     release_file = Path("/etc/proxmox-release")
     if release_file.exists():
         try:

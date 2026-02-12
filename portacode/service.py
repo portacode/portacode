@@ -24,7 +24,7 @@ import subprocess
 import sys
 import textwrap
 import os
-from typing import Protocol
+from typing import List, Protocol, Union
 import shutil
 import pwd
 import tempfile
@@ -49,6 +49,9 @@ class ServiceManager(Protocol):
 
     def stop(self) -> None:
         """Stop the service if running."""
+
+    def restart(self) -> None:
+        """Restart the service (stop then start)."""
 
     def status(self) -> str:
         """Return short human-readable status string (active/running/inactive)."""
@@ -86,11 +89,24 @@ class _SystemdUserService:
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         if self.system_mode:
             sudo_needed = os.geteuid() != 0
-            base = ["systemctl"] if not sudo_needed else ["sudo", "systemctl"]
+            if sudo_needed:
+                # If we don't have a TTY (e.g., running from automation), fail fast instead of hanging
+                # on a password prompt.
+                has_tty = sys.stdin.isatty() and sys.stdout.isatty()
+                base = ["sudo", "-n", "systemctl"] if not has_tty else ["sudo", "systemctl"]
+            else:
+                base = ["systemctl"]
             cmd = [*base, *args]
         else:
             cmd = ["systemctl", "--user", *args]
         return subprocess.run(cmd, text=True, capture_output=True)
+
+    def _run_checked(self, *args: str) -> subprocess.CompletedProcess[str]:
+        res = self._run(*args)
+        if res.returncode != 0:
+            msg = (res.stderr or res.stdout or "").strip() or f"systemctl {' '.join(args)} failed"
+            raise RuntimeError(msg)
+        return res
 
     def install(self) -> None:
         self.service_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,22 +152,24 @@ class _SystemdUserService:
             """).lstrip()
         self.service_path.write_text(unit)
         if self.system_mode:
-            sudo_needed = os.geteuid() != 0
-            prefix = ["sudo"] if sudo_needed else []
-            subprocess.run([*prefix, "systemctl", "daemon-reload"])
-            subprocess.run([*prefix, "systemctl", "enable", "--now", self.NAME])
+            # These should be loud when they fail; otherwise callers think the service exists when it doesn't.
+            self._run_checked("daemon-reload")
+            self._run_checked("enable", "--now", self.NAME)
         else:
-            self._run("daemon-reload")
-            self._run("enable", "--now", self.NAME)
+            self._run_checked("daemon-reload")
+            self._run_checked("enable", "--now", self.NAME)
 
     def uninstall(self) -> None:
         if self.system_mode:
-            sudo_needed = os.geteuid() != 0
-            prefix = ["sudo"] if sudo_needed else []
-            subprocess.run([*prefix, "systemctl", "disable", "--now", self.NAME])
+            self._run("disable", "--now", self.NAME)
             if self.service_path.exists():
-                subprocess.run([*prefix, "rm", str(self.service_path)])
-            subprocess.run([*prefix, "systemctl", "daemon-reload"])
+                # Avoid using rm via subprocess; remove file directly when possible.
+                try:
+                    self.service_path.unlink()
+                except PermissionError:
+                    prefix = ["sudo"] if os.geteuid() != 0 else []
+                    subprocess.run([*prefix, "rm", "-f", str(self.service_path)], text=True, capture_output=True)
+            self._run("daemon-reload")
         else:
             self._run("disable", "--now", self.NAME)
             if self.service_path.exists():
@@ -159,46 +177,35 @@ class _SystemdUserService:
             self._run("daemon-reload")
 
     def start(self) -> None:
-        if self.system_mode:
-            prefix = ["sudo"] if os.geteuid() != 0 else []
-            subprocess.run([*prefix, "systemctl", "start", self.NAME])
-        else:
-            self._run("start", self.NAME)
+        self._run_checked("start", self.NAME)
 
     def stop(self) -> None:
-        if self.system_mode:
-            prefix = ["sudo"] if os.geteuid() != 0 else []
-            subprocess.run([*prefix, "systemctl", "stop", self.NAME])
-        else:
-            self._run("stop", self.NAME)
+        self._run_checked("stop", self.NAME)
+
+    def restart(self) -> None:
+        self._run_checked("restart", self.NAME)
 
     def status(self) -> str:
-        if self.system_mode:
-            prefix = ["sudo"] if os.geteuid() != 0 else []
-            res = subprocess.run([*prefix, "systemctl", "is-active", self.NAME], text=True, capture_output=True)
-            state = res.stdout.strip() or res.stderr.strip()
-            return state
-        else:
-            res = self._run("is-active", self.NAME)
-            state = res.stdout.strip() or res.stderr.strip()
-            return state
+        res = self._run("is-active", self.NAME)
+        return (res.stdout.strip() or res.stderr.strip() or "unknown")
 
     def status_verbose(self) -> str:
+        res = self._run("status", "--no-pager", self.NAME)
+        status = res.stdout or res.stderr
+
         if self.system_mode:
-            prefix = ["sudo"] if os.geteuid() != 0 else []
-            res = subprocess.run([*prefix, "systemctl", "status", "--no-pager", self.NAME], text=True, capture_output=True)
-            status = res.stdout or res.stderr
-            journal = subprocess.run([
-                *(prefix or ["sudo"] if os.geteuid()!=0 else []), "journalctl", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
-            ], text=True, capture_output=True).stdout
-            return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
+            sudo_needed = os.geteuid() != 0
+            if sudo_needed:
+                has_tty = sys.stdin.isatty() and sys.stdout.isatty()
+                prefix = ["sudo", "-n"] if not has_tty else ["sudo"]
+            else:
+                prefix = []
+            journal_cmd = [*prefix, "journalctl", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"]
         else:
-            res = self._run("status", "--no-pager", self.NAME)
-            status = res.stdout or res.stderr
-            journal = subprocess.run([
-                "journalctl", "--user", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"
-            ], text=True, capture_output=True).stdout
-            return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
+            journal_cmd = ["journalctl", "--user", "-n", "20", "-u", f"{self.NAME}.service", "--no-pager"]
+
+        journal = subprocess.run(journal_cmd, text=True, capture_output=True).stdout
+        return (status or "") + "\n--- recent logs ---\n" + (journal or "<no logs>")
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +227,20 @@ class _OpenRCService:
         self.log_path = self.log_dir / "connect.log"
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        prefix = ["sudo"] if os.geteuid() != 0 else []
+        if os.geteuid() != 0:
+            has_tty = sys.stdin.isatty() and sys.stdout.isatty()
+            prefix = ["sudo", "-n"] if not has_tty else ["sudo"]
+        else:
+            prefix = []
         cmd = [*prefix, *args]
         return subprocess.run(cmd, text=True, capture_output=True)
+
+    def _run_checked(self, *args: str) -> subprocess.CompletedProcess[str]:
+        res = self._run(*args)
+        if res.returncode != 0:
+            msg = (res.stderr or res.stdout or "").strip() or f"{' '.join(args)} failed"
+            raise RuntimeError(msg)
+        return res
 
     def _write_init_script(self) -> None:
         self._write_wrapper_script()
@@ -232,9 +250,11 @@ class _OpenRCService:
 
             command="{self.wrapper_path}"
             command_user="{self.user}"
-            command_background="yes"
             pidfile="/run/portacode.pid"
             directory="{self.home}"
+            supervisor=supervise-daemon
+            respawn_delay=5
+            respawn_max=0
 
             depend() {{
                 need net
@@ -283,23 +303,26 @@ class _OpenRCService:
 
     def install(self) -> None:
         self._write_init_script()
-        self._run("rc-update", "add", self.NAME, "default")
-        self._run("rc-service", self.NAME, "start")
+        self._run_checked("rc-update", "add", self.NAME, "default")
+        self._run_checked("rc-service", self.NAME, "start")
 
     def uninstall(self) -> None:
-        self._run("rc-service", self.NAME, "stop")
-        self._run("rc-update", "del", self.NAME, "default")
+        self._run_checked("rc-service", self.NAME, "stop")
+        self._run_checked("rc-update", "del", self.NAME, "default")
         if self.init_path.exists():
             if os.geteuid() != 0:
-                self._run("rm", "-f", str(self.init_path))
+                self._run_checked("rm", "-f", str(self.init_path))
             else:
                 self.init_path.unlink()
 
     def start(self) -> None:
-        self._run("rc-service", self.NAME, "start")
+        self._run_checked("rc-service", self.NAME, "start")
 
     def stop(self) -> None:
-        self._run("rc-service", self.NAME, "stop")
+        self._run_checked("rc-service", self.NAME, "stop")
+
+    def restart(self) -> None:
+        self._run_checked("rc-service", self.NAME, "restart")
 
     def status(self) -> str:
         res = self._run("rc-service", self.NAME, "status")
@@ -377,6 +400,10 @@ class _LaunchdService:
     def stop(self) -> None:
         self._run("stop", self.LABEL)
 
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
     def status(self) -> str:
         res = self._run("list", self.LABEL)
         return "running" if res.returncode == 0 else "stopped"
@@ -404,7 +431,7 @@ class _WindowsTask:
 
     # ------------------------------------------------------------------
 
-    def _run(self, cmd: str | list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(self, cmd: Union[str, List[str]]) -> subprocess.CompletedProcess[str]:
         if isinstance(cmd, list):
             return subprocess.run(cmd, text=True, capture_output=True)
         return subprocess.run(cmd, shell=True, text=True, capture_output=True)
@@ -459,6 +486,10 @@ class _WindowsTask:
     def stop(self) -> None:
         self._run(["schtasks", "/End", "/TN", self.NAME])
         self._kill_all_connect()
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
 
     def status(self) -> str:
         res = self._run(["schtasks", "/Query", "/TN", self.NAME])

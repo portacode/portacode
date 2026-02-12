@@ -2,8 +2,7 @@
 
 import logging
 import subprocess
-import sys
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from portacode.updater import build_pip_install_command
 from .base import AsyncHandler
@@ -18,7 +17,7 @@ class UpdatePortacodeHandler(AsyncHandler):
     def command_name(self) -> str:
         return "update_portacode_cli"
 
-    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update Portacode package and restart process."""
         try:
             logger.info("Starting Portacode CLI update...")
@@ -44,7 +43,12 @@ class UpdatePortacodeHandler(AsyncHandler):
                 }
             )
 
-            sys.exit(42)
+            from portacode.restart import request_restart
+
+            # Consistent restart behavior across CLI and websocket updates.
+            # In-service context: prefer supervisor restart (or best-effort service restart).
+            request_restart(method="auto", in_service=True)
+            return None
 
         except subprocess.TimeoutExpired:
             return {

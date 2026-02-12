@@ -649,7 +649,7 @@ def _copy_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     return snapshot
 
 
-def _refresh_container_statuses(records: List[Dict[str, Any]], config: Dict[str, Any] | None) -> None:
+def _refresh_container_statuses(records: List[Dict[str, Any]], config: Optional[Dict[str, Any]]) -> None:
     if not records or not config:
         return
     try:
@@ -845,7 +845,8 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
             }
 
             if managed:
-                merged = base_entry | {
+                merged = {
+                    **base_entry,
                     "device_id": record.get("device_id") if record else None,
                     "template": record.get("template") if record else None,
                     "created_at": record.get("created_at") if record else None,
