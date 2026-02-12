@@ -1,26 +1,45 @@
-"""Ensure cloudflared is installed (Debian-based) and return its version."""
+"""Ensure cloudflared is installed and return its version.
+
+Design goals:
+- Work when cloudflared is already present in PATH (any distro/user).
+- When missing, install on at least: Alpine (apk), Debian/Ubuntu (apt),
+  CentOS/RHEL-like (yum/dnf), openSUSE (zypper).
+- Support non-root execution when the caller is a sudoer (prefer sudo -n for
+  non-interactive environments; fail fast with clear errors).
+
+Implementation notes:
+- Prefer installing a single cloudflared binary from GitHub "latest" releases.
+  This avoids distro-specific repo configuration and works across distros,
+  including minimal containers.
+- Use the system package manager only to ensure prerequisites (curl/wget and
+  ca-certificates) if needed.
+"""
 
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
+from typing import Optional
 
-KEYRING_DIR = "/usr/share/keyrings"
-KEYRING_PATH = f"{KEYRING_DIR}/cloudflare-main.gpg"
-REPO_LIST_PATH = "/etc/apt/sources.list.d/cloudflared.list"
-REPO_LINE = (
-    "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] "
-    "https://pkg.cloudflare.com/cloudflared any main\n"
-)
-GPG_URL = "https://pkg.cloudflare.com/cloudflare-main.gpg"
+_BIN_DIR = Path("/usr/local/bin")
+_BIN_PATH = _BIN_DIR / "cloudflared"
 
-DEB_URLS = {
-    "amd64": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb",
-    "i386": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-386.deb",
-    "armhf": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm.deb",
-    "arm64": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb",
+_GITHUB_LATEST_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download"
+_BINARY_BY_ARCH = {
+    # platform.machine() -> GitHub artifact suffix
+    "x86_64": "linux-amd64",
+    "amd64": "linux-amd64",
+    "aarch64": "linux-arm64",
+    "arm64": "linux-arm64",
+    "armv7l": "linux-arm",
+    "armv6l": "linux-arm",
+    "i386": "linux-386",
+    "i686": "linux-386",
 }
 
 
@@ -28,11 +47,7 @@ def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def run(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True)
-
-
-def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, capture_output=True)
 
 
@@ -40,92 +55,129 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def apt_update() -> None:
-    p = run_capture(["apt-get", "update"])
-    if p.returncode == 0:
+def _sudo_prefix(non_interactive: bool = True) -> Optional[list[str]]:
+    if is_root():
+        return []
+    if not have("sudo"):
+        return None
+    # Prefer -n (no prompt) to avoid hangs in services/automation.
+    if non_interactive:
+        return ["sudo", "-n"]
+    return ["sudo"]
+
+
+def _run_checked(cmd: list[str], *, allow_sudo: bool = True) -> None:
+    prefix: list[str] = []
+    if allow_sudo and not is_root():
+        sp = _sudo_prefix(non_interactive=True)
+        if sp is None:
+            raise RuntimeError("Root privileges required but sudo is not available.")
+        prefix = sp
+    proc = subprocess.run([*prefix, *cmd], text=True, capture_output=True)
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip() or f"Command failed: {' '.join(cmd)}"
+        raise RuntimeError(msg)
+
+
+def _cloudflared_version() -> str:
+    return subprocess.check_output(["cloudflared", "--version"], text=True).strip()
+
+
+def _detect_pkg_manager() -> Optional[str]:
+    # Order matters: prefer newer tooling when both exist.
+    if have("apk"):
+        return "apk"
+    if have("apt-get"):
+        return "apt"
+    if have("dnf"):
+        return "dnf"
+    if have("yum"):
+        return "yum"
+    if have("zypper"):
+        return "zypper"
+    return None
+
+
+def _install_prereqs(pkg_mgr: Optional[str]) -> None:
+    # Needed for downloading the binary securely.
+    if have("curl") or have("wget"):
         return
-    if p.returncode == 100:
-        msg = (p.stderr or p.stdout or "").strip()
-        print("Warning: `apt-get update` returned 100; continuing anyway.", file=sys.stderr)
-        if msg:
-            print(msg, file=sys.stderr)
+    if pkg_mgr is None:
+        raise RuntimeError("Neither curl nor wget is available and no supported package manager was detected.")
+
+    if pkg_mgr == "apk":
+        _run_checked(["apk", "add", "--no-cache", "ca-certificates", "curl"])
         return
-    raise subprocess.CalledProcessError(p.returncode, p.args, output=p.stdout, stderr=p.stderr)
+    if pkg_mgr == "apt":
+        _run_checked(["apt-get", "update"])
+        _run_checked(["apt-get", "install", "-y", "ca-certificates", "curl"])
+        return
+    if pkg_mgr == "dnf":
+        _run_checked(["dnf", "install", "-y", "ca-certificates", "curl"])
+        return
+    if pkg_mgr == "yum":
+        _run_checked(["yum", "install", "-y", "ca-certificates", "curl"])
+        return
+    if pkg_mgr == "zypper":
+        _run_checked(["zypper", "--non-interactive", "install", "-y", "ca-certificates", "curl"])
+        return
+    raise RuntimeError(f"Unsupported package manager: {pkg_mgr}")
 
 
-def apt_install(pkgs: list[str]) -> None:
-    run(["apt-get", "install", "-y"] + pkgs)
+def _download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if have("curl"):
+        _run_checked(["curl", "-fL", url, "-o", str(dest)], allow_sudo=False)
+        return
+    if have("wget"):
+        _run_checked(["wget", "-O", str(dest), url], allow_sudo=False)
+        return
+    raise RuntimeError("No downloader available (curl/wget).")
 
 
-def ensure_prereqs() -> None:
-    apt_update()
-    # curl is the simplest/most reliable for fetching the key and deb
-    apt_install(["ca-certificates", "curl"])
+def _arch_suffix() -> str:
+    machine = (platform.machine() or "").strip().lower()
+    suffix = _BINARY_BY_ARCH.get(machine)
+    if not suffix:
+        raise RuntimeError(f"Unsupported CPU architecture for cloudflared binary install: {machine!r}")
+    return suffix
 
 
-def refresh_cloudflare_key() -> None:
-    os.makedirs(KEYRING_DIR, mode=0o755, exist_ok=True)
-    # Overwrite key every run (key rollovers happen).
-    run(["curl", "-fsSL", GPG_URL, "-o", KEYRING_PATH])
-    os.chmod(KEYRING_PATH, 0o644)
+def _install_cloudflared_binary() -> None:
+    suffix = _arch_suffix()
+    url = f"{_GITHUB_LATEST_BASE}/cloudflared-{suffix}"
 
+    with tempfile.TemporaryDirectory(prefix="portacode-cloudflared-") as td:
+        tmp = Path(td) / "cloudflared"
+        _download(url, tmp)
+        tmp.chmod(0o755)
 
-def ensure_repo_line() -> None:
-    # Overwrite repo file to keep it clean.
-    with open(REPO_LIST_PATH, "w", encoding="utf-8") as f:
-        f.write(REPO_LINE)
-
-
-def dpkg_arch() -> str:
-    p = run_capture(["dpkg", "--print-architecture"])
-    if p.returncode != 0:
-        raise RuntimeError("dpkg --print-architecture failed")
-    return p.stdout.strip()
-
-
-def install_via_apt_repo() -> None:
-    refresh_cloudflare_key()
-    ensure_repo_line()
-    apt_update()
-    apt_install(["cloudflared"])
-
-
-def install_via_deb_fallback() -> None:
-    arch = dpkg_arch()
-    url = DEB_URLS.get(arch)
-    if not url:
-        raise RuntimeError(f"Unsupported architecture: {arch}")
-
-    tmp_deb = f"/tmp/cloudflared-{arch}.deb"
-    run(["curl", "-fL", url, "-o", tmp_deb])
-    # dpkg may leave deps unresolved; fix with apt-get -f
-    run(["dpkg", "-i", tmp_deb])
-    apt_update()
-    run(["apt-get", "-f", "install", "-y"])
-    try:
-        os.remove(tmp_deb)
-    except OSError:
-        pass
+        # install(1) preserves mode and is widely available; fallback to mv+chmod.
+        if have("install"):
+            _run_checked(["install", "-m", "0755", str(tmp), str(_BIN_PATH)])
+        else:
+            _run_checked(["mkdir", "-p", str(_BIN_DIR)])
+            _run_checked(["mv", str(tmp), str(_BIN_PATH)])
+            _run_checked(["chmod", "0755", str(_BIN_PATH)])
 
 
 def ensure_cloudflared_installed() -> str:
     if have("cloudflared"):
-        return subprocess.check_output(["cloudflared", "--version"], text=True).strip()
+        return _cloudflared_version()
 
-    if not is_root():
-        raise RuntimeError("Run as root (sudo) to install cloudflared.")
-    if not have("apt-get"):
-        raise RuntimeError("apt-get not found (Debian-based expected).")
+    pkg_mgr = _detect_pkg_manager()
+    _install_prereqs(pkg_mgr)
 
-    ensure_prereqs()
+    # Install the binary to a standard location. This works for Alpine + most
+    # mainstream distros without extra repo setup.
+    _install_cloudflared_binary()
 
-    try:
-        install_via_apt_repo()
-    except subprocess.CalledProcessError as exc:
-        print(f"Warning: apt-repo install failed ({exc}); trying .deb fallback.", file=sys.stderr)
-        install_via_deb_fallback()
-
-    return subprocess.check_output(["cloudflared", "--version"], text=True).strip()
+    if not have("cloudflared"):
+        # Should not happen if /usr/local/bin is in PATH, but keep error actionable.
+        raise RuntimeError(
+            f"cloudflared installed to {_BIN_PATH} but not found in PATH. Ensure /usr/local/bin is in PATH."
+        )
+    return _cloudflared_version()
 
 
 __all__ = ["ensure_cloudflared_installed"]

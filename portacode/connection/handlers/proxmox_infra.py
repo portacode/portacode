@@ -1204,6 +1204,25 @@ def _build_bootstrap_steps(
                 "retries": 0,
             },
             {
+                # Fix a common footgun in containers: root-owned ~/.local from a previous sudo run
+                # (or mis-created home dir). pip --user should never need sudo; it only needs a
+                # writable home directory for the target user.
+                "name": "ensure_user_home_owned",
+                "cmd": (
+                    f"u={shlex.quote(user)}; "
+                    "grp=$(id -gn \"$u\" 2>/dev/null || echo \"$u\"); "
+                    "home=$(getent passwd \"$u\" 2>/dev/null | cut -d: -f6); "
+                    "if [ -z \"$home\" ] && [ -f /etc/passwd ]; then "
+                    "  home=$(awk -F: -v u=\"$u\" '$1==u{print $6}' /etc/passwd 2>/dev/null); "
+                    "fi; "
+                    "if [ -z \"$home\" ]; then home=\"/home/$u\"; fi; "
+                    "mkdir -p \"$home\" \"$home/.local\" \"$home/.local/lib\" \"$home/.local/bin\" \"$home/.cache\" \"$home/.config\"; "
+                    "chown -R \"$u:$grp\" \"$home\" 2>/dev/null || chown -R \"$u\" \"$home\" || true; "
+                    "chmod 0750 \"$home\" 2>/dev/null || true"
+                ),
+                "retries": 0,
+            },
+            {
                 "name": "add_sudo",
                 "cmd": (
                     f"if command -v usermod >/dev/null 2>&1; then "
@@ -2455,9 +2474,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     cli_path = _resolve_portacode_cli_path(vmid, payload_local["username"])
                     cmd = _su_command(
                         payload_local["username"],
-                        f"sudo -S {shlex.quote(cli_path)} service install",
+                        # -H: don't let sudo run with HOME pointing at the user, which can create root-owned ~/.local.
+                        # -n: non-interactive (bootstrap config grants NOPASSWD).
+                        f"sudo -H -n {shlex.quote(cli_path)} service install",
                     )
-                    res = _run_pct(vmid, cmd, input_text=payload_local["password"] + "\n")
+                    res = _run_pct(vmid, cmd)
 
                     if res["returncode"] != 0:
                         _emit_progress_event(
@@ -2621,7 +2642,9 @@ class StartPortacodeServiceHandler(SyncHandler):
 
         cli_path = _resolve_portacode_cli_path(vmid, user)
         cmd = _su_command(user, f"sudo -S {shlex.quote(cli_path)} service install")
-        res = _run_pct(vmid, cmd, input_text=password + "\n")
+        # See above: avoid root writing into the user's home directory.
+        cmd = _su_command(user, f"sudo -H -n {shlex.quote(cli_path)} service install")
+        res = _run_pct(vmid, cmd)
 
         if res["returncode"] != 0:
             _emit_progress_event(

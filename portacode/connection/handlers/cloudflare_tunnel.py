@@ -6,25 +6,27 @@ import asyncio
 import logging
 import os
 import re
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .base import SyncHandler
 from portacode.tunneling.ensure_cloudflared import ensure_cloudflared_installed
+from portacode.tunneling.ensure_pyyaml import ensure_pyyaml_installed
 from portacode.tunneling.cloudflared_login import run_login
 from portacode.tunneling.get_domain import get_authenticated_domain
 from portacode.tunneling.service_install import (
     download_tunnel_credentials,
-    ensure_tunnel_and_service,
+    ensure_service_installed,
+    ensure_tunnel,
+    system_credentials_path_for_tunnel,
+    write_config,
+    SYSTEM_TOKEN_PATH,
 )
 from portacode.tunneling.state import (
     clear_state,
     credentials_path_for_tunnel,
     default_cert_path,
     default_cloudflared_dir,
-    default_config_path,
     load_state,
     update_state,
 )
@@ -48,24 +50,9 @@ def _emit_cloudflare_event(handler: SyncHandler, payload: Dict[str, Any]) -> Non
 
 
 def _ensure_pyyaml() -> None:
-    try:
-        import yaml  # noqa: F401
-    except ModuleNotFoundError as exc:
-        logger.info("PyYAML missing; installing via pip")
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "PyYAML"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as pip_exc:
-            msg = pip_exc.stderr or pip_exc.stdout or str(pip_exc)
-            raise RuntimeError(f"Failed to install PyYAML: {msg}") from pip_exc
-        try:
-            import yaml  # noqa: F401
-        except ModuleNotFoundError as post_exc:
-            raise RuntimeError("PyYAML installation did not resolve the import.") from post_exc
+    # Needed for parsing/modifying existing cloudflared config on some platforms.
+    # Install via OS package manager (sudo-aware) to avoid pip user-site permission issues.
+    ensure_pyyaml_installed()
 
 
 def _is_root() -> bool:
@@ -100,9 +87,17 @@ def _build_tunnel_name(device_id: str) -> str:
 
 
 def _ensure_tunnel_with_credentials(tunnel_name: str, config_path: Path) -> TunnelInfo:
-    tunnel_info = ensure_tunnel_and_service(tunnel_name, config_path=config_path)
-    credentials_path = Path(credentials_path_for_tunnel(tunnel_info.tunnel_id))
+    tunnel_info = ensure_tunnel(tunnel_name)
+    system_install = str(config_path).startswith("/etc/")
+    credentials_path = (
+        Path(system_credentials_path_for_tunnel(tunnel_info.tunnel_id))
+        if system_install
+        else Path(credentials_path_for_tunnel(tunnel_info.tunnel_id))
+    )
     if credentials_path.exists():
+        # Ensure config/service are still present.
+        write_config(Path(config_path), tunnel_id=tunnel_info.tunnel_id, credentials_path=credentials_path)
+        ensure_service_installed(config_path=Path(config_path))
         return tunnel_info
 
     download_tunnel_credentials(tunnel_info.tunnel_id, credentials_path)
@@ -110,6 +105,8 @@ def _ensure_tunnel_with_credentials(tunnel_name: str, config_path: Path) -> Tunn
         raise RuntimeError(
             f"Cloudflare credentials file {credentials_path} still missing after downloading token."
         )
+    write_config(Path(config_path), tunnel_id=tunnel_info.tunnel_id, credentials_path=credentials_path)
+    ensure_service_installed(config_path=Path(config_path))
     return tunnel_info
 
 
@@ -119,9 +116,6 @@ class CloudflareTunnelSetupHandler(SyncHandler):
         return "setup_cloudflare_tunnel"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        if not _is_root():
-            raise RuntimeError("Root privileges are required to configure cloudflared.")
-
         device_id = str(message.get("device_id") or "").strip()
         if not device_id:
             raise ValueError("device_id is required to configure a tunnel")
@@ -154,7 +148,10 @@ class CloudflareTunnelSetupHandler(SyncHandler):
 
         domain = get_authenticated_domain(str(cert_path))
         tunnel_name = _build_tunnel_name(device_id)
-        config_path = default_config_path()
+        # Prefer a system config path when we're provisioning a long-running service
+        # across both systemd and OpenRC distros. Privileged writes are handled by
+        # the service_install helpers.
+        config_path = Path("/etc/cloudflared/config.yml")
         tunnel_info = _ensure_tunnel_with_credentials(tunnel_name, config_path=config_path)
 
         state = update_state(
@@ -164,7 +161,10 @@ class CloudflareTunnelSetupHandler(SyncHandler):
                 "tunnel_name": tunnel_name,
                 "tunnel_id": tunnel_info.tunnel_id,
                 "tunnel_existed": tunnel_info.existed,
-                "credentials_file": str(credentials_path_for_tunnel(tunnel_info.tunnel_id)),
+                "credentials_file": str(
+                    system_credentials_path_for_tunnel(tunnel_info.tunnel_id)
+                ),
+                "token_file": str(SYSTEM_TOKEN_PATH),
                 "config_path": str(config_path),
                 "cert_path": str(cert_path),
                 "cloudflared_version": version,

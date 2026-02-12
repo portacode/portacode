@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 import tempfile
 from pathlib import Path
@@ -28,6 +29,8 @@ from .proxmox_infra import (
 )
 from portacode.tunneling.forwarding_state import load_forwarding_state, persist_forwarding_state
 from portacode.tunneling.state import default_config_path, load_state
+from portacode.tunneling.privileged import write_text
+from portacode.tunneling.service_install import restart_service
 
 logger = logging.getLogger(__name__)
 
@@ -247,19 +250,33 @@ def _format_config_value(value: Any) -> str:
 
 
 def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, Any]]) -> None:
-    config_path = Path(default_config_path())
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    credentials = state.get("credentials_file") or ""
-    if not credentials:
-        raise RuntimeError("Cloudflare credentials file unknown; re-run tunnel setup")
+    cfg = state.get("config_path")
+    config_path = Path(str(cfg)) if cfg else Path(default_config_path())
+    credentials = str(state.get("credentials_file") or "").strip()
+    token_file = str(state.get("token_file") or "").strip()
     tunnel_id = state.get("tunnel_id")
     if not tunnel_id:
         raise RuntimeError("Cloudflare tunnel ID missing; re-run tunnel setup")
-    lines = [
-        f"tunnel: {tunnel_id}",
-        f"credentials-file: {credentials}",
-        "ingress:",
-    ]
+    have_creds = False
+    if credentials:
+        try:
+            have_creds = Path(credentials).exists()
+        except OSError:
+            have_creds = False
+    have_token = False
+    if token_file:
+        try:
+            have_token = Path(token_file).exists()
+        except OSError:
+            have_token = False
+    # We can run the tunnel with either credentials JSON or a token (via wrapper).
+    if not have_creds and not have_token:
+        raise RuntimeError("Cloudflare credentials/token missing; re-run tunnel setup")
+
+    lines = [f"tunnel: {tunnel_id}"]
+    if have_creds:
+        lines.append(f"credentials-file: {credentials}")
+    lines.append("ingress:")
     for entry in entries:
         if "hostname" in entry:
             lines.append(f"  - hostname: {entry['hostname']}")
@@ -275,7 +292,7 @@ def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, Any
             lines.append(f"  - service: {entry['service']}")
     lines.append("  - service: http_status:404")
     lines.append("")  # trailing newline
-    config_path.write_text("\n".join(lines), encoding="utf-8")
+    write_text(config_path, "\n".join(lines), mode=0o644)
 
 
 def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
@@ -284,17 +301,24 @@ def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
         if hostname in seen:
             continue
         seen.add(hostname)
-        _call_subprocess(
-            ["cloudflared", "tunnel", "route", "dns", tunnel_name, hostname],
-            check=True,
-        )
+        try:
+            _call_subprocess(
+                ["cloudflared", "tunnel", "route", "dns", "--overwrite-dns", tunnel_name, hostname],
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (getattr(exc, "stderr", "") or "").strip()
+            stdout = (getattr(exc, "stdout", "") or "").strip()
+            details = stderr or stdout or f"exit={exc.returncode}"
+            # Common case: record already exists (A/AAAA/CNAME). Give the user the exact output.
+            raise RuntimeError(
+                f"cloudflared route dns failed for {hostname!r} (tunnel={tunnel_name!r}): {details}"
+            ) from exc
 
 
 def _reload_cloudflared_service() -> None:
-    reload_cmd = ["/bin/systemctl", "reload", "cloudflared"]
-    result = _call_subprocess(reload_cmd, check=False)
-    if result.returncode != 0:
-        _call_subprocess(["/bin/systemctl", "restart", "cloudflared"], check=True)
+    # Restart via init-system aware logic; sudo/root handled inside.
+    restart_service()
 
 
 def _load_tunnel_state() -> Dict[str, Any]:
@@ -641,9 +665,6 @@ def set_container_forwarding_rules(
     container_device_id: Any,
     container_rules: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if not _is_root():
-        raise RuntimeError("Root privileges are required to manage cloudflared config.")
-
     tunnel_state = _load_tunnel_state()
     domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
     normalized_specs = _normalize_container_rule_specs(container_device_id, container_rules)
@@ -716,9 +737,6 @@ class CloudflareForwardingHandler(SyncHandler):
         return "configure_cloudflare_forwarding"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        if not _is_root():
-            raise RuntimeError("Root privileges are required to manage cloudflared config.")
-
         tunnel_state = _load_tunnel_state()
         domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
 
