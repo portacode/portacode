@@ -1458,6 +1458,7 @@ def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) ->
         "hostname": hostname,
         "net0": f"name=eth0,bridge={bridge},ip=dhcp",
         "unprivileged": 1,
+        "features": "nesting=1",
         "swap_mb": 0,
         "username": user,
         "password": password,
@@ -2116,22 +2117,59 @@ def _instantiate_container(
     vmid = vmid or _allocate_vmid(proxmox)
     if not payload.get("hostname"):
         payload["hostname"] = f"ct{vmid}"
+
+    def _submit_create(feature_flags: Optional[str]) -> Any:
+        kwargs = {
+            "vmid": vmid,
+            "hostname": payload["hostname"],
+            "ostemplate": payload["template"],
+            "rootfs": rootfs,
+            "memory": int(payload["ram_mib"]),
+            "swap": int(payload.get("swap_mb", 0)),
+            "cores": max(int(payload.get("cores", 1)), 1),
+            "cpulimit": float(payload.get("cpulimit", payload.get("cpus", 1))),
+            "net0": payload["net0"],
+            "unprivileged": int(payload.get("unprivileged", 1)),
+            "description": payload.get("description", MANAGED_MARKER),
+            "password": payload.get("password") or None,
+            "ssh_public_keys": payload.get("ssh_public_key") or None,
+        }
+        feature_flags = (feature_flags or "").strip()
+        if feature_flags:
+            kwargs["features"] = feature_flags
+        return proxmox.nodes(node).lxc.create(**kwargs)
+
     try:
-        upid = proxmox.nodes(node).lxc.create(
-            vmid=vmid,
-            hostname=payload["hostname"],
-            ostemplate=payload["template"],
-            rootfs=rootfs,
-            memory=int(payload["ram_mib"]),
-            swap=int(payload.get("swap_mb", 0)),
-            cores=max(int(payload.get("cores", 1)), 1),
-            cpulimit=float(payload.get("cpulimit", payload.get("cpus", 1))),
-            net0=payload["net0"],
-            unprivileged=int(payload.get("unprivileged", 1)),
-            description=payload.get("description", MANAGED_MARKER),
-            password=payload.get("password") or None,
-            ssh_public_keys=payload.get("ssh_public_key") or None,
-        )
+        requested_features = payload.get("features")
+        try:
+            upid = _submit_create(requested_features)
+        except ResourceException as exc:
+            err_text = str(exc)
+            logger.error(
+                "Proxmox LXC create failed vmid=%s node=%s features=%r error=%s",
+                vmid,
+                node,
+                requested_features,
+                err_text,
+            )
+            restricted_feature_error = (
+                "changing feature flags (except nesting) is only allowed for root@pam"
+                in err_text.lower()
+            )
+            can_retry_with_nesting = (
+                isinstance(requested_features, str)
+                and "keyctl=1" in requested_features
+                and "nesting=1" in requested_features
+            )
+            if restricted_feature_error and can_retry_with_nesting:
+                logger.warning(
+                    "Retrying LXC create vmid=%s with reduced features='nesting=1' due token permissions",
+                    vmid,
+                )
+                upid = _submit_create("nesting=1")
+                payload["features"] = "nesting=1"
+            else:
+                raise
         status, elapsed = _wait_for_task(proxmox, node, upid)
         exitstatus = (status or {}).get("exitstatus")
         if exitstatus and exitstatus.upper() != "OK":
