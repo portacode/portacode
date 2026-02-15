@@ -304,7 +304,7 @@ def _get_cgroup_cpu_percent() -> Optional[float]:
 def _run_probe_command(cmd: List[str]) -> Optional[str]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=3)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+    except (subprocess.CalledProcessError, FileNotFoundError, PermissionError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip()
 
@@ -347,11 +347,12 @@ def _get_proxmox_version() -> Optional[str]:
 def _get_proxmox_info() -> Dict[str, Any]:
     """Detect if the current host is a Proxmox node."""
     info: Dict[str, Any] = {"is_proxmox_node": False, "version": None}
-    if Path("/etc/proxmox-release").exists() or Path("/etc/pve").exists():
+    has_proxmox_markers = Path("/etc/proxmox-release").exists() or Path("/etc/pve").exists()
+    if has_proxmox_markers:
         info["is_proxmox_node"] = True
-    version = _get_proxmox_version()
-    if version:
-        info["version"] = version
+        version = _get_proxmox_version()
+        if version:
+            info["version"] = version
     info["infra"] = get_infra_snapshot()
     return info
 
