@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 _cpu_percent = 0.0
 _cpu_thread = None
 _cpu_lock = threading.Lock()
+_peak_usage = {
+    "cpu_percent": 0.0,
+    "ram_percent": 0.0,
+    "disk_percent": 0.0,
+}
+_peak_usage_lock = threading.Lock()
 
 # Cgroup v2 tracking
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -67,6 +73,25 @@ def _ensure_cpu_thread():
         if _cpu_thread is None or not _cpu_thread.is_alive():
             _cpu_thread = threading.Thread(target=_cpu_monitor, daemon=True)
             _cpu_thread.start()
+
+
+def _to_percent(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(parsed, 100.0))
+
+
+def _update_peak_usage(cpu_percent: Any, ram_percent: Any, disk_percent: Any) -> Dict[str, float]:
+    cpu_value = _to_percent(cpu_percent)
+    ram_value = _to_percent(ram_percent)
+    disk_value = _to_percent(disk_percent)
+    with _peak_usage_lock:
+        _peak_usage["cpu_percent"] = max(_peak_usage["cpu_percent"], cpu_value)
+        _peak_usage["ram_percent"] = max(_peak_usage["ram_percent"], ram_value)
+        _peak_usage["disk_percent"] = max(_peak_usage["disk_percent"], disk_value)
+        return dict(_peak_usage)
 
 
 def _get_user_context() -> Dict[str, Any]:
@@ -479,6 +504,23 @@ class SystemInfoHandler(SyncHandler):
         except Exception as e:
             logger.warning("Failed to get disk info: %s", e)
             info["disk"] = {"percent": 0.0}
+
+        cpu_allocation = _read_cgroup_cpu_limit()
+        if cpu_allocation is None:
+            cpu_count = psutil.cpu_count(logical=True)
+            cpu_allocation = float(cpu_count) if cpu_count else None
+        ram_total_bytes = info.get("memory", {}).get("total")
+        disk_total_bytes = info.get("disk", {}).get("total")
+        info["allocation"] = {
+            "cpus": cpu_allocation,
+            "ram_mib": int((float(ram_total_bytes) / (1024 * 1024))) if ram_total_bytes else None,
+            "disk_gib": int((float(disk_total_bytes) / (1024 * 1024 * 1024))) if disk_total_bytes else None,
+        }
+        info["peak_usage"] = _update_peak_usage(
+            info.get("cpu_percent"),
+            (info.get("memory") or {}).get("percent"),
+            (info.get("disk") or {}).get("percent"),
+        )
         
         # Add OS information - this is critical for proper shell detection
         info["os_info"] = _get_os_info()
