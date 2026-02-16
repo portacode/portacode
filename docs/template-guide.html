@@ -1,0 +1,36 @@
+<h2>How To Write a <code>portafile.yaml</code></h2>
+
+<p>A portafile.yaml is a simple yaml file used to define the steps and configurations needed to automatically compose a project.</p>
+
+<h3>Supported <code>source_template</code> values</h3>
+
+<ul>
+	<li><code>alpine-3.17</code>: lightweight and fast.</li>
+	<li><code>centos-9-stream</code>: CentOS/RHEL ecosystem compatibility.</li>
+	<li><code>opensuse-15.4</code>: openSUSE-based environment.</li>
+	<li><code>ubuntu-20.04</code>: broad package/tool compatibility.</li>
+</ul>
+
+<h3>Available arguments</h3>
+
+<ul>
+	<li><code>source_template</code> (required)</li>
+	<li><code>name</code> (optional, pre-fills device name)</li>
+	<li><code>hostname</code> (optional, pre-fills hostname)</li>
+	<li><code>instructions</code> / <code>steps</code> (optional command list)</li>
+	<li><code>expose_ports</code> (optional list of ports)</li>
+	<li><code>metadata</code> (optional extra values)</li>
+</ul>
+
+<h3>Example</h3>
+
+<pre>
+<code>source_template: ubuntu-20.04
+name: Demo Service
+hostname: demo-service
+instructions:
+  - command: sudo apt-get update
+  - command: sudo apt-get install -y docker.io
+expose_ports:
+  - 8080
+</code></pre>
