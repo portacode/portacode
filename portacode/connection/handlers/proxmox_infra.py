@@ -1161,6 +1161,7 @@ def _build_bootstrap_steps(
     ssh_key: str,
     include_portacode_connect: bool = True,
     package_manager: str = "apt",
+    project_paths: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
     python_cmd = "python3.11" if package_manager == "zypper" else "python3"
@@ -1276,7 +1277,11 @@ def _build_bootstrap_steps(
         ]
     )
     if include_portacode_connect:
-        steps.append({"name": "portacode_connect", "type": "portacode_connect", "timeout_s": 30})
+        connect_step: Dict[str, Any] = {"name": "portacode_connect", "type": "portacode_connect", "timeout_s": 30}
+        normalized_paths = [str(path).strip() for path in (project_paths or []) if str(path).strip()]
+        if normalized_paths:
+            connect_step["project_paths"] = normalized_paths
+        steps.append(connect_step)
     return steps
 
 
@@ -1334,6 +1339,30 @@ def _validate_positive_number(value: Any, default: float) -> float:
     except Exception:
         pass
     return float(default)
+
+
+def _sanitize_project_paths(candidate: Any) -> List[str]:
+    if candidate is None:
+        return []
+    if isinstance(candidate, str):
+        parsed = [entry.strip() for entry in candidate.replace(",", "\n").splitlines() if entry.strip()]
+    elif isinstance(candidate, list):
+        parsed = [str(entry).strip() for entry in candidate if str(entry).strip()]
+    else:
+        raise ValueError("project_paths must be a list or string")
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for path in parsed:
+        if len(path) > 500:
+            raise ValueError("project_paths entries cannot exceed 500 characters")
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    if len(deduped) > 10:
+        raise ValueError("A maximum of 10 project paths is supported")
+    return deduped
 
 
 def _wait_for_task(proxmox: Any, node: str, upid: str) -> Tuple[Dict[str, Any], float]:
@@ -1463,6 +1492,7 @@ def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) ->
         "username": user,
         "password": password,
         "ssh_public_key": ssh_key,
+        "project_paths": _sanitize_project_paths(message.get("project_paths")),
         "description": MANAGED_MARKER,
     }
     return payload
@@ -1708,9 +1738,20 @@ def _deploy_device_keypair(vmid: int, user: str, private_key: str, public_key: s
     _push_bytes_to_container(vmid, user, pub_path, public_key.encode(), mode=0o644)
 
 
-def _portacode_connect_and_read_key(vmid: int, user: str, timeout_s: int = 10) -> Dict[str, Any]:
+def _portacode_connect_and_read_key(
+    vmid: int,
+    user: str,
+    timeout_s: int = 10,
+    project_paths: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     cli_path = _resolve_portacode_cli_path(vmid, user)
-    su_connect_cmd = _su_command(user, f"{shlex.quote(cli_path)} connect")
+    normalized_paths = [str(path).strip() for path in (project_paths or []) if str(path).strip()]
+    path_flags = " ".join(
+        f"--project-path {shlex.quote(path)}"
+        for path in normalized_paths
+    )
+    connect_cmd = f"{shlex.quote(cli_path)} connect{(' ' + path_flags) if path_flags else ''}"
+    su_connect_cmd = _su_command(user, connect_cmd)
     cmd = ["pct", "exec", str(vmid), "--", "/bin/sh", "-c", su_connect_cmd]
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     start = time.time()
@@ -1857,7 +1898,12 @@ def _run_setup_steps(
             progress_callback(step_index, computed_total, step, "in_progress", None)
 
         if step.get("type") == "portacode_connect":
-            res = _portacode_connect_and_read_key(vmid, user, timeout_s=step.get("timeout_s", 10))
+            res = _portacode_connect_and_read_key(
+                vmid,
+                user,
+                timeout_s=step.get("timeout_s", 10),
+                project_paths=step.get("project_paths"),
+            )
             res["name"] = step["name"]
             results.append(res)
             if not res.get("ok"):
@@ -2241,6 +2287,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
         template_candidates = config_guess.get("templates") or []
         template_hint = (message.get("template") or (template_candidates[0] if template_candidates else "")).strip()
         package_manager = _guess_package_manager_from_template(template_hint)
+        project_paths = _sanitize_project_paths(message.get("project_paths"))
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
         bootstrap_steps = _build_bootstrap_steps(
             bootstrap_user,
@@ -2248,6 +2295,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             bootstrap_ssh_key,
             include_portacode_connect=not has_device_keypair,
             package_manager=package_manager,
+            project_paths=project_paths,
         )
         total_steps = 3 + len(bootstrap_steps) + 2
         current_step_index = 1
@@ -2572,6 +2620,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             "disk_gib": payload_local["disk_gib"],
                             "ram_mib": payload_local["ram_mib"],
                             "cpus": payload_local["cpus"],
+                            "project_paths": payload_local.get("project_paths") or [],
                         },
                         "setup_steps": steps,
                         "device_id": device_id,
