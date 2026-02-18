@@ -128,6 +128,36 @@ services:
         options:
           max-size: "50m"
           max-file: "3"
+  expired-cleanup-worker:
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command:
+      [
+        "python",
+        "manage.py",
+        "cleanup_expired_devices",
+        "--run-forever",
+        "--batch-size",
+        "20",
+        "--poll-interval",
+        "5",
+      ]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    deploy:
+      replicas: 3
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
   reacher:
     image: reacherhq/backend:latest
     env_file:
