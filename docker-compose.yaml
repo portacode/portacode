@@ -100,6 +100,34 @@ services:
         options:
           max-size: "50m"
           max-file: "3"
+  expiry-notifier:
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command:
+      [
+        "python",
+        "manage.py",
+        "notify_expiring_devices",
+        "--window-hours",
+        "24",
+        "--run-forever",
+        "--interval-seconds",
+        "1800",
+      ]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
   reacher:
     image: reacherhq/backend:latest
     env_file:
