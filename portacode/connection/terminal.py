@@ -64,6 +64,9 @@ from .handlers import (
     CloudflareTunnelSetupHandler,
     CloudflareForwardingHandler,
     ConfigureProxmoxContainerExposePortsHandler,
+    AutomationV2StartHandler,
+    AutomationV2StateHandler,
+    AutomationV2CancelHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -516,6 +519,9 @@ class TerminalManager:
         self._command_registry.register(CloudflareForwardingHandler)
         self._command_registry.register(ConfigureProxmoxContainerExposePortsHandler)
         self._command_registry.register(UpdatePortacodeHandler)
+        self._command_registry.register(AutomationV2StartHandler)
+        self._command_registry.register(AutomationV2StateHandler)
+        self._command_registry.register(AutomationV2CancelHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway

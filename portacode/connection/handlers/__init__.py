@@ -56,6 +56,11 @@ from .cloudflare_forwarding import (
     CloudflareForwardingHandler,
     ConfigureProxmoxContainerExposePortsHandler,
 )
+from .automation_v2_handlers import (
+    AutomationV2StartHandler,
+    AutomationV2StateHandler,
+    AutomationV2CancelHandler,
+)
 
 __all__ = [
     "BaseHandler",
@@ -104,4 +109,7 @@ __all__ = [
     "CloudflareTunnelSetupHandler",
     "CloudflareForwardingHandler",
     "ConfigureProxmoxContainerExposePortsHandler",
+    "AutomationV2StartHandler",
+    "AutomationV2StateHandler",
+    "AutomationV2CancelHandler",
 ]
