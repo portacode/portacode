@@ -1,36 +1,36 @@
-<h2>How To Write a <code>portafile.yaml</code></h2>
-
-<p>A portafile.yaml is a simple yaml file used to define the steps and configurations needed to automatically compose a project.</p>
-
-<h3>Supported <code>source_template</code> values</h3>
+<h2><code>portafile.yaml</code> Fields</h2>
 
 <ul>
-	<li><code>alpine-3.17</code>: lightweight and fast.</li>
-	<li><code>centos-9-stream</code>: CentOS/RHEL ecosystem compatibility.</li>
-	<li><code>opensuse-15.4</code>: openSUSE-based environment.</li>
-	<li><code>ubuntu-20.04</code>: broad package/tool compatibility.</li>
-</ul>
-
-<h3>Available arguments</h3>
-
-<ul>
-	<li><code>source_template</code> (required)</li>
-	<li><code>name</code> (optional, pre-fills device name)</li>
-	<li><code>hostname</code> (optional, pre-fills hostname)</li>
-	<li><code>instructions</code> / <code>steps</code> (optional command list)</li>
-	<li><code>expose_ports</code> (optional list of ports)</li>
-	<li><code>metadata</code> (optional extra values)</li>
+	<li><code>source_template</code>: required, no default; allowed values: <code>alpine-3.17</code>, <code>centos-9-stream</code>, <code>opensuse-15.4</code>, <code>ubuntu-20.04</code>.</li>
+	<li><code>name</code>: optional, no default in YAML; pre-fills device name.</li>
+	<li><code>hostname</code>: optional, no default in YAML; pre-fills hostname.</li>
+	<li><code>resources</code>: optional object; any missing resource key falls back to defaults.</li>
+	<li><code>resources.disk_gib</code> (alias <code>disk</code>): optional, default <code>3</code>.</li>
+	<li><code>resources.ram_mib</code> (alias <code>ram</code>): optional, default <code>1024</code>.</li>
+	<li><code>resources.cpus</code> (aliases <code>cpu</code>, <code>cpu_share</code>): optional, default <code>0.1</code>.</li>
+	<li><code>project_paths</code>: optional list of project folder paths to register (for example <code>/workspace</code>).</li>
+	<li><code>instructions</code> or <code>steps</code>: optional list; supports string commands or objects using <code>command</code>/<code>cmd</code>/<code>run</code>.</li>
+	<li><code>expose_ports</code>: optional list of ports to expose.</li>
+	<li><code>metadata</code>: optional object for extra values.</li>
 </ul>
 
 <h3>Example</h3>
 
-<pre>
-<code>source_template: ubuntu-20.04
+<pre><code>source_template: ubuntu-20.04
 name: Demo Service
 hostname: demo-service
+resources:
+  disk_gib: 10
+  ram_mib: 2048
+  cpus: 0.5
+project_paths:
+  - /workspace
+  - /workspace/demo-service
 instructions:
   - command: sudo apt-get update
-  - command: sudo apt-get install -y docker.io
+  - run: sudo apt-get install -y docker.io
 expose_ports:
   - 8080
+metadata:
+  project: demo-service
 </code></pre>
