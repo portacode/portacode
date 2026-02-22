@@ -1369,11 +1369,6 @@ def _build_bootstrap_steps(
     project_paths: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
-    python_bootstrap_cmd = (
-        "pybin=$(command -v python3.11 || command -v python3 || command -v python || true); "
-        "if [ -z \"$pybin\" ]; then echo 'No usable Python interpreter found'; exit 1; fi; "
-        "\"$pybin\""
-    )
     steps: List[Dict[str, Any]] = [
         {"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0},
     ]
@@ -1478,10 +1473,7 @@ def _build_bootstrap_steps(
         [
             {
                 "name": "create_portacode_venv",
-                "cmd": (
-                    f"{python_bootstrap_cmd} -m venv {PORTACODE_VENV_DIR} "
-                    f"|| {python_bootstrap_cmd} -m virtualenv {PORTACODE_VENV_DIR}"
-                ),
+                "cmd": f"python3 -m venv --clear {PORTACODE_VENV_DIR}",
                 "retries": 0,
             },
             {
