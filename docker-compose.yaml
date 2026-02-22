@@ -95,6 +95,8 @@ services:
         condition: service_healthy
     volumes:
       - ./server/portacode_django:/app
+    deploy:
+      replicas: 3
     logging:
         driver: json-file
         options:

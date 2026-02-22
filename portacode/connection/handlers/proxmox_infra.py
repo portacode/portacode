@@ -1291,7 +1291,7 @@ _NETWORK_WAIT_CMD = (
 
 _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "apt": {
-        "update_cmd": "apt-get update -y",
+        "update_cmd": "apt-get update -y || test $? -eq 100",
         "update_step_name": "apt_update",
         "install_cmd": "apt-get install -y python3 python3-pip python3-venv sudo --fix-missing",
         "install_step_name": "install_deps",

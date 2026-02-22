@@ -66,7 +66,7 @@ def _sudo_prefix(non_interactive: bool = True) -> Optional[list[str]]:
     return ["sudo"]
 
 
-def _run_checked(cmd: list[str], *, allow_sudo: bool = True) -> None:
+def _run_checked(cmd: list[str], *, allow_sudo: bool = True, ok_returncodes: tuple[int, ...] = (0,)) -> None:
     prefix: list[str] = []
     if allow_sudo and not is_root():
         sp = _sudo_prefix(non_interactive=True)
@@ -74,7 +74,7 @@ def _run_checked(cmd: list[str], *, allow_sudo: bool = True) -> None:
             raise RuntimeError("Root privileges required but sudo is not available.")
         prefix = sp
     proc = subprocess.run([*prefix, *cmd], text=True, capture_output=True)
-    if proc.returncode != 0:
+    if proc.returncode not in ok_returncodes:
         msg = (proc.stderr or proc.stdout or "").strip() or f"Command failed: {' '.join(cmd)}"
         raise RuntimeError(msg)
 
@@ -109,7 +109,7 @@ def _install_prereqs(pkg_mgr: Optional[str]) -> None:
         _run_checked(["apk", "add", "--no-cache", "ca-certificates", "curl"])
         return
     if pkg_mgr == "apt":
-        _run_checked(["apt-get", "update"])
+        _run_checked(["apt-get", "update"], ok_returncodes=(0, 100))
         _run_checked(["apt-get", "install", "-y", "ca-certificates", "curl"])
         return
     if pkg_mgr == "dnf":

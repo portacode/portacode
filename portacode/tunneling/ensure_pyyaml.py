@@ -19,7 +19,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from .privileged import have, run_checked
+from .privileged import have, run, run_checked
 
 
 def _can_import() -> bool:
@@ -53,7 +53,10 @@ def ensure_pyyaml_installed() -> None:
         run_checked(["apk", "add", "--no-cache", "py3-yaml"])
         return
     if pkg_mgr == "apt":
-        run_checked(["apt-get", "update"])
+        update = run(["apt-get", "update"])
+        if update.returncode not in (0, 100):
+            msg = (update.stderr or update.stdout or "").strip() or "Command failed: apt-get update"
+            raise RuntimeError(msg)
         run_checked(["apt-get", "install", "-y", "python3-yaml"])
         return
     if pkg_mgr == "dnf":
