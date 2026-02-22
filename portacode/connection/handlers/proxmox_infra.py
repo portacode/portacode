@@ -76,6 +76,7 @@ def _parse_device_id_from_description(description: str) -> Optional[str]:
 DEFAULT_HOST = "localhost"
 DEFAULT_NODE_NAME = os.uname().nodename.split(".", 1)[0]
 DEFAULT_BRIDGE = "vmbr1"
+PORTACODE_VENV_DIR = "/opt/portacode-venv"
 SUBNET_CIDR = "10.10.0.1/24"
 BRIDGE_IP = SUBNET_CIDR.split("/", 1)[0]
 DHCP_START = "10.10.0.100"
@@ -173,6 +174,39 @@ def _call_subprocess(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProce
     return subprocess.run(cmd, env=env, text=True, capture_output=True, **kwargs)
 
 
+def _clip_command_output(text: Optional[str], limit: int = 500) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit]}..."
+
+
+def _command_failure_details(cmd: Sequence[str], result: subprocess.CompletedProcess[str]) -> str:
+    command = shlex.join(cmd)
+    stdout = _clip_command_output(result.stdout)
+    stderr = _clip_command_output(result.stderr)
+    details = [f"command={command}", f"exit_code={result.returncode}"]
+    if stdout:
+        details.append(f"stdout={stdout}")
+    if stderr:
+        details.append(f"stderr={stderr}")
+    return "; ".join(details)
+
+
+def _run_checked_command(
+    cmd: Sequence[str],
+    *,
+    context: str,
+    allowed_returncodes: Sequence[int] = (0,),
+) -> subprocess.CompletedProcess[str]:
+    result = _call_subprocess(list(cmd), check=False)
+    if result.returncode not in allowed_returncodes:
+        raise RuntimeError(f"{context}: {_command_failure_details(cmd, result)}")
+    return result
+
+
 def _ensure_proxmoxer() -> Any:
     try:
         from proxmoxer import ProxmoxAPI  # noqa: F401
@@ -201,6 +235,89 @@ def _parse_token(token_identifier: str) -> Tuple[str, str]:
     if not token_name:
         raise ValueError("Token identifier missing token name")
     return user, token_name
+
+
+def _extract_pveum_token_value(output: str) -> Optional[str]:
+    if not output:
+        return None
+    # Typical pveum output includes a "value: <secret>" line once.
+    match = re.search(r"(?im)^\s*value:\s*(\S+)\s*$", output)
+    if match:
+        return match.group(1).strip()
+    # Some pveum versions render a unicode/ascii table row, e.g.
+    # "│ value │ <secret> │" or "| value | <secret> |".
+    row_match = re.search(r"(?im)[\|│]\s*value\s*[\|│]\s*([^\|│]+?)\s*[\|│]\s*$", output)
+    if row_match:
+        return row_match.group(1).strip()
+    return None
+
+
+def _extract_pveum_full_tokenid(output: str) -> Optional[str]:
+    if not output:
+        return None
+    match = re.search(r"(?im)^\s*full-tokenid:\s*(\S+)\s*$", output)
+    if match:
+        return match.group(1).strip()
+    row_match = re.search(r"(?im)[\|│]\s*full-tokenid\s*[\|│]\s*([^\|│]+?)\s*[\|│]\s*$", output)
+    if row_match:
+        return row_match.group(1).strip()
+    return None
+
+
+def _extract_pveum_token_fields_from_json(output: str) -> Tuple[Optional[str], Optional[str]]:
+    if not output:
+        return None, None
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    full_tokenid = payload.get("full-tokenid")
+    token_value = payload.get("value")
+    full_tokenid_str = str(full_tokenid).strip() if full_tokenid is not None else None
+    token_value_str = str(token_value).strip() if token_value is not None else None
+    return full_tokenid_str or None, token_value_str or None
+
+
+def _create_auto_admin_token() -> Tuple[str, str, str]:
+    if os.geteuid() != 0:
+        raise PermissionError("Automatic token creation requires root privileges.")
+
+    token_user = "root@pam"
+    token_name = f"portacode-{secrets.token_hex(4)}"
+    cmd = [
+        "pveum",
+        "user",
+        "token",
+        "add",
+        token_user,
+        token_name,
+        "--privsep",
+        "0",
+        "--comment",
+        "Portacode auto-created admin token",
+    ]
+    json_cmd = [*cmd, "--output-format", "json"]
+    result = _call_subprocess(json_cmd, check=False)
+    used_cmd = json_cmd
+    if result.returncode != 0:
+        # Fallback for older/newer variants that do not support --output-format.
+        result = _call_subprocess(cmd, check=False)
+        used_cmd = cmd
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to auto-create Proxmox API token: {_command_failure_details(used_cmd, result)}")
+
+    combined_output = f"{result.stdout or ''}\n{result.stderr or ''}"
+    json_tokenid, json_token_value = _extract_pveum_token_fields_from_json(result.stdout or "")
+    token_value = json_token_value or _extract_pveum_token_value(combined_output)
+    full_tokenid = json_tokenid or _extract_pveum_full_tokenid(combined_output) or f"{token_user}!{token_name}"
+    if not token_value:
+        raise RuntimeError(
+            "Proxmox token was created but token secret could not be parsed from pveum output. "
+            f"output={_clip_command_output(combined_output, limit=1200)}"
+        )
+    return full_tokenid, token_value, "auto_admin_root"
 
 
 def _save_config(data: Dict[str, Any]) -> None:
@@ -610,12 +727,69 @@ def _ensure_bridge(bridge: str = DEFAULT_BRIDGE) -> Dict[str, Any]:
     _write_bridge_config(bridge)
     _ensure_sysctl()
     _write_units(bridge)
-    _call_subprocess(["/bin/systemctl", "daemon-reload"], check=True)
+    _run_checked_command(["/bin/systemctl", "daemon-reload"], context="systemd daemon-reload failed")
     nat_service = f"portacode-{bridge}-nat.service"
     dns_service = f"portacode-{bridge}-dnsmasq.service"
-    _call_subprocess(["/bin/systemctl", "enable", "--now", nat_service, dns_service], check=True)
-    _call_subprocess(["/sbin/ifup", bridge], check=False)
-    return {"applied": True, "bridge": bridge, "message": f"Bridge {bridge} configured"}
+    _run_checked_command(
+        ["/bin/systemctl", "enable", "--now", nat_service, dns_service],
+        context=f"Failed enabling/starting {nat_service} and {dns_service}",
+    )
+
+    ifup_result = _call_subprocess(["/sbin/ifup", bridge], check=False)
+    if ifup_result.returncode != 0:
+        retry_details: List[str] = [f"initial_ifup={_command_failure_details(['/sbin/ifup', bridge], ifup_result)}"]
+        ifreload_path = shutil.which("ifreload")
+        if ifreload_path:
+            ifreload_result = _call_subprocess([ifreload_path, "-a"], check=False)
+            retry_details.append(
+                f"ifreload={_command_failure_details([ifreload_path, '-a'], ifreload_result)}"
+            )
+            second_ifup = _call_subprocess(["/sbin/ifup", bridge], check=False)
+            if second_ifup.returncode == 0:
+                logger.warning(
+                    "Bridge bring-up required retry after ifreload: %s",
+                    "; ".join(retry_details),
+                )
+            else:
+                retry_details.append(
+                    f"retry_ifup={_command_failure_details(['/sbin/ifup', bridge], second_ifup)}"
+                )
+                raise RuntimeError(
+                    f"Failed to bring up bridge {bridge}: {'; '.join(retry_details)}"
+                )
+        else:
+            raise RuntimeError(
+                f"Failed to bring up bridge {bridge}: {'; '.join(retry_details)}; "
+                "ifreload command not found for retry"
+            )
+
+    _run_checked_command(
+        ["/sbin/ip", "link", "show", "dev", bridge],
+        context=f"Bridge {bridge} is not present after setup",
+    )
+    bridge_addr = _run_checked_command(
+        ["/sbin/ip", "-4", "addr", "show", "dev", bridge],
+        context=f"Bridge {bridge} exists but IPv4 query failed",
+    )
+    if BRIDGE_IP not in (bridge_addr.stdout or ""):
+        raise RuntimeError(
+            f"Bridge {bridge} is up but expected IPv4 {BRIDGE_IP} is missing: "
+            f"{_command_failure_details(['/sbin/ip', '-4', 'addr', 'show', 'dev', bridge], bridge_addr)}"
+        )
+
+    nat_status = _run_checked_command(
+        ["/bin/systemctl", "is-active", nat_service],
+        context=f"{nat_service} is not active",
+    )
+    dns_status = _run_checked_command(
+        ["/bin/systemctl", "is-active", dns_service],
+        context=f"{dns_service} is not active",
+    )
+    message = (
+        f"Bridge {bridge} configured and active "
+        f"(nat={nat_status.stdout.strip()}, dns={dns_status.stdout.strip()})"
+    )
+    return {"applied": True, "bridge": bridge, "message": message}
 
 
 def _verify_connectivity(timeout: float = 5.0) -> bool:
@@ -1093,7 +1267,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "apt": {
         "update_cmd": "apt-get update -y",
         "update_step_name": "apt_update",
-        "install_cmd": "apt-get install -y python3 python3-pip sudo --fix-missing",
+        "install_cmd": "apt-get install -y python3 python3-pip python3-venv sudo --fix-missing",
         "install_step_name": "install_deps",
         "update_retries": 4,
         "install_retries": 5,
@@ -1131,9 +1305,14 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
         "install_retries": 5,
     },
     "zypper": {
-        "update_cmd": "zypper refresh",
+        "update_cmd": "zypper --non-interactive --gpg-auto-import-keys refresh",
         "update_step_name": "zypper_update",
-        "install_cmd": "zypper install -y python311 python311-pip sudo",
+        "install_cmd": (
+            "zypper --non-interactive install -y python3 python3-pip python3-virtualenv sudo "
+            "|| zypper --non-interactive install -y python311 python311-pip python311-virtualenv sudo "
+            "|| zypper --non-interactive install -y python311 python311-pip sudo "
+            "|| zypper --non-interactive install -y python3 python3-pip sudo"
+        ),
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -1164,7 +1343,11 @@ def _build_bootstrap_steps(
     project_paths: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
-    python_cmd = "python3.11" if package_manager == "zypper" else "python3"
+    python_bootstrap_cmd = (
+        "pybin=$(command -v python3.11 || command -v python3 || command -v python || true); "
+        "if [ -z \"$pybin\" ]; then echo 'No usable Python interpreter found'; exit 1; fi; "
+        "\"$pybin\""
+    )
     steps: List[Dict[str, Any]] = [
         {"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0},
     ]
@@ -1267,11 +1450,30 @@ def _build_bootstrap_steps(
         )
     steps.extend(
         [
-            {"name": "pip_upgrade", "cmd": f"{python_cmd} -m pip install --upgrade pip", "retries": 0},
-            {"name": "install_portacode", "cmd": f"{python_cmd} -m pip install --upgrade portacode", "retries": 0},
+            {
+                "name": "create_portacode_venv",
+                "cmd": (
+                    f"{python_bootstrap_cmd} -m venv {PORTACODE_VENV_DIR} "
+                    f"|| {python_bootstrap_cmd} -m virtualenv {PORTACODE_VENV_DIR}"
+                ),
+                "retries": 0,
+            },
+            {
+                "name": "venv_pip_upgrade",
+                "cmd": f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade pip",
+                "retries": 0,
+            },
+            {
+                "name": "install_portacode",
+                "cmd": f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade portacode",
+                "retries": 0,
+            },
             {
                 "name": "ensure_portacode_path",
-                "cmd": "if [ ! -f /etc/profile.d/portacode_path.sh ]; then printf 'export PATH=/usr/local/bin:$PATH\\n' >/etc/profile.d/portacode_path.sh; fi",
+                "cmd": (
+                    f"printf '%s\\n' 'export PATH={PORTACODE_VENV_DIR}/bin:/usr/local/bin:$PATH' "
+                    ">/etc/profile.d/portacode_path.sh"
+                ),
                 "retries": 0,
             },
         ]
@@ -1654,11 +1856,55 @@ def _resolve_user_group(vmid: int, user: str) -> str:
 
 def _resolve_portacode_cli_path(vmid: int, user: str) -> str:
     """Resolve the full path to the portacode CLI inside the container."""
+    venv_cli = f"{PORTACODE_VENV_DIR}/bin/portacode"
+    venv_res = _run_pct(vmid, f"test -x {shlex.quote(venv_cli)}")
+    if venv_res.get("returncode") == 0:
+        return venv_cli
     res = _run_pct(vmid, _su_command(user, "command -v portacode"))
     path = (res.get("stdout") or "").strip()
     if path:
         return path
     return "portacode"
+
+
+def _enforce_service_venv_execstart(vmid: int, user: str) -> None:
+    """Ensure service launchers use venv python when available in the container.
+
+    This provides forward compatibility while some deployed portacode versions still
+    generate /usr/bin/python3 in systemd/OpenRC service definitions.
+    """
+    expected_python = f"{PORTACODE_VENV_DIR}/bin/python"
+    default_home = shlex.quote(f"/home/{user}")
+    command = (
+        "if [ -x {py} ]; then "
+        "  if [ -f /etc/systemd/system/portacode.service ]; then "
+        "    sed -i 's#^ExecStart=.*#ExecStart={py} -m portacode connect --non-interactive#' "
+        "      /etc/systemd/system/portacode.service && "
+        "    /bin/systemctl daemon-reload && "
+        "    /bin/systemctl restart portacode.service; "
+        "  fi; "
+        "  if [ -f /usr/local/share/portacode/connect_service.sh ] && command -v rc-service >/dev/null 2>&1; then "
+        "    home=$(getent passwd {quoted_user} 2>/dev/null | cut -d: -f6); "
+        "    if [ -z \"$home\" ]; then home={default_home}; fi; "
+        "    printf '%s\\n' '#!/bin/sh' \"cd \\\"$home\\\"\" "
+        "      'exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1' "
+        "      >/usr/local/share/portacode/connect_service.sh && "
+        "    chmod 755 /usr/local/share/portacode/connect_service.sh && "
+        "    rc-service portacode restart >/dev/null 2>&1 || true; "
+        "  fi; "
+        "fi"
+    ).format(
+        py=shlex.quote(expected_python),
+        quoted_user=shlex.quote(user),
+        default_home=default_home,
+    )
+    cmd = _su_command(user, f"sudo -H -n /bin/sh -c {shlex.quote(command)}")
+    res = _run_pct(vmid, cmd)
+    if res["returncode"] != 0:
+        raise RuntimeError(
+            "Failed to enforce venv-backed service launch command: "
+            f"{res.get('stderr') or res.get('stdout')}"
+        )
 
 
 def _run_pct_check(vmid: int, cmd: str) -> Dict[str, Any]:
@@ -2040,6 +2286,7 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
         "node": config.get("node"),
         "user": config.get("user"),
         "token_name": config.get("token_name"),
+        "token_origin": config.get("token_origin", "manual"),
         "default_storage": config.get("default_storage"),
         "templates": config.get("templates") or [],
         "last_verified": config.get("last_verified"),
@@ -2047,7 +2294,18 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def configure_infrastructure(token_identifier: str, token_value: str, verify_ssl: bool = False) -> Dict[str, Any]:
+def configure_infrastructure(
+    token_identifier: Optional[str] = None,
+    token_value: Optional[str] = None,
+    verify_ssl: bool = False,
+    auto_create_admin_token: bool = False,
+) -> Dict[str, Any]:
+    token_origin = "manual"
+    if auto_create_admin_token:
+        token_identifier, token_value, token_origin = _create_auto_admin_token()
+    if not token_identifier or not token_value:
+        raise ValueError("token_identifier and token_value are required")
+
     ProxmoxAPI = _ensure_proxmoxer()
     user, token_name = _parse_token(token_identifier)
     client = ProxmoxAPI(
@@ -2081,6 +2339,7 @@ def configure_infrastructure(token_identifier: str, token_value: str, verify_ssl
         "user": user,
         "token_name": token_name,
         "token_value": token_value,
+        "token_origin": token_origin,
         "verify_ssl": verify_ssl,
         "default_storage": default_storage,
         "last_verified": datetime.utcnow().isoformat() + "Z",
@@ -2360,6 +2619,22 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 raise ValueError("Proxmox infrastructure is not configured.")
             if not config.get("network", {}).get("applied"):
                 raise RuntimeError("Proxmox bridge setup must be applied before creating containers.")
+            bridge = config.get("network", {}).get("bridge", DEFAULT_BRIDGE)
+            bridge_check = _call_subprocess(["/sbin/ip", "link", "show", "dev", bridge], check=False)
+            if bridge_check.returncode != 0:
+                raise RuntimeError(
+                    f"Configured bridge {bridge} is not present on host: "
+                    f"{_command_failure_details(['/sbin/ip', 'link', 'show', 'dev', bridge], bridge_check)}. "
+                    "Run setup_proxmox_infra again or bring the bridge up manually."
+                )
+            dns_service = f"portacode-{bridge}-dnsmasq.service"
+            dns_check = _call_subprocess(["/bin/systemctl", "is-active", dns_service], check=False)
+            if dns_check.returncode != 0 or "active" not in (dns_check.stdout or "").strip():
+                raise RuntimeError(
+                    f"{dns_service} is not active: "
+                    f"{_command_failure_details(['/bin/systemctl', 'is-active', dns_service], dns_check)}. "
+                    "Run setup_proxmox_infra again or restart the service."
+                )
             return config
 
         config = _run_lifecycle_step(
@@ -2585,6 +2860,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         )
                         raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
+                    _enforce_service_venv_execstart(vmid, payload_local["username"])
+
                     _emit_progress_event(
                         self,
                         step_index=install_step,
@@ -2751,6 +3028,8 @@ class StartPortacodeServiceHandler(SyncHandler):
                 on_behalf_of_device=on_behalf_of_device,
             )
             raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
+
+        _enforce_service_venv_execstart(vmid, user)
 
         _emit_progress_event(
             self,
@@ -2933,12 +3212,21 @@ class ConfigureProxmoxInfraHandler(SyncHandler):
         return "setup_proxmox_infra"
 
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        token_mode = str(message.get("token_mode") or "manual").strip().lower()
         token_identifier = message.get("token_identifier")
         token_value = message.get("token_value")
         verify_ssl = bool(message.get("verify_ssl"))
-        if not token_identifier or not token_value:
-            raise ValueError("token_identifier and token_value are required")
-        snapshot = configure_infrastructure(token_identifier, token_value, verify_ssl=verify_ssl)
+        auto_create_admin_token = token_mode in {"auto_admin", "auto", "auto_create"}
+
+        if not auto_create_admin_token and (not token_identifier or not token_value):
+            raise ValueError("token_identifier and token_value are required when token_mode is manual")
+
+        snapshot = configure_infrastructure(
+            token_identifier=token_identifier,
+            token_value=token_value,
+            verify_ssl=verify_ssl,
+            auto_create_admin_token=auto_create_admin_token,
+        )
         return {
             "event": "proxmox_infra_configured",
             "success": True,

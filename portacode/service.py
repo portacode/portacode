@@ -77,7 +77,9 @@ class _SystemdUserService:
                 self.home = Path(pwd.getpwnam(self.user).pw_dir)
             except KeyError:
                 self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
-            self.python = shutil.which("python3") or sys.executable
+            # Use the exact interpreter running this CLI. This preserves venv installs
+            # (e.g., /opt/portacode-venv/bin/python) for system service ExecStart.
+            self.python = sys.executable
         else:
             self.service_path = (
                 Path.home() / ".config/systemd/user" / f"{self.NAME}.service"
@@ -222,7 +224,8 @@ class _OpenRCService:
             self.home = Path(pwd.getpwnam(self.user).pw_dir)
         except KeyError:
             self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
-        self.python = shutil.which("python3") or sys.executable
+        # Keep OpenRC behavior aligned with systemd: respect active interpreter/venv.
+        self.python = sys.executable
         self.log_dir = Path("/var/log/portacode")
         self.log_path = self.log_dir / "connect.log"
 

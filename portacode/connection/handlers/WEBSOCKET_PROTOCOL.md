@@ -352,8 +352,11 @@ Configures a Proxmox node for Portacode infrastructure usage (API token validati
 
 **Payload Fields:**
 
-*   `token_identifier` (string, required): API token identifier in the form `user@realm!tokenid`.
-*   `token_value` (string, required): Secret value associated with the token.
+*   `token_mode` (string, optional): Token provisioning mode. Supported values:
+    *   `manual` (default): Use a user-provided token.
+    *   `auto_admin`: Automatically create a local admin token on the Proxmox host (`root@pam`, `--privsep 0`).
+*   `token_identifier` (string, conditionally required): API token identifier in the form `user@realm!tokenid`. Required when `token_mode=manual`.
+*   `token_value` (string, conditionally required): Secret value associated with the token. Required when `token_mode=manual`.
 *   `verify_ssl` (boolean, optional): When true, the handler verifies SSL certificates; defaults to `false`.
 
 **Responses:**
@@ -1218,6 +1221,7 @@ Provides system information in response to a `system_info` action. Handled by [`
                 *   `node` (string|null): Proxmox node name that was targeted.
                 *   `user` (string|null): API token owner (e.g., `root@pam`).
                 *   `token_name` (string|null): API token identifier.
+                *   `token_origin` (string|null): How the token was provisioned (`manual` or `auto_admin_root`).
                 *   `default_storage` (string|null): Storage pool chosen for future containers.
                 *   `templates` (array[string]): Cached list of available LXC templates.
                 *   `last_verified` (string|null): ISO timestamp when the token was last validated.
