@@ -94,6 +94,11 @@ _MANAGED_CONTAINERS_STATE: Dict[str, Any] = {
     "pending": {},
 }
 TEMPLATES_REFRESH_INTERVAL_S = 300
+_TEMPLATE_CACHE_LOCK = threading.Lock()
+_TEMPLATE_CACHE: Dict[str, Any] = {
+    "templates": [],
+    "last_refreshed": None,
+}
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
 
@@ -321,9 +326,12 @@ def _create_auto_admin_token() -> Tuple[str, str, str]:
 
 
 def _save_config(data: Dict[str, Any]) -> None:
+    sanitized = dict(data or {})
+    sanitized.pop("templates", None)
+    sanitized.pop("templates_last_refreshed", None)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = CONFIG_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp_path.write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
     os.replace(tmp_path, CONFIG_PATH)
     os.chmod(CONFIG_PATH, stat.S_IRUSR | stat.S_IWUSR)
 
@@ -332,7 +340,12 @@ def _load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {}
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            loaded.pop("templates", None)
+            loaded.pop("templates_last_refreshed", None)
+            return loaded
+        return {}
     except json.JSONDecodeError as exc:
         logger.warning("Failed to parse Proxmox infra config: %s", exc)
         return {}
@@ -398,13 +411,24 @@ def _parse_iso_timestamp(value: str) -> Optional[datetime]:
 def _templates_need_refresh(config: Dict[str, Any]) -> bool:
     if not config or not config.get("token_value"):
         return False
-    last = _parse_iso_timestamp(config.get("templates_last_refreshed") or "")
+    with _TEMPLATE_CACHE_LOCK:
+        last = _TEMPLATE_CACHE.get("last_refreshed")
     if not last:
+        return True
+    if not isinstance(last, datetime):
         return True
     return (datetime.now(timezone.utc) - last).total_seconds() >= TEMPLATES_REFRESH_INTERVAL_S
 
 
 def _ensure_templates_refreshed_on_startup(config: Dict[str, Any]) -> None:
+    with _TEMPLATE_CACHE_LOCK:
+        cached_templates = list(_TEMPLATE_CACHE.get("templates") or [])
+        cached_last = _TEMPLATE_CACHE.get("last_refreshed")
+    if cached_templates:
+        config["templates"] = cached_templates
+    if isinstance(cached_last, datetime):
+        config["templates_last_refreshed"] = cached_last.isoformat()
+
     if not _templates_need_refresh(config):
         return
     try:
@@ -412,10 +436,12 @@ def _ensure_templates_refreshed_on_startup(config: Dict[str, Any]) -> None:
         node = config.get("node") or _pick_node(client)
         storages = client.nodes(node).storage.get()
         templates = _list_templates(client, node, storages)
-        if templates:
-            config["templates"] = templates
-            config["templates_last_refreshed"] = _current_time_iso()
-            _save_config(config)
+        refreshed = datetime.now(timezone.utc)
+        with _TEMPLATE_CACHE_LOCK:
+            _TEMPLATE_CACHE["templates"] = list(templates or [])
+            _TEMPLATE_CACHE["last_refreshed"] = refreshed
+        config["templates"] = list(templates or [])
+        config["templates_last_refreshed"] = refreshed.isoformat()
     except Exception as exc:
         logger.warning("Unable to refresh Proxmox templates on startup: %s", exc)
 
@@ -2343,12 +2369,16 @@ def configure_infrastructure(
         "verify_ssl": verify_ssl,
         "default_storage": default_storage,
         "last_verified": datetime.utcnow().isoformat() + "Z",
-        "templates": templates,
-        "templates_last_refreshed": _current_time_iso(),
         "network": network,
         "node_status": status,
     }
+    refreshed = datetime.now(timezone.utc)
+    with _TEMPLATE_CACHE_LOCK:
+        _TEMPLATE_CACHE["templates"] = list(templates or [])
+        _TEMPLATE_CACHE["last_refreshed"] = refreshed
     _save_config(config)
+    config["templates"] = list(templates or [])
+    config["templates_last_refreshed"] = refreshed.isoformat()
     snapshot = build_snapshot(config)
     snapshot["node_status"] = status
     snapshot["managed_containers"] = _get_managed_containers_summary(force=True)
@@ -2368,6 +2398,9 @@ def revert_infrastructure() -> Dict[str, Any]:
     _revert_bridge()
     if CONFIG_PATH.exists():
         CONFIG_PATH.unlink()
+    with _TEMPLATE_CACHE_LOCK:
+        _TEMPLATE_CACHE["templates"] = []
+        _TEMPLATE_CACHE["last_refreshed"] = None
     snapshot = build_snapshot({})
     snapshot["network"] = snapshot.get("network", {})
     snapshot["network"]["applied"] = False
