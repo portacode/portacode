@@ -358,6 +358,7 @@ Configures a Proxmox node for Portacode infrastructure usage (API token validati
 *   `token_identifier` (string, conditionally required): API token identifier in the form `user@realm!tokenid`. Required when `token_mode=manual`.
 *   `token_value` (string, conditionally required): Secret value associated with the token. Required when `token_mode=manual`.
 *   `verify_ssl` (boolean, optional): When true, the handler verifies SSL certificates; defaults to `false`.
+*   `template_families` (array[string] | string, optional): Template families to prefetch after setup. Defaults to `["ubuntu", "alpine", "opensuse", "centos"]` when omitted. Supports either a JSON array (recommended) or comma/newline-delimited string.
 
 **Responses:**
 
@@ -1224,6 +1225,16 @@ Provides system information in response to a `system_info` action. Handled by [`
                 *   `token_origin` (string|null): How the token was provisioned (`manual` or `auto_admin_root`).
                 *   `default_storage` (string|null): Storage pool chosen for future containers.
                 *   `templates` (array[string]): Cached list of available LXC templates.
+                *   `template_downloads` (object): Last setup template prefetch summary:
+                    *   `requested_families` (array[string]): Canonical families requested during setup.
+                    *   `requested_count` (integer): Number of requested families.
+                    *   `storage` (string|null): Target storage used for downloads.
+                    *   `selected` (array[object]): Selected downloadable templates per family.
+                    *   `downloaded` (array[object]): Templates downloaded in this run.
+                    *   `already_present` (array[object]): Templates skipped because they were already local.
+                    *   `missing` (array[string]): Families with no match in the remote catalog.
+                    *   `failed` (array[object]): Download attempts that failed.
+                    *   `warnings` (array[string]): Non-fatal warnings encountered during prefetch.
                 *   `last_verified` (string|null): ISO timestamp when the token was last validated.
                 *   `network` (object):
                     *   `applied` (boolean): True when the bridge/NAT services were successfully configured.
@@ -1285,7 +1296,7 @@ Provides system information in response to a `system_info` action. Handled by [`
 
 ### `proxmox_infra_configured`
 
-Emitted after a successful `setup_proxmox_infra` action. The event reports the stored API token metadata, template list, and network setup status.
+Emitted after a successful `setup_proxmox_infra` action. The event reports the stored API token metadata, template list, network setup status, and template prefetch results.
 
 **Event Fields:**
 

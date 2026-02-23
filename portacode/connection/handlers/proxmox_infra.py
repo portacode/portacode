@@ -99,6 +99,13 @@ _TEMPLATE_CACHE: Dict[str, Any] = {
     "templates": [],
     "last_refreshed": None,
 }
+DEFAULT_SETUP_TEMPLATE_FAMILIES: Tuple[str, ...] = ("ubuntu", "alpine", "opensuse", "centos")
+_TEMPLATE_FAMILY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "ubuntu": ("ubuntu",),
+    "alpine": ("alpine",),
+    "opensuse": ("opensuse", "open-suse", "suse"),
+    "centos": ("centos", "centos-stream"),
+}
 
 ProgressCallback = Callable[[int, int, Dict[str, Any], str, Optional[Dict[str, Any]]], None]
 
@@ -373,6 +380,319 @@ def _list_templates(client: Any, node: str, storages: Iterable[Dict[str, Any]]) 
             if item.get("content") == "vztmpl" and item.get("volid"):
                 templates.append(item["volid"])
     return templates
+
+
+def _template_filename_from_volid(volid: str) -> str:
+    text = str(volid or "").strip()
+    if ":vztmpl/" in text:
+        return text.split(":vztmpl/", 1)[1].strip()
+    return text
+
+
+def _normalize_template_family_requests(candidate: Any) -> List[str]:
+    if candidate is None:
+        return list(DEFAULT_SETUP_TEMPLATE_FAMILIES)
+    if isinstance(candidate, str):
+        raw_entries = [entry.strip() for entry in re.split(r"[,\n]", candidate) if entry.strip()]
+    elif isinstance(candidate, list):
+        raw_entries = [str(entry).strip() for entry in candidate if str(entry).strip()]
+    else:
+        raise ValueError("template_families must be a list or string")
+
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for value in raw_entries:
+        key = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+        if not key:
+            continue
+        canonical = None
+        for family, aliases in _TEMPLATE_FAMILY_ALIASES.items():
+            if key == family or key in aliases:
+                canonical = family
+                break
+        final_key = canonical or key
+        if final_key in seen:
+            continue
+        if len(final_key) > 64:
+            raise ValueError("template_families entries cannot exceed 64 characters")
+        seen.add(final_key)
+        normalized.append(final_key)
+    if len(normalized) > 12:
+        raise ValueError("A maximum of 12 template families is supported")
+    return normalized
+
+
+def _list_available_templates(client: Any, node: str) -> List[Dict[str, Any]]:
+    entries = client.nodes(node).aplinfo.get()
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _template_filename_from_available_entry(entry: Dict[str, Any]) -> str:
+    for key in ("template", "package", "volid", "name"):
+        value = entry.get(key)
+        if value:
+            return _template_filename_from_volid(str(value))
+    return ""
+
+
+def _template_sort_key(filename: str, blob: str) -> Tuple[int, Tuple[int, ...], str]:
+    arch_score = 1 if ("amd64" in blob or "x86_64" in blob) else 0
+    numeric_parts = tuple(int(part) for part in re.findall(r"\d+", filename.lower())[:10])
+    return arch_score, numeric_parts, filename.lower()
+
+
+def _template_entry_matches_family(entry: Dict[str, Any], family: str) -> bool:
+    filename = _template_filename_from_available_entry(entry)
+    blob_parts = [
+        filename,
+        str(entry.get("os") or ""),
+        str(entry.get("section") or ""),
+        str(entry.get("description") or ""),
+        str(entry.get("label") or ""),
+        str(entry.get("headline") or ""),
+    ]
+    blob = " ".join(blob_parts).lower()
+    aliases = _TEMPLATE_FAMILY_ALIASES.get(family)
+    if aliases:
+        return any(token in blob for token in aliases)
+
+    tokens = [token for token in re.split(r"[^a-z0-9]+", family.lower()) if token]
+    if not tokens:
+        return False
+    return all(token in blob for token in tokens)
+
+
+def _pick_template_storage(storages: Iterable[Dict[str, Any]], *, default_storage: str = "") -> str:
+    def _avail(entry: Dict[str, Any]) -> float:
+        try:
+            return float(entry.get("avail") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    with_vztmpl = [entry for entry in storages if "vztmpl" in str(entry.get("content") or "")]
+    if default_storage and any(entry.get("storage") == default_storage for entry in with_vztmpl):
+        return default_storage
+    preferred = [entry for entry in with_vztmpl if _avail(entry) > 0]
+    if preferred:
+        preferred.sort(key=_avail, reverse=True)
+        return str(preferred[0].get("storage") or "")
+    if with_vztmpl:
+        return str(with_vztmpl[0].get("storage") or "")
+    return default_storage
+
+
+def _select_template_download_targets(
+    available_templates: List[Dict[str, Any]],
+    requested_families: List[str],
+    installed_templates: Iterable[str],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    installed_names = {_template_filename_from_volid(entry).lower() for entry in installed_templates}
+    selected: List[Dict[str, str]] = []
+    missing: List[str] = []
+    selected_names: Set[str] = set()
+
+    for family in requested_families:
+        candidates: List[Tuple[Tuple[int, Tuple[int, ...], str], Dict[str, Any], str]] = []
+        for entry in available_templates:
+            filename = _template_filename_from_available_entry(entry)
+            if not filename:
+                continue
+            if not _template_entry_matches_family(entry, family):
+                continue
+            blob = " ".join(
+                [
+                    filename,
+                    str(entry.get("os") or ""),
+                    str(entry.get("section") or ""),
+                    str(entry.get("description") or ""),
+                    str(entry.get("label") or ""),
+                ]
+            ).lower()
+            candidates.append((_template_sort_key(filename, blob), entry, filename))
+        if not candidates:
+            missing.append(family)
+            continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        picked = None
+        picked_entry: Optional[Dict[str, Any]] = None
+        for _, _, filename in candidates:
+            lowered = filename.lower()
+            if lowered in selected_names:
+                continue
+            picked = filename
+            for _, entry, candidate_filename in candidates:
+                if candidate_filename == filename:
+                    picked_entry = entry
+                    break
+            break
+        if not picked:
+            picked = candidates[0][2]
+            picked_entry = candidates[0][1]
+        lowered = picked.lower()
+        selected_names.add(lowered)
+        selected.append(
+            {
+                "family": family,
+                "template": picked,
+                "already_present": lowered in installed_names,
+                "url": str((picked_entry or {}).get("url") or ""),
+            }
+        )
+    return selected, missing
+
+
+def _download_template_with_pveam(storage: str, template_name: str) -> None:
+    pveam = shutil.which("pveam")
+    if not pveam:
+        raise RuntimeError("pveam command is not available on this Proxmox node")
+
+    download_cmd = [pveam, "download", storage, template_name]
+    result = _call_subprocess(download_cmd, check=False)
+    if result.returncode == 0:
+        return
+
+    combined = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    if "update" in combined and "appliance" in combined:
+        update_cmd = [pveam, "update"]
+        update_res = _call_subprocess(update_cmd, check=False)
+        if update_res.returncode != 0:
+            raise RuntimeError(f"pveam update failed: {_command_failure_details(update_cmd, update_res)}")
+        retry_res = _call_subprocess(download_cmd, check=False)
+        if retry_res.returncode == 0:
+            return
+        raise RuntimeError(_command_failure_details(download_cmd, retry_res))
+
+    raise RuntimeError(_command_failure_details(download_cmd, result))
+
+
+def _download_requested_templates(
+    proxmox: Any,
+    node: str,
+    storages: Iterable[Dict[str, Any]],
+    existing_templates: Iterable[str],
+    requested_families: Any,
+    *,
+    default_storage: str = "",
+) -> Dict[str, Any]:
+    families = _normalize_template_family_requests(requested_families)
+    result: Dict[str, Any] = {
+        "requested_families": families,
+        "requested_count": len(families),
+        "storage": None,
+        "selected": [],
+        "downloaded": [],
+        "already_present": [],
+        "missing": [],
+        "failed": [],
+        "warnings": [],
+    }
+    if not families:
+        result["warnings"].append("Template prefetch skipped (no families selected).")
+        return result
+
+    try:
+        available = _list_available_templates(proxmox, node)
+    except Exception as exc:
+        result["warnings"].append(f"Unable to list downloadable templates: {exc}")
+        return result
+
+    selected, missing = _select_template_download_targets(available, families, existing_templates)
+    result["selected"] = selected
+    result["missing"] = missing
+    if missing:
+        result["warnings"].append(f"No downloadable template matched: {', '.join(missing)}")
+    if not selected:
+        return result
+
+    template_storage = _pick_template_storage(storages, default_storage=default_storage)
+    result["storage"] = template_storage or None
+    if not template_storage:
+        result["warnings"].append("No storage with vztmpl content support is available.")
+        return result
+
+    for target in selected:
+        template_name = target["template"]
+        family = target["family"]
+        template_url = str(target.get("url") or "").strip()
+        if target["already_present"]:
+            result["already_present"].append({"family": family, "template": template_name})
+            continue
+        try:
+            if template_url:
+                started = time.time()
+                upid = proxmox.nodes(node).storage(template_storage)("download-url").post(
+                    url=template_url,
+                    content="vztmpl",
+                    filename=template_name,
+                )
+                status, elapsed = _wait_for_task(proxmox, node, upid)
+                exitstatus = (status or {}).get("exitstatus")
+                if exitstatus and str(exitstatus).upper() != "OK":
+                    raise RuntimeError(
+                        f"task finished with exitstatus={exitstatus} details={status.get('error') or status.get('description')}"
+                    )
+                result["downloaded"].append(
+                    {
+                        "family": family,
+                        "template": template_name,
+                        "elapsed_s": round(float(elapsed), 2),
+                        "method": "download-url",
+                    }
+                )
+                logger.info(
+                    "Template prefetch succeeded via download-url node=%s storage=%s family=%s template=%s elapsed_s=%.2f",
+                    node,
+                    template_storage,
+                    family,
+                    template_name,
+                    time.time() - started,
+                )
+            else:
+                started = time.time()
+                _download_template_with_pveam(template_storage, template_name)
+                elapsed = time.time() - started
+                result["downloaded"].append(
+                    {
+                        "family": family,
+                        "template": template_name,
+                        "elapsed_s": round(float(elapsed), 2),
+                        "method": "pveam",
+                    }
+                )
+                logger.info(
+                    "Template prefetch succeeded via pveam node=%s storage=%s family=%s template=%s elapsed_s=%.2f",
+                    node,
+                    template_storage,
+                    family,
+                    template_name,
+                    elapsed,
+                )
+        except Exception as exc:
+            error_text = str(exc).strip() or repr(exc)
+            logger.warning(
+                "Template prefetch failed node=%s storage=%s family=%s template=%s error=%s",
+                node,
+                template_storage,
+                family,
+                template_name,
+                error_text,
+            )
+            result["failed"].append({"family": family, "template": template_name, "error": error_text})
+
+    if result["failed"]:
+        result["warnings"].append(f"{len(result['failed'])} template download(s) failed.")
+        logger.warning(
+            "Template prefetch summary node=%s storage=%s downloaded=%s already_present=%s failed=%s missing=%s",
+            node,
+            template_storage,
+            len(result["downloaded"]),
+            len(result["already_present"]),
+            len(result["failed"]),
+            len(result["missing"]),
+        )
+    return result
 
 
 def _build_proxmox_client_from_config(config: Dict[str, Any]):
@@ -2307,6 +2627,7 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
         "token_origin": config.get("token_origin", "manual"),
         "default_storage": config.get("default_storage"),
         "templates": config.get("templates") or [],
+        "template_downloads": config.get("template_downloads") or {},
         "last_verified": config.get("last_verified"),
         "network": base_network,
     }
@@ -2317,6 +2638,7 @@ def configure_infrastructure(
     token_value: Optional[str] = None,
     verify_ssl: bool = False,
     auto_create_admin_token: bool = False,
+    template_families: Any = None,
 ) -> Dict[str, Any]:
     token_origin = "manual"
     if auto_create_admin_token:
@@ -2351,6 +2673,15 @@ def configure_infrastructure(
         logger.warning("Bridge setup failed; reverting previous changes: %s", exc)
         _revert_bridge()
         raise
+    template_downloads = _download_requested_templates(
+        client,
+        node,
+        storages,
+        templates,
+        template_families,
+        default_storage=default_storage,
+    )
+    templates = _list_templates(client, node, storages)
     config = {
         "host": DEFAULT_HOST,
         "node": node,
@@ -2360,6 +2691,7 @@ def configure_infrastructure(
         "token_origin": token_origin,
         "verify_ssl": verify_ssl,
         "default_storage": default_storage,
+        "template_downloads": template_downloads,
         "last_verified": datetime.utcnow().isoformat() + "Z",
         "network": network,
         "node_status": status,
@@ -3242,6 +3574,7 @@ class ConfigureProxmoxInfraHandler(SyncHandler):
         token_value = message.get("token_value")
         verify_ssl = bool(message.get("verify_ssl"))
         auto_create_admin_token = token_mode in {"auto_admin", "auto", "auto_create"}
+        template_families = message.get("template_families")
 
         if not auto_create_admin_token and (not token_identifier or not token_value):
             raise ValueError("token_identifier and token_value are required when token_mode is manual")
@@ -3251,12 +3584,34 @@ class ConfigureProxmoxInfraHandler(SyncHandler):
             token_value=token_value,
             verify_ssl=verify_ssl,
             auto_create_admin_token=auto_create_admin_token,
+            template_families=template_families,
         )
+        template_downloads = snapshot.get("template_downloads") or {}
+        downloaded_count = len(template_downloads.get("downloaded") or [])
+        already_present_count = len(template_downloads.get("already_present") or [])
+        failed_count = len(template_downloads.get("failed") or [])
+        message_text = "Proxmox infrastructure configured"
+        requested_count = int(template_downloads.get("requested_count") or 0)
+        if requested_count > 0:
+            message_text = (
+                "Proxmox infrastructure configured "
+                f"(templates: downloaded {downloaded_count}, already present {already_present_count}, failed {failed_count})"
+            )
+            if failed_count:
+                first_failure = (template_downloads.get("failed") or [{}])[0]
+                family = str(first_failure.get("family") or "unknown")
+                template_name = str(first_failure.get("template") or "unknown")
+                error = _clip_command_output(str(first_failure.get("error") or ""), limit=220)
+                if error:
+                    message_text += f". First failure: {family}/{template_name}: {error}"
+                else:
+                    message_text += f". First failure: {family}/{template_name} (see infra.template_downloads.failed)"
         return {
             "event": "proxmox_infra_configured",
             "success": True,
-            "message": "Proxmox infrastructure configured",
+            "message": message_text,
             "infra": snapshot,
+            "template_downloads": template_downloads,
         }
 
 
