@@ -2064,6 +2064,15 @@ class _DeviceLookupError(ValueError):
     pass
 
 
+def _is_proxmox_missing_container_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "does not exist" in message
+        or "not found" in message
+        or "no such file or directory" in message
+    )
+
+
 def _resolve_vmid_for_device(device_id: str) -> int:
     _initialize_managed_containers_state()
     records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
@@ -3528,7 +3537,16 @@ class RemoveProxmoxContainerHandler(SyncHandler):
                         "request_id": request_id,
                         "infra": infra,
                     }
-        _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
+
+        try:
+            record = _read_container_record(vmid)
+        except FileNotFoundError:
+            record = {}
+        record_device_id = record.get("device_id")
+        if record_device_id and str(record_device_id) != child_device_id:
+            raise RuntimeError(
+                f"Container {vmid} is managed for device {record_device_id!r}, not {child_device_id!r}."
+            )
 
         # Clear Cloudflare forwarding rules for this container before deletion so
         # stale routes cannot remain after the managed record is removed.
@@ -3540,6 +3558,29 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             msg = str(exc).lower()
             if "cloudflare tunnel is not configured yet" not in msg and "domain or tunnel name missing" not in msg:
                 raise
+
+        try:
+            _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
+        except Exception as exc:
+            if not _is_proxmox_missing_container_error(exc):
+                raise
+            _remove_container_record(vmid)
+            infra = get_infra_snapshot()
+            return {
+                "event": "proxmox_container_action",
+                "action": "remove",
+                "success": True,
+                "ctid": str(vmid),
+                "message": f"Container {vmid} was already deleted; cleaned up local metadata.",
+                "details": {
+                    "stop_exitstatus": None,
+                    "delete_exitstatus": None,
+                },
+                "status": "deleted",
+                "child_device_id": child_device_id,
+                "request_id": request_id,
+                "infra": infra,
+            }
 
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
         delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
