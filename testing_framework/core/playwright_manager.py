@@ -236,8 +236,28 @@ class PlaywrightManager:
             await self.page.goto(login_url)
             await self.log_action("navigate_to_login", {"url": login_url})
             await self.take_screenshot("login_page")
+            await self.page.wait_for_load_state("domcontentloaded")
 
             await self.log_action("login_start", {"username": self.username})
+
+            # New login UI can keep credential fields inside a collapsed section.
+            # Expand email login first if the username field is present but hidden.
+            username_field = self.page.locator('input[name="username"]').first
+            if await username_field.count() > 0 and not await username_field.is_visible():
+                expand_selectors = [
+                    'button[data-bs-target="#email-login-section"]',
+                    'button:has-text("Continue with email")',
+                    '[aria-controls="email-login-section"]'
+                ]
+                for selector in expand_selectors:
+                    try:
+                        toggle = self.page.locator(selector).first
+                        if await toggle.is_visible():
+                            await toggle.click()
+                            await self.log_action("expand_email_login", {"selector": selector})
+                            break
+                    except:
+                        continue
 
             # Look for common login form elements
             username_selectors = [
