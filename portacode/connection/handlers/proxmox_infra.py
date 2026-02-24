@@ -1796,11 +1796,13 @@ def _build_bootstrap_steps(
                 "cmd": f"python3 -m venv --clear {PORTACODE_VENV_DIR}",
                 "retries": 0,
             },
-            {
-                "name": "venv_pip_upgrade",
-                "cmd": f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade pip",
-                "retries": 0,
-            },
+            # Disabled to reduce provisioning time. Re-enable if pip/runtime compatibility
+            # issues are observed with the template's default pip version.
+            # {
+            #     "name": "venv_pip_upgrade",
+            #     "cmd": f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade pip",
+            #     "retries": 0,
+            # },
             {
                 "name": "install_portacode",
                 "cmd": f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade portacode",
@@ -2214,7 +2216,7 @@ def _resolve_portacode_cli_path(vmid: int, user: str) -> str:
     return "portacode"
 
 
-def _enforce_service_venv_execstart(vmid: int, user: str) -> None:
+def _enforce_service_venv_execstart(vmid: int, user: str) -> Dict[str, bool]:
     """Ensure service launchers use venv python when available in the container.
 
     This provides forward compatibility while some deployed portacode versions still
@@ -2225,19 +2227,32 @@ def _enforce_service_venv_execstart(vmid: int, user: str) -> None:
     command = (
         "if [ -x {py} ]; then "
         "  if [ -f /etc/systemd/system/portacode.service ]; then "
-        "    sed -i 's#^ExecStart=.*#ExecStart={py} -m portacode connect --non-interactive#' "
-        "      /etc/systemd/system/portacode.service && "
-        "    /bin/systemctl daemon-reload && "
-        "    /bin/systemctl restart portacode.service; "
+        "    expected='ExecStart={py} -m portacode connect --non-interactive'; "
+        "    if grep -Fqx \"$expected\" /etc/systemd/system/portacode.service; then "
+        "      echo 'SYSTEMD_ALREADY_VENV=1'; "
+        "    else "
+        "      sed -i 's#^ExecStart=.*#ExecStart={py} -m portacode connect --non-interactive#' "
+        "        /etc/systemd/system/portacode.service && "
+        "      /bin/systemctl daemon-reload && "
+        "      /bin/systemctl restart portacode.service && "
+        "      echo 'SYSTEMD_RESTARTED=1'; "
+        "    fi; "
         "  fi; "
         "  if [ -f /usr/local/share/portacode/connect_service.sh ] && command -v rc-service >/dev/null 2>&1; then "
         "    home=$(getent passwd {quoted_user} 2>/dev/null | cut -d: -f6); "
         "    if [ -z \"$home\" ]; then home={default_home}; fi; "
-        "    printf '%s\\n' '#!/bin/sh' \"cd \\\"$home\\\"\" "
-        "      'exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1' "
-        "      >/usr/local/share/portacode/connect_service.sh && "
-        "    chmod 755 /usr/local/share/portacode/connect_service.sh && "
-        "    rc-service portacode restart >/dev/null 2>&1 || true; "
+        "    expected_script='exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1'; "
+        "    expected_script_quoted='exec \"{py}\" -m portacode connect --non-interactive >> \"/var/log/portacode/connect.log\" 2>&1'; "
+        "    if grep -Fqx \"$expected_script\" /usr/local/share/portacode/connect_service.sh || "
+        "       grep -Fqx \"$expected_script_quoted\" /usr/local/share/portacode/connect_service.sh; then "
+        "      echo 'OPENRC_ALREADY_VENV=1'; "
+        "    else "
+        "      printf '%s\\n' '#!/bin/sh' \"cd \\\"$home\\\"\" "
+        "        'exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1' "
+        "        >/usr/local/share/portacode/connect_service.sh && "
+        "      chmod 755 /usr/local/share/portacode/connect_service.sh && "
+        "      echo 'OPENRC_UPDATED_NO_RESTART=1'; "
+        "    fi; "
         "  fi; "
         "fi"
     ).format(
@@ -2252,6 +2267,14 @@ def _enforce_service_venv_execstart(vmid: int, user: str) -> None:
             "Failed to enforce venv-backed service launch command: "
             f"{res.get('stderr') or res.get('stdout')}"
         )
+    output = f"{res.get('stdout') or ''}\n{res.get('stderr') or ''}"
+    return {
+        "systemd_restarted": "SYSTEMD_RESTARTED=1" in output,
+        "openrc_restarted": "OPENRC_RESTARTED=1" in output,
+        "systemd_already_venv": "SYSTEMD_ALREADY_VENV=1" in output,
+        "openrc_already_venv": "OPENRC_ALREADY_VENV=1" in output,
+        "openrc_updated_no_restart": "OPENRC_UPDATED_NO_RESTART=1" in output,
+    }
 
 
 def _run_pct_check(vmid: int, cmd: str) -> Dict[str, Any]:
@@ -2908,6 +2931,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
         device_public_key = (message.get("device_public_key") or "").strip()
         device_private_key = (message.get("device_private_key") or "").strip()
         has_device_keypair = bool(device_public_key and device_private_key)
+        if not has_device_keypair:
+            raise ValueError(
+                "device_public_key and device_private_key are required for provisioning; "
+                "service-first provisioning does not run temporary portacode connect."
+            )
         config_guess = _load_config()
         template_candidates = config_guess.get("templates") or []
         template_hint = (message.get("template") or (template_candidates[0] if template_candidates else "")).strip()
@@ -2918,7 +2946,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             bootstrap_user,
             bootstrap_password,
             bootstrap_ssh_key,
-            include_portacode_connect=not has_device_keypair,
+            include_portacode_connect=False,
             package_manager=package_manager,
             project_paths=project_paths,
         )
@@ -3226,7 +3254,12 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         )
                         raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-                    _enforce_service_venv_execstart(vmid, payload_local["username"])
+                    venv_service_adjustment = _enforce_service_venv_execstart(vmid, payload_local["username"])
+                    logger.info(
+                        "create_proxmox_container: service venv enforcement vmid=%s details=%s",
+                        vmid,
+                        json.dumps(venv_service_adjustment, sort_keys=True),
+                    )
 
                     _emit_progress_event(
                         self,
@@ -3395,7 +3428,12 @@ class StartPortacodeServiceHandler(SyncHandler):
             )
             raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-        _enforce_service_venv_execstart(vmid, user)
+        venv_service_adjustment = _enforce_service_venv_execstart(vmid, user)
+        logger.info(
+            "start_portacode_service: service venv enforcement vmid=%s details=%s",
+            vmid,
+            json.dumps(venv_service_adjustment, sort_keys=True),
+        )
 
         _emit_progress_event(
             self,

@@ -90,6 +90,7 @@ services:
     command: ["python", "manage.py", "run_automation_workers", "--workers", "3"]
     env_file:
       - main.env
+      - automation-worker.env
     depends_on:
       db:
         condition: service_healthy
