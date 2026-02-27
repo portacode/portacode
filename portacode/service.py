@@ -29,6 +29,8 @@ import shutil
 import pwd
 import tempfile
 
+from .exit_codes import AUTH_REJECTED_EXIT_CODE
+
 __all__ = [
     "ServiceManager",
     "get_manager",
@@ -117,8 +119,6 @@ class _SystemdUserService:
         current_shell = os.getenv("SHELL", "/bin/bash")
         
         if self.system_mode:
-            sudo_needed = os.geteuid() != 0
-            prefix = ["sudo"] if sudo_needed else []
             unit = textwrap.dedent(f"""
                 [Unit]
                 Description=Portacode persistent connection (system-wide)
@@ -131,6 +131,7 @@ class _SystemdUserService:
                 Environment=SHELL={current_shell}
                 ExecStart={self.python} -m portacode connect --non-interactive
                 Restart=on-failure
+                RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5
 
                 [Install]
@@ -147,6 +148,7 @@ class _SystemdUserService:
                 Environment=SHELL={current_shell}
                 ExecStart={self.python} -m portacode.cli connect --non-interactive
                 Restart=on-failure
+                RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5
 
                 [Install]
@@ -256,8 +258,6 @@ class _OpenRCService:
             pidfile="/run/portacode.pid"
             directory="{self.home}"
             supervisor=supervise-daemon
-            respawn_delay=5
-            respawn_max=0
 
             depend() {{
                 need net
@@ -289,7 +289,18 @@ class _OpenRCService:
         script = textwrap.dedent(f"""
             #!/bin/sh
             cd "{self.home}"
-            exec "{self.python}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+            while true; do
+                "{self.python}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+                rc="$?"
+                if [ "$rc" -eq {AUTH_REJECTED_EXIT_CODE} ]; then
+                    echo "Portacode authentication rejected; stopping service restart loop." >> "{self.log_path}"
+                    exit 0
+                fi
+                if [ "$rc" -eq 0 ]; then
+                    exit 0
+                fi
+                sleep 5
+            done
         """).lstrip()
         tmp_path = Path(tempfile.gettempdir()) / f"portacode-wrapper-{os.getpid()}"
         tmp_path.write_text(script)
@@ -362,6 +373,8 @@ class _LaunchdService:
             / "Library/LaunchAgents"
             / f"{self.LABEL}.plist"
         )
+        self.script_path = Path.home() / ".local" / "share" / "portacode" / "connect_service.sh"
+        self.log_path = Path.home() / ".local" / "share" / "portacode" / "connect.log"
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         cmd = ["launchctl", *args]
@@ -369,6 +382,27 @@ class _LaunchdService:
 
     def install(self) -> None:
         self.plist_path.parent.mkdir(parents=True, exist_ok=True)
+        self.script_path.parent.mkdir(parents=True, exist_ok=True)
+        script = textwrap.dedent(
+            f"""
+            #!/bin/sh
+            cd "$HOME" || exit 1
+            while true; do
+                "{sys.executable}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+                rc="$?"
+                if [ "$rc" -eq {AUTH_REJECTED_EXIT_CODE} ]; then
+                    echo "Portacode authentication rejected; stopping service restart loop." >> "{self.log_path}"
+                    exit 0
+                fi
+                if [ "$rc" -eq 0 ]; then
+                    exit 0
+                fi
+                sleep 5
+            done
+            """
+        ).lstrip()
+        self.script_path.write_text(script)
+        self.script_path.chmod(0o755)
         plist = textwrap.dedent(
             f"""
             <?xml version="1.0" encoding="UTF-8"?>
@@ -378,13 +412,13 @@ class _LaunchdService:
                 <key>Label</key><string>{self.LABEL}</string>
                 <key>ProgramArguments</key>
                 <array>
-                    <string>{sys.executable}</string>
-                    <string>-m</string><string>portacode</string>
-                    <string>connect</string>
-                    <string>--non-interactive</string>
+                    <string>{self.script_path}</string>
                 </array>
                 <key>RunAtLoad</key><true/>
-                <key>KeepAlive</key><true/>
+                <key>KeepAlive</key>
+                <dict>
+                    <key>SuccessfulExit</key><false/>
+                </dict>
             </dict>
             </plist>
             """
@@ -396,6 +430,8 @@ class _LaunchdService:
         self._run("unload", "-w", str(self.plist_path))
         if self.plist_path.exists():
             self.plist_path.unlink()
+        if self.script_path.exists():
+            self.script_path.unlink()
 
     def start(self) -> None:
         self._run("start", self.LABEL)
@@ -451,7 +487,13 @@ class _WindowsTask:
         script = (
             "@echo off\r\n"
             "cd /d %USERPROFILE%\r\n"
+            ":loop\r\n"
             f"{py_cmd} -m portacode connect --non-interactive >> \"%USERPROFILE%\\.local\\share\\portacode\\connect.log\" 2>>&1\r\n"
+            "set \"RC=%ERRORLEVEL%\"\r\n"
+            f"if \"%RC%\"==\"{AUTH_REJECTED_EXIT_CODE}\" exit /b 0\r\n"
+            "if \"%RC%\"==\"0\" exit /b 0\r\n"
+            "timeout /t 5 /nobreak >nul\r\n"
+            "goto loop\r\n"
         )
         self._script_path.write_text(script)
 

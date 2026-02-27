@@ -17,8 +17,12 @@ from websockets import WebSocketClientProtocol
 from ..keypair import KeyPair
 from .multiplex import Multiplexer
 from ..logging_categories import get_categorized_logger, LogCategory
+from ..exit_codes import AUTH_REJECTED_EXIT_CODE
 
 logger = get_categorized_logger(__name__)
+
+class AuthenticationRejectedError(RuntimeError):
+    """Raised when gateway authentication is rejected for this device key."""
 
 
 class ConnectionManager:
@@ -118,6 +122,9 @@ class ConnectionManager:
                 logger.warning("Connection error: %s", LogCategory.CONNECTION, exc)
                 # Remove the max_retries limit - keep trying indefinitely
                 # The service manager (systemd) will handle any necessary restarts
+            except AuthenticationRejectedError as exc:
+                logger.error("Authentication rejected by gateway: %s", LogCategory.CONNECTION, exc)
+                sys.exit(AUTH_REJECTED_EXIT_CODE)
             except Exception as exc:
                 # For truly fatal errors (like authentication failures), 
                 # log and exit cleanly so systemd can restart the service
@@ -137,7 +144,7 @@ class ConnectionManager:
             challenge = data["challenge"]
         except Exception:
             # Not a challenge, must be an error
-            raise RuntimeError(f"Gateway rejected authentication: {response}")
+            raise AuthenticationRejectedError(f"Gateway rejected authentication: {response}")
         # Step 3: Sign challenge and send signature
         signature = self.keypair.sign_challenge(challenge)
         signature_b64 = base64.b64encode(signature).decode()
@@ -145,7 +152,7 @@ class ConnectionManager:
         # Step 4: Receive final status
         status = await self.websocket.recv()
         if status != "ok":
-            raise RuntimeError(f"Gateway rejected authentication: {status}")
+            raise AuthenticationRejectedError(f"Gateway rejected authentication: {status}")
         # Print success message in green and show close instructions
         try:
             import click
