@@ -2950,7 +2950,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             package_manager=package_manager,
             project_paths=project_paths,
         )
-        total_steps = 3 + len(bootstrap_steps) + 2
+        total_steps = 4 + len(bootstrap_steps) + 2
         current_step_index = 1
 
         def _run_lifecycle_step(
@@ -3031,30 +3031,53 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 )
             return config
 
-        config = _run_lifecycle_step(
-            "validate_environment",
-            "Validating infrastructure",
-            "Checking token, permissions, and bridge setup…",
-            "Infrastructure validated.",
-            _validate_environment,
-        )
+        try:
+            config = _run_lifecycle_step(
+                "validate_environment",
+                "Validating infrastructure",
+                "Checking token, permissions, and bridge setup…",
+                "Infrastructure validated.",
+                _validate_environment,
+            )
 
-        node = config.get("node") or DEFAULT_NODE_NAME
-        payload = _build_container_payload(message, config)
-        payload["cpulimit"] = float(payload["cpus"])
-        payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
-        payload["memory"] = int(payload["ram_mib"])
-        payload["node"] = node
+            node = config.get("node") or DEFAULT_NODE_NAME
+            payload = _build_container_payload(message, config)
+            payload["cpulimit"] = float(payload["cpus"])
+            payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
+            payload["memory"] = int(payload["ram_mib"])
+            payload["node"] = node
 
-        reservation_id = _reserve_container_resources(
-            payload, device_id=device_id, request_id=request_id
-        )
-        provisioning_id = secrets.token_hex(6)
-        payload["description"] = _build_managed_description(
-            payload.get("description"),
-            device_id=device_id,
-            provisioning_id=provisioning_id,
-        )
+            reservation_id = _run_lifecycle_step(
+                "reserve_resources",
+                "Reserving capacity",
+                "Reserving CPU, RAM, and disk capacity…",
+                "Capacity reserved.",
+                lambda: _reserve_container_resources(
+                    payload, device_id=device_id, request_id=request_id
+                ),
+            )
+            provisioning_id = secrets.token_hex(6)
+            payload["description"] = _build_managed_description(
+                payload.get("description"),
+                device_id=device_id,
+                provisioning_id=provisioning_id,
+            )
+        except Exception as exc:
+            # Ensure early provisioning failures still emit a terminal event that the
+            # dashboard and gateway can use to finalize state and cleanup the device row.
+            _emit_host_event(
+                self,
+                {
+                    "event": "proxmox_container_created",
+                    "success": False,
+                    "message": str(exc),
+                    "device_id": device_id,
+                    "on_behalf_of_device": device_id,
+                    "bypass_session_gate": True,
+                    "request_id": request_id,
+                },
+            )
+            raise
 
         def _provision_background() -> None:
             nonlocal current_step_index
