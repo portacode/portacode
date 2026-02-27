@@ -24,7 +24,7 @@ from .keypair import (
 )
 from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
-from .updater import build_pip_install_command
+from .updater import build_pip_install_command, run_pip_install_command
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
@@ -638,8 +638,18 @@ def restart_command(method: str, verbose: bool) -> None:
 def set_version_command(version: str) -> None:
     """Install a specific Portacode version and restart the system service."""
     click.echo(f"Installing Portacode {version}…")
-    result = subprocess.run(
-        build_pip_install_command(version=version), capture_output=True, text=True
+    interactive_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive_tty and os.geteuid() != 0:
+        click.echo(
+            click.style(
+                "[sudo] If required, Portacode will attempt passwordless sudo first and then prompt for your password.",
+                fg="yellow",
+            )
+        )
+    result = run_pip_install_command(
+        build_pip_install_command(version=version),
+        allow_sudo_fallback=True,
+        interactive_sudo=interactive_tty,
     )
     if result.returncode != 0:
         error_msg = (result.stderr or result.stdout or "").strip() or "unknown error"

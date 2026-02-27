@@ -1,10 +1,9 @@
 """Update handler for Portacode CLI."""
 
 import logging
-import subprocess
 from typing import Any, Dict, Optional
 
-from portacode.updater import build_pip_install_command
+from portacode.updater import build_pip_install_command, run_pip_install_command
 from .base import AsyncHandler
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,11 @@ class UpdatePortacodeHandler(AsyncHandler):
         try:
             logger.info("Starting Portacode CLI update...")
             pip_cmd = build_pip_install_command()
-            result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=120)
+            result = run_pip_install_command(
+                pip_cmd,
+                allow_sudo_fallback=True,
+                interactive_sudo=False,
+            )
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
@@ -50,12 +53,6 @@ class UpdatePortacodeHandler(AsyncHandler):
             request_restart(method="auto", in_service=True)
             return None
 
-        except subprocess.TimeoutExpired:
-            return {
-                "event": "update_portacode_response",
-                "success": False,
-                "error": "Update timed out after 120 seconds",
-            }
         except Exception as e:
             logger.exception("Update failed with exception")
             return {
