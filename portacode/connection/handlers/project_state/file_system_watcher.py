@@ -6,8 +6,11 @@ files or directories are modified.
 """
 
 import asyncio
+import faulthandler
 import logging
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Optional, Set
 
@@ -125,6 +128,12 @@ class FileSystemWatcher:
         if normalized_name == '.git':
             logger.debug("Skipping watch for .git path: %s", path)
             return
+        if not os.path.isdir(path):
+            logger.debug("Skipping watch for non-directory path: %s", path)
+            return
+        if not os.access(path, os.R_OK | os.X_OK):
+            logger.debug("Skipping watch due to insufficient access: %s", path)
+            return
 
         if path not in self.watched_paths:
             try:
@@ -151,16 +160,54 @@ class FileSystemWatcher:
             # Actually unschedule the watch using stored handle
             watch_handle = self.watch_handles.get(path)
             if watch_handle:
+                start = time.monotonic()
+                logger.info(
+                    "About to unschedule watch: path=%s handle=%s observer_alive=%s watched_paths=%d watch_handles=%d",
+                    path,
+                    id(watch_handle),
+                    bool(self.observer and self.observer.is_alive()),
+                    len(self.watched_paths),
+                    len(self.watch_handles),
+                )
                 try:
+                    # If unschedule blocks silently, force a thread traceback dump for diagnosis.
+                    faulthandler.dump_traceback_later(8.0, file=sys.stderr, repeat=False)
                     self.observer.unschedule(watch_handle)
-                    logger.info("Successfully unscheduled watch for: %s", path)
+                    logger.info(
+                        "Successfully unscheduled watch for: %s (elapsed=%.3fs)",
+                        path,
+                        max(time.monotonic() - start, 0.0),
+                    )
                 except Exception as e:
-                    logger.error("Error unscheduling watch for %s: %s", path, e)
+                    logger.exception(
+                        "Error unscheduling watch for %s after %.3fs: %s",
+                        path,
+                        max(time.monotonic() - start, 0.0),
+                        e,
+                    )
                 finally:
+                    try:
+                        faulthandler.cancel_dump_traceback_later()
+                    except Exception:
+                        pass
                     self.watch_handles.pop(path, None)
+            else:
+                logger.warning(
+                    "Path %s marked as watched but has no watch handle; watched_paths=%d watch_handles=%d",
+                    path,
+                    len(self.watched_paths),
+                    len(self.watch_handles),
+                )
 
             self.watched_paths.discard(path)
             logger.debug("Stopped watching path: %s", path)
+        else:
+            logger.debug(
+                "stop_watching called for non-watched path: %s (watched_paths=%d watch_handles=%d)",
+                path,
+                len(self.watched_paths),
+                len(self.watch_handles),
+            )
     
     def stop_all(self):
         """Stop all file watching."""

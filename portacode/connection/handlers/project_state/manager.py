@@ -281,6 +281,12 @@ class ProjectStateManager:
             with os.scandir(project_state.project_folder_path) as entries:
                 for entry in entries:
                     if entry.is_dir() and entry.name != '.git':  # Only exclude .git, allow other dot folders
+                        if not os.access(entry.path, os.R_OK | os.X_OK):
+                            logger.debug(
+                                "Skipping monitored folder due to insufficient access: %s",
+                                entry.path,
+                            )
+                            continue
                         project_state.monitored_folders.append(
                             MonitoredFolder(folder_path=entry.path, is_expanded=False)
                         )
@@ -350,6 +356,12 @@ class ProjectStateManager:
             with os.scandir(parent_folder_path) as entries:
                 for entry in entries:
                     if entry.is_dir() and entry.name != '.git':  # Only exclude .git, allow other dot folders
+                        if not os.access(entry.path, os.R_OK | os.X_OK):
+                            logger.debug(
+                                "Skipping monitored folder due to insufficient access: %s",
+                                entry.path,
+                            )
+                            continue
                         # logger.info("Found subdirectory: %s", entry.path)
                         if entry.path not in existing_paths:
                             logger.info("Adding new monitored folder: %s", entry.path)
@@ -1210,13 +1222,52 @@ class ProjectStateManager:
                     logger.debug("Removed %d pending change paths for session %s during cleanup", len(removed), client_session_id)
             
             # Stop watching all monitored folders for this project
-            for monitored_folder in project_state.monitored_folders:
+            total_monitored = len(project_state.monitored_folders)
+            logger.info(
+                "Cleanup starting watcher unschedule loop: session=%s project_path=%s monitored_folders=%d watched_paths=%d watch_handles=%d",
+                client_session_id,
+                project_state.project_folder_path,
+                total_monitored,
+                len(self.file_watcher.watched_paths) if self.file_watcher else -1,
+                len(self.file_watcher.watch_handles) if self.file_watcher else -1,
+            )
+            cleanup_loop_start = time.monotonic()
+            for idx, monitored_folder in enumerate(project_state.monitored_folders, start=1):
+                per_folder_start = time.monotonic()
+                logger.info(
+                    "Cleanup unschedule start: session=%s idx=%d/%d path=%s",
+                    client_session_id,
+                    idx,
+                    total_monitored,
+                    monitored_folder.folder_path,
+                )
                 self.file_watcher.stop_watching(monitored_folder.folder_path)
+                logger.info(
+                    "Cleanup unschedule done: session=%s idx=%d/%d path=%s elapsed=%.3fs",
+                    client_session_id,
+                    idx,
+                    total_monitored,
+                    monitored_folder.folder_path,
+                    max(time.monotonic() - per_folder_start, 0.0),
+                )
+            logger.info(
+                "Cleanup watcher unschedule loop completed: session=%s total_elapsed=%.3fs",
+                client_session_id,
+                max(time.monotonic() - cleanup_loop_start, 0.0),
+            )
             
             # Stop watching .git directory if it was being monitored
             if project_state.is_git_repo:
                 git_dir_path = os.path.join(project_state.project_folder_path, '.git')
+                git_unschedule_start = time.monotonic()
+                logger.info("Cleanup unschedule start (git dir): session=%s path=%s", client_session_id, git_dir_path)
                 self.file_watcher.stop_watching(git_dir_path)
+                logger.info(
+                    "Cleanup unschedule done (git dir): session=%s path=%s elapsed=%.3fs",
+                    client_session_id,
+                    git_dir_path,
+                    max(time.monotonic() - git_unschedule_start, 0.0),
+                )
             
             self.projects.pop(client_session_id, None)
             logger.info("Cleaned up project state: %s", client_session_id)
