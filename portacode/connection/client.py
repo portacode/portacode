@@ -47,6 +47,8 @@ class ConnectionManager:
     CLOCK_SYNC_INITIAL_REQUESTS = 5
     CLOCK_SYNC_TIMEOUT = 20.0
     CLOCK_SYNC_MAX_FAILURES = 3
+    WS_PING_INTERVAL = 60.0
+    WS_PING_TIMEOUT = 20.0
 
     def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None, debug: bool = False):
         self.gateway_url = gateway_url
@@ -89,7 +91,11 @@ class ConnectionManager:
                     logger.warning("Reconnecting in %.1f s (attempt %d)…", LogCategory.CONNECTION, delay, attempt)
                     await asyncio.sleep(delay)
                 logger.info("Connecting to gateway at %s", LogCategory.CONNECTION, self.gateway_url)
-                async with websockets.connect(self.gateway_url) as ws:
+                async with websockets.connect(
+                    self.gateway_url,
+                    ping_interval=self.WS_PING_INTERVAL,
+                    ping_timeout=self.WS_PING_TIMEOUT,
+                ) as ws:
                     # Reset attempt counter after successful connection
                     attempt = 0
 
@@ -213,6 +219,7 @@ class ConnectionManager:
             self._clock_sync_task.cancel()
         self._clock_sync_task = asyncio.create_task(self._clock_sync_loop())
         self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
+        self._clock_sync_failures = 0
 
     async def _stop_clock_sync_task(self) -> None:
         if self._clock_sync_task:
@@ -235,6 +242,9 @@ class ConnectionManager:
                 self._remaining_initial_syncs -= 1
                 if self._remaining_initial_syncs > 0:
                     await asyncio.sleep(self.CLOCK_SYNC_FAST_INTERVAL)
+            while not self._stop_event.is_set():
+                await asyncio.sleep(self.CLOCK_SYNC_INTERVAL)
+                await self._perform_clock_sync()
         except asyncio.CancelledError:
             pass
 
