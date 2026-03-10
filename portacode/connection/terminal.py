@@ -74,6 +74,7 @@ from .handlers.project_aware_file_handlers import (
     ProjectAwareFolderCreateHandler,
 )
 from .handlers.session import SessionManager
+from .webmin_proxy_config import apply_turnkey_webmin_proxy_config
 
 logger = logging.getLogger(__name__)
 EXPOSED_SERVICES_MONITOR_PATH = "/etc/portacode/exposed_services.json"
@@ -684,6 +685,10 @@ class TerminalManager:
                 # Keep the running agent env in sync so newly spawned PTY sessions
                 # inherit updated PORTACODE_* variables immediately.
                 self._apply_exposed_services_env_to_process(services)
+                try:
+                    apply_turnkey_webmin_proxy_config(services)
+                except Exception as exc:
+                    logger.warning("Failed to auto-configure Webmin for exposed services: %s", exc)
 
                 if not self._client_session_manager.has_interested_clients():
                     continue
