@@ -20,24 +20,31 @@ class ProjectAwareFileWriteHandler(SyncHandler):
     
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """Write file contents and update project state tabs."""
-        file_path = message.get("path")
-        content = message.get("content", "")
-        # Optimistic lock: ensure the client saw the correct file state
-        expected_mtime = message.get("expected_mtime")
-        if expected_mtime is not None:
-            try:
-                current_mtime = os.path.getmtime(file_path)
-            except FileNotFoundError:
-                raise ValueError(f"File not found: {file_path}")
-            if current_mtime != expected_mtime:
-                raise ValueError(
-                    f"File was modified on disk (current {current_mtime} != expected {expected_mtime})"
-                )
-        
-        if not file_path:
-            raise ValueError("path parameter is required")
-        
         try:
+            file_path = message.get("path")
+            content = message.get("content", "")
+            response = {
+                "event": "file_write_response",
+                "path": file_path,
+                "bytes_written": 0,
+                "success": False,
+            }
+
+            if not file_path:
+                raise ValueError("path parameter is required")
+
+            # Optimistic lock: ensure the client saw the correct file state
+            expected_mtime = message.get("expected_mtime")
+            if expected_mtime is not None:
+                try:
+                    current_mtime = os.path.getmtime(file_path)
+                except FileNotFoundError:
+                    raise ValueError(f"File not found: {file_path}")
+                if current_mtime != expected_mtime:
+                    raise ValueError(
+                        f"File was modified on disk (current {current_mtime} != expected {expected_mtime})"
+                    )
+
             # Create parent directories if they don't exist
             Path(file_path).parent.mkdir(parents=True, exist_ok=True)
             
@@ -72,16 +79,25 @@ class ProjectAwareFileWriteHandler(SyncHandler):
                 logger.warning(f"Failed to update project state after file write: {e}")
                 # Don't fail the file write just because project state update failed
             
-            return {
-                "event": "file_write_response",
-                "path": file_path,
-                "bytes_written": len(content.encode('utf-8')),
-                "success": True,
-            }
+            response["bytes_written"] = len(content.encode('utf-8'))
+            response["success"] = True
+            return response
         except PermissionError:
-            raise RuntimeError(f"Permission denied: {file_path}")
-        except OSError as e:
-            raise RuntimeError(f"Failed to write file: {e}")
+            error_message = f"Permission denied: {file_path}"
+        except OSError as exc:
+            error_message = f"Failed to write file: {exc}"
+        except Exception as exc:
+            error_message = str(exc)
+
+        logger.warning("Project-aware file write failed for %s: %s", file_path, error_message)
+        return {
+            "event": "file_write_response",
+            "path": file_path,
+            "bytes_written": 0,
+            "success": False,
+            "error": error_message,
+            "message": error_message,
+        }
 
 
 class ProjectAwareFileCreateHandler(SyncHandler):

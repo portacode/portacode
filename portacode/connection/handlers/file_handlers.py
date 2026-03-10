@@ -134,29 +134,44 @@ class FileWriteHandler(SyncHandler):
     
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """Write file contents."""
-        file_path = message.get("path")
-        content = message.get("content", "")
-        
-        if not file_path:
-            raise ValueError("path parameter is required")
-        
         try:
+            file_path = message.get("path")
+            content = message.get("content", "")
+            response = {
+                "event": "file_write_response",
+                "path": file_path,
+                "bytes_written": 0,
+                "success": False,
+            }
+
+            if not file_path:
+                raise ValueError("path parameter is required")
+
             # Create parent directories if they don't exist
             Path(file_path).parent.mkdir(parents=True, exist_ok=True)
             
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            return {
-                "event": "file_write_response",
-                "path": file_path,
-                "bytes_written": len(content.encode('utf-8')),
-                "success": True,
-            }
+            response["bytes_written"] = len(content.encode('utf-8'))
+            response["success"] = True
+            return response
         except PermissionError:
-            raise RuntimeError(f"Permission denied: {file_path}")
-        except OSError as e:
-            raise RuntimeError(f"Failed to write file: {e}")
+            error_message = f"Permission denied: {file_path}"
+        except OSError as exc:
+            error_message = f"Failed to write file: {exc}"
+        except Exception as exc:
+            error_message = str(exc)
+
+        logger.warning("File write failed for %s: %s", file_path, error_message)
+        return {
+            "event": "file_write_response",
+            "path": file_path,
+            "bytes_written": 0,
+            "success": False,
+            "error": error_message,
+            "message": error_message,
+        }
 
 
 class DirectoryListHandler(SyncHandler):
