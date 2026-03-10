@@ -79,6 +79,7 @@ DEFAULT_HOST = "localhost"
 DEFAULT_NODE_NAME = os.uname().nodename.split(".", 1)[0]
 DEFAULT_BRIDGE = "vmbr1"
 PORTACODE_VENV_DIR = "/opt/portacode-venv"
+PORTACODE_GLOBAL_CLI_PATH = "/usr/local/bin/portacode"
 PROXMOX_CREATE_SUBMIT_TIMEOUT_S = 90
 PROXMOX_TASK_WAIT_TIMEOUT_S = 900
 PROVISIONING_HEARTBEAT_INTERVAL_S = 15
@@ -1858,9 +1859,18 @@ def _build_bootstrap_steps(
                 "retries": 0,
             },
             {
+                "name": "ensure_global_portacode_cli",
+                "cmd": (
+                    f"install -d -m 755 {os.path.dirname(PORTACODE_GLOBAL_CLI_PATH)} && "
+                    f"ln -sfn {PORTACODE_VENV_DIR}/bin/portacode {PORTACODE_GLOBAL_CLI_PATH} && "
+                    f"test -x {PORTACODE_GLOBAL_CLI_PATH}"
+                ),
+                "retries": 0,
+            },
+            {
                 "name": "ensure_portacode_path",
                 "cmd": (
-                    f"printf '%s\\n' 'export PATH={PORTACODE_VENV_DIR}/bin:/usr/local/bin:$PATH' "
+                    f"printf '%s\\n' 'export PATH=/usr/local/bin:{PORTACODE_VENV_DIR}/bin:$PATH' "
                     ">/etc/profile.d/portacode_path.sh"
                 ),
                 "retries": 0,

@@ -12,6 +12,12 @@ class ProxmoxInfraHandlerTests(TestCase):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=True)
         self.assertTrue(any(step.get("name") == "portacode_connect" for step in steps))
 
+    def test_build_bootstrap_steps_exposes_portacode_globally_from_venv(self):
+        steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=False)
+        symlink_step = next(step for step in steps if step.get("name") == "ensure_global_portacode_cli")
+        self.assertIn("/usr/local/bin/portacode", symlink_step["cmd"])
+        self.assertIn("/opt/portacode-venv/bin/portacode", symlink_step["cmd"])
+
     def test_build_bootstrap_steps_skips_portacode_connect_when_requested(self):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=False)
         self.assertFalse(any(step.get("name") == "portacode_connect" for step in steps))
