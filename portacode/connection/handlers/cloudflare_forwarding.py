@@ -396,13 +396,16 @@ def _normalize_container_rule_specs(
             raise ValueError("each container rule must be an object")
         label = _normalize_subdomain_label(rule.get("subdomain"), device_id, index)
         raw_port = rule.get("port")
+        protocol = str(rule.get("protocol") or "http").strip().lower()
+        if protocol not in {"http", "https"}:
+            raise ValueError("container rule protocol must be http or https")
         try:
             port = int(str(raw_port).strip())
         except (TypeError, ValueError):
             raise ValueError("each container rule requires a valid integer port") from None
         if port < 1 or port > 65535:
             raise ValueError("container rule ports must be between 1 and 65535")
-        normalized.append({"subdomain": label, "port": port})
+        normalized.append({"subdomain": label, "port": port, "protocol": protocol})
     return normalized
 
 
@@ -682,7 +685,7 @@ def set_container_forwarding_rules(
         exposed_ports: List[Dict[str, Any]] = []
         for spec in normalized_specs:
             hostname = f"{spec['subdomain']}.{domain}"
-            destination = f"http://[{normalized_device_id}]:{spec['port']}"
+            destination = f"{spec['protocol']}://[{normalized_device_id}]:{spec['port']}"
             new_rules.append(
                 {
                     "hostname": hostname,
@@ -693,6 +696,7 @@ def set_container_forwarding_rules(
             exposed_ports.append(
                 {
                     "port": spec["port"],
+                    "protocol": spec["protocol"],
                     "hostname": hostname,
                     "url": f"https://{hostname}",
                 }
@@ -778,31 +782,48 @@ class ConfigureProxmoxContainerExposePortsHandler(SyncHandler):
         if raw_ports is None:
             raw_ports = []
         if not isinstance(raw_ports, list):
-            raise ValueError("expose_ports must be a list of integers")
+            raise ValueError("expose_ports must be a list")
 
-        seen: set[int] = set()
-        normalized_ports: List[int] = []
+        seen: set[tuple[int, str]] = set()
+        normalized_ports: List[Dict[str, Any]] = []
         for raw in raw_ports:
+            protocol = "http"
+            port_value = raw
+            if isinstance(raw, dict):
+                if "port" not in raw:
+                    raise ValueError("each expose_ports object must include a port")
+                port_value = raw.get("port")
+                raw_protocol = str(raw.get("protocol") or "http").strip().lower()
+                if raw_protocol not in {"http", "https"}:
+                    raise ValueError("expose_ports protocol must be http or https")
+                protocol = raw_protocol
             try:
-                port = int(str(raw).strip())
+                port = int(str(port_value).strip())
             except (TypeError, ValueError):
-                raise ValueError("expose_ports must contain valid integers") from None
+                raise ValueError("expose_ports must contain valid integers or {port, protocol} objects") from None
             if port < 1 or port > 65535:
                 raise ValueError("expose_ports entries must be between 1 and 65535")
-            if port in seen:
+            key = (port, protocol)
+            if key in seen:
                 continue
-            seen.add(port)
-            normalized_ports.append(port)
+            seen.add(key)
+            normalized_ports.append({"port": port, "protocol": protocol})
         if len(normalized_ports) > 3:
             raise ValueError("A maximum of 3 ports can be exposed")
 
         desired_rules = []
-        for index, port in enumerate(normalized_ports):
+        for index, spec in enumerate(normalized_ports):
             if index == 0:
                 subdomain = child_device_id
             else:
                 subdomain = f"{index}_{child_device_id}"
-            desired_rules.append({"subdomain": subdomain, "port": port})
+            desired_rules.append(
+                {
+                    "subdomain": subdomain,
+                    "port": spec["port"],
+                    "protocol": spec["protocol"],
+                }
+            )
 
         updated = set_container_forwarding_rules(child_device_id, desired_rules)
         return {
