@@ -18,6 +18,8 @@ import tempfile
 import time
 import threading
 import random
+import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -77,6 +79,10 @@ DEFAULT_HOST = "localhost"
 DEFAULT_NODE_NAME = os.uname().nodename.split(".", 1)[0]
 DEFAULT_BRIDGE = "vmbr1"
 PORTACODE_VENV_DIR = "/opt/portacode-venv"
+PROXMOX_CREATE_SUBMIT_TIMEOUT_S = 90
+PROXMOX_TASK_WAIT_TIMEOUT_S = 900
+PROVISIONING_HEARTBEAT_INTERVAL_S = 15
+STATE_LOCK_TIMEOUT_S = 30
 SUBNET_CIDR = "10.10.0.1/24"
 BRIDGE_IP = SUBNET_CIDR.split("/", 1)[0]
 DHCP_START = "10.10.0.100"
@@ -217,6 +223,49 @@ def _run_checked_command(
     if result.returncode not in allowed_returncodes:
         raise RuntimeError(f"{context}: {_command_failure_details(cmd, result)}")
     return result
+
+
+def _run_with_timeout(
+    action: Callable[[], Any],
+    *,
+    timeout_s: int,
+    context: str,
+) -> Any:
+    result_box: Dict[str, Any] = {}
+    error_box: Dict[str, BaseException] = {}
+    done = threading.Event()
+
+    def _runner() -> None:
+        try:
+            result_box["value"] = action()
+        except BaseException as exc:  # pragma: no cover - passthrough
+            error_box["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_runner, daemon=True).start()
+    if not done.wait(timeout=max(timeout_s, 1)):
+        raise TimeoutError(f"{context} timed out after {timeout_s}s")
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box.get("value")
+
+
+@contextmanager
+def _acquire_state_lock(context: str, timeout_s: int = STATE_LOCK_TIMEOUT_S):
+    started = time.time()
+    acquired = _MANAGED_CONTAINERS_STATE_LOCK.acquire(timeout=max(timeout_s, 1))
+    if not acquired:
+        raise TimeoutError(
+            f"Timed out acquiring managed container state lock during {context} after {timeout_s}s"
+        )
+    waited = time.time() - started
+    if waited >= 1.0:
+        logger.info("Managed state lock acquired for %s after %.2fs wait", context, waited)
+    try:
+        yield
+    finally:
+        _MANAGED_CONTAINERS_STATE_LOCK.release()
 
 
 def _ensure_proxmoxer() -> Any:
@@ -1907,11 +1956,22 @@ def _sanitize_project_paths(candidate: Any) -> List[str]:
     return deduped
 
 
-def _wait_for_task(proxmox: Any, node: str, upid: str) -> Tuple[Dict[str, Any], float]:
+def _wait_for_task(
+    proxmox: Any,
+    node: str,
+    upid: str,
+    *,
+    timeout_s: int = PROXMOX_TASK_WAIT_TIMEOUT_S,
+) -> Tuple[Dict[str, Any], float]:
     from proxmoxer.core import ResourceException
     start = time.time()
     poll = 2.0 
     while True:
+        elapsed = time.time() - start
+        if elapsed > timeout_s:
+            raise TimeoutError(
+                f"Timed out waiting for Proxmox task {upid} on node {node} after {timeout_s}s"
+            )
         try:
             status = proxmox.nodes(node).tasks(upid).status.get()
         except ResourceException as e:
@@ -2767,13 +2827,18 @@ def revert_infrastructure() -> Dict[str, Any]:
 
 
 def _allocate_vmid(proxmox: Any) -> int:
-    return int(proxmox.cluster.nextid.get())
+    value = _run_with_timeout(
+        lambda: proxmox.cluster.nextid.get(),
+        timeout_s=PROXMOX_CREATE_SUBMIT_TIMEOUT_S,
+        context="Proxmox nextid allocation",
+    )
+    return int(value)
 
 
 def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
     """Allocate a CTID while holding the managed-state lock to prevent races."""
     while True:
-        with _MANAGED_CONTAINERS_STATE_LOCK:
+        with _acquire_state_lock("ctid_precheck"):
             entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
             if entry is None:
                 raise RuntimeError("Reservation missing while claiming CTID")
@@ -2783,8 +2848,14 @@ def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
                     return int(existing_ctid)
                 except (TypeError, ValueError):
                     pass
+        logger.debug("Allocating nextid for reservation_id=%s", reservation_id)
         ctid_candidate = _allocate_vmid(proxmox)
-        with _MANAGED_CONTAINERS_STATE_LOCK:
+        logger.debug(
+            "Proposed CTID %s for reservation_id=%s; validating against pending map",
+            ctid_candidate,
+            reservation_id,
+        )
+        with _acquire_state_lock("ctid_commit"):
             entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
             if entry is None:
                 raise RuntimeError("Reservation missing while claiming CTID")
@@ -2796,6 +2867,11 @@ def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
                     pass
             reserved_ctids = _collect_reserved_ctids_locked()
             if ctid_candidate in reserved_ctids:
+                logger.debug(
+                    "CTID %s already reserved; retrying allocation for reservation_id=%s",
+                    ctid_candidate,
+                    reservation_id,
+                )
                 continue
             entry["ctid"] = ctid_candidate
             return ctid_candidate
@@ -2836,7 +2912,22 @@ def _instantiate_container(
     try:
         requested_features = payload.get("features")
         try:
-            upid = _submit_create(requested_features)
+            submit_started = time.time()
+            upid = _run_with_timeout(
+                lambda: _submit_create(requested_features),
+                timeout_s=PROXMOX_CREATE_SUBMIT_TIMEOUT_S,
+                context=(
+                    f"Proxmox lxc.create submission node={node} vmid={vmid} "
+                    f"template={payload.get('template')}"
+                ),
+            )
+            logger.info(
+                "Proxmox create submitted vmid=%s node=%s upid=%s elapsed_s=%.2f",
+                vmid,
+                node,
+                upid,
+                time.time() - submit_started,
+            )
         except ResourceException as exc:
             err_text = str(exc)
             logger.error(
@@ -2860,11 +2951,22 @@ def _instantiate_container(
                     "Retrying LXC create vmid=%s with reduced features='nesting=1' due token permissions",
                     vmid,
                 )
-                upid = _submit_create("nesting=1")
+                upid = _run_with_timeout(
+                    lambda: _submit_create("nesting=1"),
+                    timeout_s=PROXMOX_CREATE_SUBMIT_TIMEOUT_S,
+                    context=(
+                        f"Proxmox lxc.create submission (retry nesting-only) node={node} vmid={vmid}"
+                    ),
+                )
                 payload["features"] = "nesting=1"
             else:
                 raise
-        status, elapsed = _wait_for_task(proxmox, node, upid)
+        status, elapsed = _wait_for_task(
+            proxmox,
+            node,
+            upid,
+            timeout_s=PROXMOX_TASK_WAIT_TIMEOUT_S,
+        )
         exitstatus = (status or {}).get("exitstatus")
         if exitstatus and exitstatus.upper() != "OK":
             msg = status.get("status") or "unknown error"
@@ -2959,6 +3061,9 @@ class CreateProxmoxContainerHandler(SyncHandler):
             start_message: str,
             success_message: str,
             action,
+            *,
+            heartbeat_message: Optional[str] = None,
+            action_timeout_s: Optional[int] = None,
         ):
             nonlocal current_step_index
             step_index = current_step_index
@@ -2973,9 +3078,49 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 request_id=request_id,
                 on_behalf_of_device=device_id,
             )
+            heartbeat_stop = threading.Event()
+            heartbeat_thread: Optional[threading.Thread] = None
+            if heartbeat_message:
+                started_at = time.time()
+
+                def _heartbeat_loop() -> None:
+                    while not heartbeat_stop.wait(PROVISIONING_HEARTBEAT_INTERVAL_S):
+                        elapsed_s = int(time.time() - started_at)
+                        logger.info(
+                            "create_proxmox_container heartbeat request_id=%s step=%s elapsed_s=%s",
+                            request_id,
+                            step_name,
+                            elapsed_s,
+                        )
+                        _emit_progress_event(
+                            self,
+                            step_index=step_index,
+                            total_steps=total_steps,
+                            step_name=step_name,
+                            step_label=step_label,
+                            status="in_progress",
+                            message=f"{heartbeat_message} (elapsed {elapsed_s}s)",
+                            phase="lifecycle",
+                            request_id=request_id,
+                            details={"heartbeat": True, "elapsed_s": elapsed_s},
+                            on_behalf_of_device=device_id,
+                        )
+
+                heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+                heartbeat_thread.start()
             try:
-                result = action()
+                if action_timeout_s and action_timeout_s > 0:
+                    result = _run_with_timeout(
+                        action,
+                        timeout_s=action_timeout_s,
+                        context=f"{step_name} action",
+                    )
+                else:
+                    result = action()
             except Exception as exc:
+                heartbeat_stop.set()
+                if heartbeat_thread:
+                    heartbeat_thread.join(timeout=1)
                 _emit_progress_event(
                     self,
                     step_index=step_index,
@@ -2986,10 +3131,13 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     message=f"{step_label} failed: {exc}",
                     phase="lifecycle",
                     request_id=request_id,
-                    details={"error": str(exc)},
+                    details={"error": str(exc), "error_type": type(exc).__name__},
                     on_behalf_of_device=device_id,
                 )
                 raise
+            heartbeat_stop.set()
+            if heartbeat_thread:
+                heartbeat_thread.join(timeout=1)
             _emit_progress_event(
                 self,
                 step_index=step_index,
@@ -3088,6 +3236,12 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 def _create_container():
                     nonlocal proxmox, vmid, created_record
                     proxmox = _connect_proxmox(config)
+                    logger.info(
+                        "create_proxmox_container: starting create stage request_id=%s device_id=%s node=%s",
+                        request_id,
+                        device_id,
+                        node,
+                    )
                     logger.debug(
                         "Provisioning container node=%s template=%s ram=%s cpu=%s storage=%s",
                         node,
@@ -3096,10 +3250,64 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         payload["cpus"],
                         payload["storage"],
                     )
+                    _emit_progress_event(
+                        self,
+                        step_index=current_step_index,
+                        total_steps=total_steps,
+                        step_name="create_container",
+                        step_label="Creating container",
+                        status="in_progress",
+                        message="Allocating CTID from Proxmox cluster nextid…",
+                        phase="lifecycle",
+                        request_id=request_id,
+                        details={"checkpoint": "before_claim_ctid"},
+                        on_behalf_of_device=device_id,
+                    )
                     try:
+                        logger.info(
+                            "create_proxmox_container: claiming ctid request_id=%s reservation_id=%s",
+                            request_id,
+                            reservation_id,
+                        )
                         ctid = _claim_ctid_for_reservation(reservation_id, proxmox)
                         vmid = ctid
+                        logger.info(
+                            "create_proxmox_container: ctid claimed request_id=%s vmid=%s, submitting create",
+                            request_id,
+                            vmid,
+                        )
+                        _emit_progress_event(
+                            self,
+                            step_index=current_step_index,
+                            total_steps=total_steps,
+                            step_name="create_container",
+                            step_label="Creating container",
+                            status="in_progress",
+                            message=f"CTID {vmid} allocated; submitting LXC create request…",
+                            phase="lifecycle",
+                            request_id=request_id,
+                            details={"checkpoint": "before_submit_create", "vmid": vmid},
+                            on_behalf_of_device=device_id,
+                        )
                         vmid, _ = _instantiate_container(proxmox, node, payload, vmid=vmid)
+                        logger.info(
+                            "create_proxmox_container: create task completed request_id=%s vmid=%s",
+                            request_id,
+                            vmid,
+                        )
+                        _emit_progress_event(
+                            self,
+                            step_index=current_step_index,
+                            total_steps=total_steps,
+                            step_name="create_container",
+                            step_label="Creating container",
+                            status="in_progress",
+                            message=f"LXC create task finished for CTID {vmid}; persisting metadata…",
+                            phase="lifecycle",
+                            request_id=request_id,
+                            details={"checkpoint": "after_submit_create", "vmid": vmid},
+                            on_behalf_of_device=device_id,
+                        )
                     except Exception:
                         _release_container_reservation(reservation_id)
                         if vmid is not None:
@@ -3124,6 +3332,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     "Provisioning the LXC container…",
                     "Container created.",
                     _create_container,
+                    heartbeat_message="Still waiting for Proxmox create pipeline (nextid/create/task poll)",
+                    action_timeout_s=max(PROXMOX_CREATE_SUBMIT_TIMEOUT_S + 60, 150),
                 )
 
                 def _start_container_step():
@@ -3330,6 +3540,14 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     },
                 )
             except Exception as exc:
+                tb_text = traceback.format_exc()
+                logger.exception(
+                    "create_proxmox_container background failed request_id=%s device_id=%s vmid=%s node=%s",
+                    request_id,
+                    device_id,
+                    vmid,
+                    node,
+                )
                 if reservation_id and not created_record:
                     _release_container_reservation(reservation_id)
                 if vmid is not None and proxmox and node:
@@ -3338,10 +3556,23 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 _emit_host_event(
                     self,
                     {
-                        "event": "error",
-                        "message": str(exc),
+                        "event": "proxmox_container_created",
+                        "success": False,
+                        "message": f"Container provisioning failed: {exc}",
                         "device_id": device_id,
+                        "on_behalf_of_device": device_id,
+                        "bypass_session_gate": True,
                         "request_id": request_id,
+                        "details": {
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "request_id": request_id,
+                            "device_id": device_id,
+                            "node": node,
+                            "vmid": vmid,
+                            "reservation_id": reservation_id,
+                            "traceback": _clip_command_output(tb_text, limit=3000),
+                        },
                     },
                 )
 
