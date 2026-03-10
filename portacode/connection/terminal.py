@@ -81,6 +81,7 @@ EXPOSED_SERVICES_MONITOR_INTERVAL_S = 2.0
 PORTACODE_EXPOSED_ENV_KEYS = (
     "PORTACODE_EXPOSED_SERVICES_JSON",
     "PORTACODE_EXPOSED_PORTS",
+    "PORTACODE_PUBLIC_HOST",
     "PORTACODE_PUBLIC_HOSTS",
     "PORTACODE_PUBLIC_URLS",
     "PORTACODE_PRIMARY_PUBLIC_URL",
@@ -643,19 +644,31 @@ class TerminalManager:
         primary_url = urls[0] if urls else ""
         primary_host = hosts[0] if hosts else ""
         payload_json = json.dumps(services, separators=(",", ":"))
-        return {
+        env_map = {
             "PORTACODE_EXPOSED_SERVICES_JSON": payload_json,
             "PORTACODE_EXPOSED_PORTS": ",".join(ports),
+            "PORTACODE_PUBLIC_HOST": primary_host,
             "PORTACODE_PUBLIC_HOSTS": ",".join(hosts),
             "PORTACODE_PUBLIC_URLS": ",".join(urls),
             "PORTACODE_PRIMARY_PUBLIC_URL": primary_url,
             "PORTACODE_PRIMARY_PUBLIC_HOST": primary_host,
         }
+        for index, host in enumerate(hosts, start=1):
+            env_map[f"PORTACODE_PUBLIC_HOST_{index}"] = host
+        return env_map
 
     def _apply_exposed_services_env_to_process(self, services: List[Dict[str, Any]]) -> None:
         env_map = self._build_exposed_services_env_map(services)
+        stale_prefixed_keys = [
+            key for key in os.environ if key.startswith("PORTACODE_PUBLIC_HOST_")
+        ]
+        for key in stale_prefixed_keys:
+            os.environ.pop(key, None)
         for key in PORTACODE_EXPOSED_ENV_KEYS:
             os.environ[key] = env_map.get(key, "")
+        for key, value in env_map.items():
+            if key.startswith("PORTACODE_PUBLIC_HOST_"):
+                os.environ[key] = value
 
     async def _watch_exposed_services(self) -> None:
         while True:

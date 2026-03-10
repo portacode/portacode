@@ -439,23 +439,11 @@ def _shell_quote_single(value: str) -> str:
 
 
 def _build_exposed_services_env(exposed_ports: List[Dict[str, Any]]) -> str:
-    hosts = [str(item.get("hostname") or "").strip() for item in exposed_ports if item.get("hostname")]
-    urls = [str(item.get("url") or "").strip() for item in exposed_ports if item.get("url")]
-    ports = [str(item.get("port")) for item in exposed_ports if item.get("port") is not None]
-    primary_url = urls[0] if urls else ""
-    primary_host = hosts[0] if hosts else ""
-    payload_json = json.dumps(exposed_ports, separators=(",", ":"))
-
-    lines = [
-        "# Managed by portacode: do not edit manually.",
-        f"PORTACODE_EXPOSED_SERVICES_JSON={_shell_quote_single(payload_json)}",
-        f"PORTACODE_EXPOSED_PORTS={_shell_quote_single(','.join(ports))}",
-        f"PORTACODE_PUBLIC_HOSTS={_shell_quote_single(','.join(hosts))}",
-        f"PORTACODE_PUBLIC_URLS={_shell_quote_single(','.join(urls))}",
-        f"PORTACODE_PRIMARY_PUBLIC_URL={_shell_quote_single(primary_url)}",
-        f"PORTACODE_PRIMARY_PUBLIC_HOST={_shell_quote_single(primary_host)}",
-        "",
-    ]
+    env_map = _build_exposed_services_env_map(exposed_ports)
+    lines = ["# Managed by portacode: do not edit manually."]
+    for key in sorted(env_map):
+        lines.append(f"{key}={_shell_quote_single(env_map[key])}")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -466,14 +454,19 @@ def _build_exposed_services_env_map(exposed_ports: List[Dict[str, Any]]) -> Dict
     primary_url = urls[0] if urls else ""
     primary_host = hosts[0] if hosts else ""
     payload_json = json.dumps(exposed_ports, separators=(",", ":"))
-    return {
+
+    env_map = {
         "PORTACODE_EXPOSED_SERVICES_JSON": payload_json,
         "PORTACODE_EXPOSED_PORTS": ",".join(ports),
+        "PORTACODE_PUBLIC_HOST": primary_host,
         "PORTACODE_PUBLIC_HOSTS": ",".join(hosts),
         "PORTACODE_PUBLIC_URLS": ",".join(urls),
         "PORTACODE_PRIMARY_PUBLIC_URL": primary_url,
         "PORTACODE_PRIMARY_PUBLIC_HOST": primary_host,
     }
+    for index, host in enumerate(hosts, start=1):
+        env_map[f"PORTACODE_PUBLIC_HOST_{index}"] = host
+    return env_map
 
 
 def _format_etc_environment_value(value: str) -> str:
@@ -493,7 +486,7 @@ def _merge_system_environment(existing_text: str, env_map: Dict[str, str]) -> st
             kept_lines.append(raw_line)
             continue
         key = stripped.split("=", 1)[0].strip()
-        if key in managed_keys:
+        if key in managed_keys or key.startswith("PORTACODE_PUBLIC_HOST_"):
             continue
         kept_lines.append(raw_line)
 
