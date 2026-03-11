@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from portacode.connection.handlers.runtime_user import write_text_preserve_metadata
+from portacode.connection.handlers.runtime_user import (
+    wrap_shell_command,
+    write_text_preserve_metadata,
+)
 
 
 class RuntimeUserTests(TestCase):
@@ -34,3 +37,14 @@ class RuntimeUserTests(TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "hello")
             mock_chown.assert_any_call(target.parent, "appuser")
             mock_chown.assert_any_call(target, "appuser")
+
+    @patch("portacode.connection.handlers.runtime_user.get_runtime_user_home", return_value="/home/meena")
+    @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    def test_wrap_shell_command_sources_bashrc_for_switched_user(self, _mock_euid, mock_getpwnam, _mock_home):
+        mock_getpwnam.return_value = type("Pw", (), {"pw_shell": "/bin/bash"})()
+
+        wrapped = wrap_shell_command("openclaw status", "meena")
+
+        self.assertIn("sudo -H -i -u meena -- /bin/bash -lc", wrapped)
+        self.assertIn("openclaw status", wrapped)

@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - py<3.8
 
 from .base import SyncHandler
 from .proxmox_infra import get_infra_snapshot
+from .runtime_user import get_default_runtime_user, get_runtime_user_home
 from portacode.tunneling.forwarding_state import load_forwarding_state
 
 logger = logging.getLogger(__name__)
@@ -104,9 +105,13 @@ def _get_user_context() -> Dict[str, Any]:
         login_source = "getpass"
         username = getpass.getuser()
 
-    context["username"] = username
+    runtime_username = get_default_runtime_user()
+    runtime_home = get_runtime_user_home()
+
+    context["username"] = runtime_username
+    context["service_username"] = username
     context["username_source"] = login_source
-    context["home"] = str(Path.home())
+    context["home"] = runtime_home
 
     uid = getattr(os, "getuid", None)
     euid = getattr(os, "geteuid", None)
@@ -411,7 +416,7 @@ def _get_os_info() -> Dict[str, Any]:
         system = platform.system()
         logger.debug("Detected system: %s", system)
         default_shell = _resolve_default_shell(system)
-        default_cwd = os.path.expanduser('~')
+        default_cwd = get_runtime_user_home()
 
         if system == "Linux":
             os_type = "Linux"
@@ -468,7 +473,7 @@ def _get_os_info() -> Dict[str, Any]:
             "os_version": "Unknown",
             "architecture": platform.machine() if hasattr(platform, "machine") else "Unknown",
             "default_shell": _resolve_default_shell(platform.system()),
-            "default_cwd": os.path.expanduser("~") if hasattr(os.path, "expanduser") else "",
+            "default_cwd": get_runtime_user_home(),
         }
 
 
@@ -499,7 +504,7 @@ class SystemInfoHandler(SyncHandler):
             info["memory"] = {"percent": 0.0}
             
         try:
-            info["disk"] = psutil.disk_usage(str(Path.home()))._asdict()
+            info["disk"] = psutil.disk_usage(get_runtime_user_home())._asdict()
             logger.debug("Disk usage: %s%%", info["disk"].get("percent", "N/A"))
         except Exception as e:
             logger.warning("Failed to get disk info: %s", e)

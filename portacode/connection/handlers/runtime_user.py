@@ -22,6 +22,16 @@ def get_default_runtime_user(message: Optional[dict] = None) -> str:
     return _current_username()
 
 
+def get_runtime_user_home(message: Optional[dict] = None) -> str:
+    user = get_default_runtime_user(message)
+    if os.name == "nt":
+        return str(Path.home())
+    try:
+        return pwd.getpwnam(user).pw_dir or _fallback_home_for_user(user)
+    except KeyError:
+        return _fallback_home_for_user(user)
+
+
 def should_switch_user(user: str) -> bool:
     return bool(user and os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0 and user != "root")
 
@@ -29,15 +39,17 @@ def should_switch_user(user: str) -> bool:
 def wrap_shell_command(command: str, user: str, shell: str = "/bin/sh") -> str:
     if not should_switch_user(user):
         return command
-    quoted_shell = shlex.quote(shell or "/bin/sh")
-    return f"sudo -H -u {shlex.quote(user)} -- {quoted_shell} -lc {shlex.quote(command)}"
+    shell_path = _resolve_shell_for_user(user, shell)
+    quoted_user = shlex.quote(user)
+    quoted_shell = shlex.quote(shell_path)
+    return f"sudo -H -i -u {quoted_user} -- {quoted_shell} -lc {shlex.quote(command)}"
 
 
 def wrap_argv_for_user(argv: Iterable[str], user: str) -> List[str]:
     argv_list = list(argv)
     if not should_switch_user(user):
         return argv_list
-    return ["sudo", "-H", "-u", user, "--", *argv_list]
+    return ["sudo", "-H", "-i", "-u", user, "--", *argv_list]
 
 
 def ensure_parent_dirs(path: str | Path, owner_user: Optional[str] = None) -> None:
@@ -113,3 +125,20 @@ def _current_username() -> str:
         return pwd.getpwuid(os.geteuid()).pw_name
     except Exception:
         return str(os.environ.get("USER") or "root")
+
+
+def _fallback_home_for_user(user: str) -> str:
+    return "/root" if user == "root" else f"/home/{user}"
+
+
+def _resolve_shell_for_user(user: str, shell: str) -> str:
+    if shell and shell != "/bin/sh":
+        return shell
+    try:
+        candidate = pwd.getpwnam(user).pw_shell or ""
+    except KeyError:
+        candidate = ""
+    candidate = candidate.strip()
+    if candidate:
+        return candidate
+    return shell or "/bin/sh"
