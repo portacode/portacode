@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .base import SyncHandler
 from .project_state.manager import get_or_create_project_state_manager
+from .runtime_user import get_default_runtime_user, mkdir_with_owner, write_text_preserve_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,11 @@ class ProjectAwareFileWriteHandler(SyncHandler):
                         f"File was modified on disk (current {current_mtime} != expected {expected_mtime})"
                     )
 
-            # Create parent directories if they don't exist
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            
-            # Write the file
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+            bytes_written = write_text_preserve_metadata(
+                file_path,
+                content,
+                create_user=get_default_runtime_user(message),
+            )
             
             # Update project state tabs that have this file open
             try:
@@ -79,7 +79,7 @@ class ProjectAwareFileWriteHandler(SyncHandler):
                 logger.warning(f"Failed to update project state after file write: {e}")
                 # Don't fail the file write just because project state update failed
             
-            response["bytes_written"] = len(content.encode('utf-8'))
+            response["bytes_written"] = bytes_written
             response["success"] = True
             return response
         except PermissionError:
@@ -137,9 +137,11 @@ class ProjectAwareFileCreateHandler(SyncHandler):
             if file_path.exists():
                 raise ValueError(f"File already exists: {file_name}")
             
-            # Create the file
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+            bytes_written = write_text_preserve_metadata(
+                file_path,
+                content,
+                create_user=get_default_runtime_user(message),
+            )
             
             # Trigger project state refresh
             try:
@@ -164,6 +166,7 @@ class ProjectAwareFileCreateHandler(SyncHandler):
                 "parent_path": parent_path,
                 "file_name": file_name,
                 "file_path": str(file_path),
+                "bytes_written": bytes_written,
                 "success": True,
             }
         except PermissionError:
@@ -208,8 +211,7 @@ class ProjectAwareFolderCreateHandler(SyncHandler):
             if folder_path.exists():
                 raise ValueError(f"Folder already exists: {folder_name}")
             
-            # Create the folder
-            folder_path.mkdir(parents=False, exist_ok=False)
+            mkdir_with_owner(folder_path, owner_user=get_default_runtime_user(message))
             
             # Trigger project state refresh
             try:

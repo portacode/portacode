@@ -1633,8 +1633,8 @@ def _format_rootfs(storage: str, disk_gib: int, storage_type: str) -> str:
 
 
 def _get_provisioning_user_info(message: Dict[str, Any]) -> Tuple[str, str, str]:
-    user = (message.get("username") or "svcuser").strip() if message else "svcuser"
-    user = user or "svcuser"
+    user = (message.get("username") or "root").strip() if message else "root"
+    user = user or "root"
     password = message.get("password")
     if not password:
         password = secrets.token_urlsafe(10)
@@ -2286,14 +2286,32 @@ def _resolve_portacode_cli_path(vmid: int, user: str) -> str:
     return "portacode"
 
 
-def _enforce_service_venv_execstart(vmid: int, user: str) -> Dict[str, bool]:
+def _resolve_user_data_home(vmid: int, user: str) -> str:
+    return _resolve_user_data_dir(vmid, user)
+
+
+def _build_root_service_install_command(vmid: int, runtime_user: str, cli_path: str) -> str:
+    data_home = _resolve_user_data_home(vmid, runtime_user)
+    env_prefix = " ".join(
+        [
+            "PORTACODE_SERVICE_USER=root",
+            f"PORTACODE_DEFAULT_RUNTIME_USER={shlex.quote(runtime_user)}",
+            f"PORTACODE_XDG_DATA_HOME={shlex.quote(data_home)}",
+        ]
+    )
+    return f"{env_prefix} {shlex.quote(cli_path)} service install"
+
+
+def _enforce_service_venv_execstart(vmid: int, service_user: str, runtime_user: Optional[str] = None) -> Dict[str, bool]:
     """Ensure service launchers use venv python when available in the container.
 
     This provides forward compatibility while some deployed portacode versions still
     generate /usr/bin/python3 in systemd/OpenRC service definitions.
     """
     expected_python = f"{PORTACODE_VENV_DIR}/bin/python"
-    default_home = shlex.quote(f"/home/{user}")
+    effective_runtime_user = runtime_user or service_user
+    default_home = shlex.quote("/root" if service_user == "root" else f"/home/{service_user}")
+    runtime_data_home = shlex.quote(_resolve_user_data_home(vmid, effective_runtime_user))
     command = (
         "if [ -x {py} ]; then "
         "  if [ -f /etc/systemd/system/portacode.service ]; then "
@@ -2317,7 +2335,10 @@ def _enforce_service_venv_execstart(vmid: int, user: str) -> Dict[str, bool]:
         "       grep -Fqx \"$expected_script_quoted\" /usr/local/share/portacode/connect_service.sh; then "
         "      echo 'OPENRC_ALREADY_VENV=1'; "
         "    else "
-        "      printf '%s\\n' '#!/bin/sh' \"cd \\\"$home\\\"\" "
+        "      printf '%s\\n' '#!/bin/sh' "
+        "        'export PORTACODE_DEFAULT_RUNTIME_USER={runtime_user}' "
+        "        'export XDG_DATA_HOME={runtime_data_home}' "
+        "        \"cd \\\"$home\\\"\" "
         "        'exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1' "
         "        >/usr/local/share/portacode/connect_service.sh && "
         "      chmod 755 /usr/local/share/portacode/connect_service.sh && "
@@ -2327,11 +2348,12 @@ def _enforce_service_venv_execstart(vmid: int, user: str) -> Dict[str, bool]:
         "fi"
     ).format(
         py=shlex.quote(expected_python),
-        quoted_user=shlex.quote(user),
+        quoted_user=shlex.quote(service_user),
         default_home=default_home,
+        runtime_user=shlex.quote(effective_runtime_user),
+        runtime_data_home=runtime_data_home,
     )
-    cmd = _su_command(user, f"sudo -H -n /bin/sh -c {shlex.quote(command)}")
-    res = _run_pct(vmid, cmd)
+    res = _run_pct(vmid, f"/bin/sh -c {shlex.quote(command)}")
     if res["returncode"] != 0:
         raise RuntimeError(
             "Failed to enforce venv-backed service launch command: "
@@ -2367,6 +2389,24 @@ def _run_pct_exec_check(vmid: int, command: Sequence[str]) -> subprocess.Complet
 
 def _run_pct_push(vmid: int, src: str, dest: str) -> subprocess.CompletedProcess[str]:
     return _call_subprocess(["pct", "push", str(vmid), src, dest])
+
+
+def _resolve_user_home_dir(vmid: int, user: str) -> str:
+    fallback_home = "/root" if user == "root" else f"/home/{user}"
+    quoted_user = shlex.quote(user)
+    command = (
+        f"home=$(getent passwd {quoted_user} 2>/dev/null | cut -d: -f6); "
+        "if [ -z \"$home\" ] && [ -f /etc/passwd ]; then "
+        f"  home=$(awk -F: -v u={quoted_user} '$1==u{{print $6}}' /etc/passwd 2>/dev/null); "
+        "fi; "
+        f"if [ -z \"$home\" ]; then home={shlex.quote(fallback_home)}; fi; "
+        "printf '%s' \"$home\""
+    )
+    return _run_pct_check(vmid, command)["stdout"].strip()
+
+
+def _resolve_user_data_dir(vmid: int, user: str) -> str:
+    return f"{_resolve_user_home_dir(vmid, user).rstrip('/')}/.local/share"
 
 
 def _push_bytes_to_container(
@@ -2407,8 +2447,7 @@ def _push_bytes_to_container(
 
 
 def _resolve_portacode_key_dir(vmid: int, user: str) -> str:
-    data_dir_cmd = _su_command(user, "echo -n ${XDG_DATA_HOME:-$HOME/.local/share}")
-    data_home = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
+    data_home = _resolve_user_data_dir(vmid, user)
     portacode_dir = f"{data_home}/portacode"
     _run_pct_exec_check(vmid, ["mkdir", "-p", portacode_dir])
     owner = _resolve_user_group(vmid, user)
@@ -2442,8 +2481,7 @@ def _portacode_connect_and_read_key(
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     start = time.time()
 
-    data_dir_cmd = _su_command(user, "echo -n ${XDG_DATA_HOME:-$HOME/.local/share}")
-    data_dir = _run_pct_check(vmid, data_dir_cmd)["stdout"].strip()
+    data_dir = _resolve_user_data_dir(vmid, user)
     key_dir = f"{data_dir}/portacode/keys"
     pub_path = f"{key_dir}/id_portacode.pub"
     priv_path = f"{key_dir}/id_portacode"
@@ -3470,13 +3508,10 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     )
 
                     cli_path = _resolve_portacode_cli_path(vmid, payload_local["username"])
-                    cmd = _su_command(
-                        payload_local["username"],
-                        # -H: don't let sudo run with HOME pointing at the user, which can create root-owned ~/.local.
-                        # -n: non-interactive (bootstrap config grants NOPASSWD).
-                        f"sudo -H -n {shlex.quote(cli_path)} service install",
+                    res = _run_pct(
+                        vmid,
+                        _build_root_service_install_command(vmid, payload_local["username"], cli_path),
                     )
-                    res = _run_pct(vmid, cmd)
 
                     if res["returncode"] != 0:
                         _emit_progress_event(
@@ -3497,7 +3532,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         )
                         raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-                    venv_service_adjustment = _enforce_service_venv_execstart(vmid, payload_local["username"])
+                    venv_service_adjustment = _enforce_service_venv_execstart(
+                        vmid,
+                        "root",
+                        runtime_user=payload_local["username"],
+                    )
                     logger.info(
                         "create_proxmox_container: service venv enforcement vmid=%s details=%s",
                         vmid,
@@ -3668,10 +3707,7 @@ class StartPortacodeServiceHandler(SyncHandler):
         )
 
         cli_path = _resolve_portacode_cli_path(vmid, user)
-        cmd = _su_command(user, f"sudo -S {shlex.quote(cli_path)} service install")
-        # See above: avoid root writing into the user's home directory.
-        cmd = _su_command(user, f"sudo -H -n {shlex.quote(cli_path)} service install")
-        res = _run_pct(vmid, cmd)
+        res = _run_pct(vmid, _build_root_service_install_command(vmid, user, cli_path))
 
         if res["returncode"] != 0:
             _emit_progress_event(
@@ -3692,7 +3728,7 @@ class StartPortacodeServiceHandler(SyncHandler):
             )
             raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-        venv_service_adjustment = _enforce_service_venv_execstart(vmid, user)
+        venv_service_adjustment = _enforce_service_venv_execstart(vmid, "root", runtime_user=user)
         logger.info(
             "start_portacode_service: service venv enforcement vmid=%s details=%s",
             vmid,

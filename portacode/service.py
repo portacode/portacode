@@ -37,6 +37,20 @@ __all__ = [
 ]
 
 
+def _resolve_service_user() -> str:
+    override = (os.environ.get("PORTACODE_SERVICE_USER") or "").strip()
+    if override:
+        return override
+    return os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
+
+
+def _resolve_home_for_user(user: str) -> Path:
+    try:
+        return Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        return Path("/root") if user == "root" else Path(f"/home/{user}")
+
+
 class ServiceManager(Protocol):
     """Common interface all platform managers implement."""
 
@@ -74,11 +88,8 @@ class _SystemdUserService:
         self.system_mode = system_mode
         if system_mode:
             self.service_path = Path("/etc/systemd/system") / f"{self.NAME}.service"
-            self.user = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
-            try:
-                self.home = Path(pwd.getpwnam(self.user).pw_dir)
-            except KeyError:
-                self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
+            self.user = _resolve_service_user()
+            self.home = _resolve_home_for_user(self.user)
             # Use the exact interpreter running this CLI. This preserves venv installs
             # (e.g., /opt/portacode-venv/bin/python) for system service ExecStart.
             self.python = sys.executable
@@ -89,6 +100,8 @@ class _SystemdUserService:
             self.user = os.environ.get("USER") or os.getlogin()
             self.home = Path.home()
             self.python = sys.executable
+        self.runtime_user = (os.environ.get("PORTACODE_DEFAULT_RUNTIME_USER") or self.user).strip() or self.user
+        self.xdg_data_home = (os.environ.get("PORTACODE_XDG_DATA_HOME") or "").strip()
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         if self.system_mode:
@@ -117,6 +130,12 @@ class _SystemdUserService:
         
         # Capture current SHELL for the service to prevent using /bin/sh in containers/virtualized environments
         current_shell = os.getenv("SHELL", "/bin/bash")
+        env_lines = [f"Environment=SHELL={current_shell}"]
+        if self.system_mode:
+            env_lines.append(f"Environment=PORTACODE_DEFAULT_RUNTIME_USER={self.runtime_user}")
+            if self.xdg_data_home:
+                env_lines.append(f"Environment=XDG_DATA_HOME={self.xdg_data_home}")
+        env_block = "\n                ".join(env_lines)
         
         if self.system_mode:
             unit = textwrap.dedent(f"""
@@ -128,7 +147,7 @@ class _SystemdUserService:
                 Type=simple
                 User={self.user}
                 WorkingDirectory={self.home}
-                Environment=SHELL={current_shell}
+                {env_block}
                 ExecStart={self.python} -m portacode connect --non-interactive
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
@@ -145,7 +164,7 @@ class _SystemdUserService:
 
                 [Service]
                 Type=simple
-                Environment=SHELL={current_shell}
+                {env_block}
                 ExecStart={self.python} -m portacode.cli connect --non-interactive
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
@@ -221,15 +240,14 @@ class _OpenRCService:
     def __init__(self) -> None:
         self.init_path = Path("/etc/init.d") / self.NAME
         self.wrapper_path = Path("/usr/local/share/portacode/connect_service.sh")
-        self.user = os.environ.get("SUDO_USER") or os.environ.get("USER") or os.getlogin()
-        try:
-            self.home = Path(pwd.getpwnam(self.user).pw_dir)
-        except KeyError:
-            self.home = Path("/root") if self.user == "root" else Path(f"/home/{self.user}")
+        self.user = _resolve_service_user()
+        self.home = _resolve_home_for_user(self.user)
         # Keep OpenRC behavior aligned with systemd: respect active interpreter/venv.
         self.python = sys.executable
         self.log_dir = Path("/var/log/portacode")
         self.log_path = self.log_dir / "connect.log"
+        self.runtime_user = (os.environ.get("PORTACODE_DEFAULT_RUNTIME_USER") or self.user).strip() or self.user
+        self.xdg_data_home = (os.environ.get("PORTACODE_XDG_DATA_HOME") or "").strip()
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         if os.geteuid() != 0:
@@ -286,8 +304,11 @@ class _OpenRCService:
             pass
     
     def _write_wrapper_script(self) -> None:
+        xdg_export_line = f'export XDG_DATA_HOME="{self.xdg_data_home}"' if self.xdg_data_home else ""
         script = textwrap.dedent(f"""
             #!/bin/sh
+            export PORTACODE_DEFAULT_RUNTIME_USER="{self.runtime_user}"
+            {xdg_export_line}
             cd "{self.home}"
             while true; do
                 "{self.python}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1

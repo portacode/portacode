@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .base import AsyncHandler
+from .runtime_user import get_default_runtime_user, wrap_shell_command
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +453,7 @@ class _AutomationRuntimeV2:
 
             start = time.monotonic()
             process = await asyncio.create_subprocess_shell(
-                command_text,
+                wrap_shell_command(command_text, get_default_runtime_user()),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

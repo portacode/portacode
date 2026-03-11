@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import AsyncHandler
 from .project_state.manager import get_or_create_project_state_manager
+from .runtime_user import get_default_runtime_user
 from ...utils import diff_renderer
 from ...utils.diff_apply import (
     DiffApplyError,
@@ -313,10 +314,15 @@ class FileApplyDiffHandler(AsyncHandler):
             f"source_session={source_client_session}"
         )
 
+        runtime_user = get_default_runtime_user(message)
         for file_patch in file_patches:
             heuristics: List[str] = []
             apply_func = partial(
-                apply_file_patch, file_patch, base_path, heuristic_log=heuristics
+                apply_file_patch,
+                file_patch,
+                base_path,
+                heuristic_log=heuristics,
+                create_user=runtime_user,
             )
             try:
                 target_path, action, bytes_written = await loop.run_in_executor(None, apply_func)

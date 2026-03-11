@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .base import AsyncHandler
+from .runtime_user import get_default_runtime_user, wrap_shell_command
 from .session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,12 @@ class TerminalStartHandler(AsyncHandler):
         if not session_manager:
             raise RuntimeError("Session manager not available")
         
-        session_info = await session_manager.create_session(shell=shell, cwd=cwd, project_id=project_id)
+        session_info = await session_manager.create_session(
+            shell=shell,
+            cwd=cwd,
+            project_id=project_id,
+            run_as_user=get_default_runtime_user(message),
+        )
         
         # Start background watcher for process exit
         asyncio.create_task(self._watch_process_exit(session_info["terminal_id"]))
@@ -375,7 +381,7 @@ class TerminalExecHandler(AsyncHandler):
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_shell(
-            command,
+            wrap_shell_command(command, get_default_runtime_user(message)),
             cwd=cwd,
             env=env,
             stdout=asyncio.subprocess.PIPE,

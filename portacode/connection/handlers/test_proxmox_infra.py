@@ -4,10 +4,30 @@ from unittest.mock import MagicMock, patch
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
     _build_bootstrap_steps,
+    _get_provisioning_user_info,
+    _resolve_user_data_dir,
 )
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch("portacode.connection.handlers.proxmox_infra._run_pct_check")
+    def test_resolve_user_data_dir_uses_passwd_lookup_not_login_shell(self, mock_run_pct_check):
+        mock_run_pct_check.return_value = {"stdout": "/root", "stderr": "", "returncode": 0}
+
+        path = _resolve_user_data_dir(145, "root")
+
+        self.assertEqual(path, "/root/.local/share")
+        called_command = mock_run_pct_check.call_args[0][1]
+        self.assertIn("getent passwd", called_command)
+        self.assertNotIn("su - root", called_command)
+
+    def test_get_provisioning_user_info_defaults_to_root_with_generated_password(self):
+        user, password, ssh_key = _get_provisioning_user_info({})
+
+        self.assertEqual(user, "root")
+        self.assertTrue(password)
+        self.assertEqual(ssh_key, "")
+
     def test_build_bootstrap_steps_includes_portacode_connect_by_default(self):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=True)
         self.assertTrue(any(step.get("name") == "portacode_connect" for step in steps))

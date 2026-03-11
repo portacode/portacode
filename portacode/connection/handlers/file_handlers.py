@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .base import AsyncHandler, SyncHandler
 from .chunked_content import create_chunked_response
+from .runtime_user import get_default_runtime_user, mkdir_with_owner, write_text_preserve_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +148,11 @@ class FileWriteHandler(SyncHandler):
             if not file_path:
                 raise ValueError("path parameter is required")
 
-            # Create parent directories if they don't exist
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            
-            response["bytes_written"] = len(content.encode('utf-8'))
+            response["bytes_written"] = write_text_preserve_metadata(
+                file_path,
+                content,
+                create_user=get_default_runtime_user(message),
+            )
             response["success"] = True
             return response
         except PermissionError:
@@ -383,15 +382,18 @@ class FileCreateHandler(SyncHandler):
             if file_path.exists():
                 raise ValueError(f"File already exists: {file_name}")
             
-            # Create the file
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+            bytes_written = write_text_preserve_metadata(
+                file_path,
+                content,
+                create_user=get_default_runtime_user(message),
+            )
             
             return {
                 "event": "file_create_response",
                 "parent_path": parent_path,
                 "file_name": file_name,
                 "file_path": str(file_path),
+                "bytes_written": bytes_written,
                 "success": True,
             }
         except PermissionError:
@@ -436,8 +438,7 @@ class FolderCreateHandler(SyncHandler):
             if folder_path.exists():
                 raise ValueError(f"Folder already exists: {folder_name}")
             
-            # Create the folder
-            folder_path.mkdir(parents=False, exist_ok=False)
+            mkdir_with_owner(folder_path, owner_user=get_default_runtime_user(message))
             
             return {
                 "event": "folder_create_response",

@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, List, TYPE_CHECKING
 from platformdirs import user_data_dir
 
 from portacode.link_capture import prepare_link_capture_bin
+from .runtime_user import get_default_runtime_user, wrap_argv_for_user
 
 import pyte
 
@@ -807,7 +808,7 @@ class SessionManager:
         """Allocate a new unique channel ID for a terminal session using UUID."""
         return uuid.uuid4().hex
 
-    async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    async def create_session(self, shell: Optional[str] = None, cwd: Optional[str] = None, project_id: Optional[str] = None, run_as_user: Optional[str] = None) -> Dict[str, Any]:
         """Create a new terminal session."""
         # Use the same UUID for both terminal_id and channel_id to ensure consistency
         session_uuid = uuid.uuid4().hex
@@ -832,6 +833,7 @@ class SessionManager:
         logger.info("Launching terminal %s using shell=%s on channel=%s", term_id, shell, channel_id)
 
         env = _build_child_env()
+        session_user = (run_as_user or get_default_runtime_user()).strip()
 
         env["PORTACODE_LINK_CHANNEL"] = str(_LINK_EVENT_ROOT)
         env["PORTACODE_TERMINAL_ID"] = term_id
@@ -867,7 +869,7 @@ class SessionManager:
                 import pty
                 master_fd, slave_fd = pty.openpty()
                 _configure_pty_window_size(slave_fd, TERMINAL_ROWS, TERMINAL_COLUMNS)
-                shell_argv = _shell_argv_for_session(shell)
+                shell_argv = wrap_argv_for_user(_shell_argv_for_session(shell), session_user)
                 proc = await asyncio.create_subprocess_exec(
                     *shell_argv,
                     stdin=slave_fd,
@@ -893,7 +895,7 @@ class SessionManager:
             except Exception:
                 logger.warning("Failed to allocate PTY, falling back to pipes")
                 proc = await asyncio.create_subprocess_exec(
-                    shell,
+                    *wrap_argv_for_user([shell], session_user),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,

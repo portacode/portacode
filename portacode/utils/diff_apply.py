@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from portacode.connection.handlers.runtime_user import write_text_preserve_metadata
+
 
 class DiffParseError(Exception):
     """Raised when a diff cannot be parsed."""
@@ -365,6 +367,7 @@ def apply_file_patch(
     file_patch: FilePatch,
     base_path: Optional[str],
     heuristic_log: Optional[List[str]] = None,
+    create_user: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """Apply a parsed FilePatch to disk.
 
@@ -400,13 +403,11 @@ def apply_file_patch(
         heuristic_log=heuristic_log,
     )
 
-    dir_name = os.path.dirname(target_path)
-    if dir_name and not os.path.exists(dir_name):
-        os.makedirs(dir_name, exist_ok=True)
-    with open(target_path, "w", encoding="utf-8") as f:
-        f.write("".join(updated_lines))
-
-    bytes_written = sum(len(chunk.encode("utf-8")) for chunk in updated_lines)
+    bytes_written = write_text_preserve_metadata(
+        target_path,
+        "".join(updated_lines),
+        create_user=create_user if not file_exists else None,
+    )
     action = "created" if not file_exists else "modified"
     return target_path, action, bytes_written
 
