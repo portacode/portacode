@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from portacode.tunneling.privileged import run_checked, write_text
+from portacode.tunneling.privileged import read_text, run_checked, write_text
 
 
 WEBMIN_CONFIG_PATH = Path("/etc/webmin/config")
@@ -64,8 +64,8 @@ def apply_turnkey_webmin_proxy_config(exposed_services: list[dict[str, Any]]) ->
     if not WEBMIN_CONFIG_PATH.exists() or not WEBMIN_MINISERV_PATH.exists():
         return False
 
-    config_before = WEBMIN_CONFIG_PATH.read_text(encoding="utf-8")
-    miniserv_before = WEBMIN_MINISERV_PATH.read_text(encoding="utf-8")
+    config_before = read_text(WEBMIN_CONFIG_PATH)
+    miniserv_before = read_text(WEBMIN_MINISERV_PATH)
 
     config_after = _replace_or_append_setting(config_before, "referers", public_host)
     miniserv_after = _replace_or_append_setting(miniserv_before, "redirect_host", public_host)
@@ -83,4 +83,3 @@ def apply_turnkey_webmin_proxy_config(exposed_services: list[dict[str, Any]]) ->
 
     run_checked(WEBMIN_RESTART_CMD)
     return True
-

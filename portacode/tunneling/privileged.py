@@ -135,6 +135,14 @@ def copy_file(src: Path, dest: Path, *, mode: Optional[int] = None) -> None:
         run_checked(["chmod", format(mode, "o"), str(dest)])
 
 
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except PermissionError:
+        proc = run_checked(["cat", str(path)])
+        return proc.stdout
+
+
 __all__ = [
     "is_root",
     "have",
@@ -144,4 +152,5 @@ __all__ = [
     "ensure_dir",
     "write_text",
     "copy_file",
+    "read_text",
 ]
