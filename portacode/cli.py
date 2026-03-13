@@ -52,6 +52,40 @@ def cli() -> None:
     multiple=True,
     help="Project folder to register during pairing (repeat for multiple paths)",
 )
+@click.option(
+    "--setup-proxmox-infra",
+    "setup_proxmox_infra",
+    is_flag=True,
+    help="After authentication, configure this device as a Portacode Proxmox infra node",
+)
+@click.option(
+    "--proxmox-template-family",
+    "proxmox_template_families",
+    multiple=True,
+    help="Template family to prefetch during Proxmox setup (repeat for multiple families)",
+)
+@click.option(
+    "--proxmox-verify-ssl",
+    "proxmox_verify_ssl",
+    is_flag=True,
+    help="Verify SSL certificates during Proxmox API validation",
+)
+@click.option(
+    "--proxmox-setup-retries",
+    "proxmox_setup_retries",
+    default=3,
+    show_default=True,
+    type=click.IntRange(1, 10),
+    help="Retry Proxmox setup this many times when failures look transient",
+)
+@click.option(
+    "--proxmox-setup-retry-delay",
+    "proxmox_setup_retry_delay",
+    default=5.0,
+    show_default=True,
+    type=click.FloatRange(0.0, 60.0),
+    help="Seconds to wait between Proxmox setup retries",
+)
 def connect(
     gateway: Optional[str],
     detach: bool,
@@ -61,6 +95,11 @@ def connect(
     pairing_code_opt: Optional[str],
     device_name_opt: Optional[str],
     project_paths_opt: Tuple[str, ...],
+    setup_proxmox_infra: bool,
+    proxmox_template_families: Tuple[str, ...],
+    proxmox_verify_ssl: bool,
+    proxmox_setup_retries: int,
+    proxmox_setup_retry_delay: float,
 ) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
 
@@ -157,6 +196,12 @@ def connect(
             )
         )
         sys.exit(1)
+
+    normalized_template_families: list[str] = []
+    for raw in proxmox_template_families:
+        cleaned = raw.strip().lower()
+        if cleaned and cleaned not in normalized_template_families:
+            normalized_template_families.append(cleaned)
 
     pairing_requested = bool(pairing_code)
     existing_identity = keypair_files_exist()
@@ -297,6 +342,49 @@ def connect(
         
         click.prompt(click.style("Press Enter once device is added", fg="bright_green", bold=True), default="", show_default=False)
 
+    if setup_proxmox_infra:
+        payload: dict[str, object] = {
+            "cmd": "setup_proxmox_infra",
+            "token_mode": "auto_admin",
+            "verify_ssl": proxmox_verify_ssl,
+        }
+        if normalized_template_families:
+            payload["template_families"] = normalized_template_families
+
+        last_reply = None
+        success = False
+        for attempt in range(1, proxmox_setup_retries + 1):
+            click.echo()
+            click.echo(
+                click.style(
+                    f"⚙ Running Proxmox infrastructure setup (attempt {attempt}/{proxmox_setup_retries})…",
+                    fg="bright_cyan",
+                )
+            )
+            success, last_reply = _run_control_command(
+                payload,
+                gateway=target_gateway,
+                keypair=keypair,
+                debug=debug,
+                label="Waiting for Proxmox setup response",
+                wait_loops=900,
+                success_events={"proxmox_infra_configured"},
+                failure_events={"error"},
+            )
+            if success:
+                click.echo(click.style("✅ Proxmox infrastructure setup completed.", fg="green"))
+                break
+            if attempt >= proxmox_setup_retries or not _is_transient_proxmox_setup_failure(last_reply):
+                click.echo(click.style("Proxmox infrastructure setup failed.", fg="red"))
+                sys.exit(1)
+            click.echo(
+                click.style(
+                    f"Transient setup failure detected; retrying in {proxmox_setup_retry_delay:g}s…",
+                    fg="yellow",
+                )
+            )
+            asyncio.run(asyncio.sleep(proxmox_setup_retry_delay))
+
     # 3. Start connection manager
     if detach and not non_interactive:
         click.echo("Establishing connection in the background…")
@@ -347,6 +435,88 @@ def _terminate_process(pid: int):
             os.kill(pid, signal.SIGTERM)  # type: ignore[name-defined]
         except OSError:
             pass
+
+
+def _is_transient_proxmox_setup_failure(reply: object) -> bool:
+    if not isinstance(reply, dict):
+        return True
+    message = str(reply.get("message") or reply.get("error") or "").lower()
+    if not message:
+        return True
+    transient_markers = (
+        "temporary",
+        "temporarily",
+        "timed out",
+        "timeout",
+        "network",
+        "connection",
+        "name resolution",
+        "could not resolve",
+        "unreachable",
+        "tls",
+        "ssl",
+        "503",
+        "502",
+        "504",
+        "download",
+        "fetch",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
+def _run_control_command(
+    payload: dict,
+    gateway: str,
+    *,
+    keypair=None,
+    debug: bool = False,
+    label: str = "Waiting for replies",
+    wait_loops: int = 50,
+    success_events: Optional[set[str]] = None,
+    failure_events: Optional[set[str]] = None,
+) -> tuple[bool, Optional[dict]]:
+    async def _run() -> tuple[bool, Optional[dict]]:
+        selected_keypair = keypair or get_or_create_keypair()
+        mgr = ConnectionManager(gateway, selected_keypair, debug=debug)
+        await mgr.start()
+
+        for _ in range(20):
+            if mgr.mux is not None:
+                break
+            await asyncio.sleep(0.1)
+        if mgr.mux is None:
+            click.echo("Failed to initialise connection – aborting.")
+            await mgr.stop()
+            return False, None
+
+        ctl = mgr.mux.get_channel(0)
+        await ctl.send(payload)
+
+        last_reply: Optional[dict] = None
+        succeeded = success_events is None
+        try:
+            with click.progressbar(length=wait_loops, label=label) as bar:
+                for _ in range(wait_loops):
+                    try:
+                        reply = await asyncio.wait_for(ctl.recv(), timeout=0.1)
+                        click.echo(click.style("< " + json.dumps(reply, indent=2), fg="cyan"))
+                        if isinstance(reply, dict):
+                            last_reply = reply
+                            event_name = str(reply.get("event") or "")
+                            if failure_events and event_name in failure_events:
+                                return False, last_reply
+                            if success_events and event_name in success_events:
+                                succeeded = True
+                                return True, last_reply
+                    except asyncio.TimeoutError:
+                        pass
+                    bar.update(1)
+        finally:
+            await mgr.stop()
+
+        return succeeded, last_reply
+
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
