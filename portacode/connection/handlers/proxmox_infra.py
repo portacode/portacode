@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 import platformdirs
 
 from .base import SyncHandler
+from ...utils.runtime_paths import expand_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -1957,6 +1958,9 @@ def _sanitize_project_paths(candidate: Any) -> List[str]:
     for path in parsed:
         if len(path) > 500:
             raise ValueError("project_paths entries cannot exceed 500 characters")
+        path = expand_runtime_path(path)
+        if len(path) > 500:
+            raise ValueError("expanded project_paths entries cannot exceed 500 characters")
         if path in seen:
             continue
         seen.add(path)

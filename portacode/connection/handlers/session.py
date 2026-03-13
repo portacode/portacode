@@ -869,7 +869,7 @@ class SessionManager:
                 import pty
                 master_fd, slave_fd = pty.openpty()
                 _configure_pty_window_size(slave_fd, TERMINAL_ROWS, TERMINAL_COLUMNS)
-                shell_argv = wrap_argv_for_user(_shell_argv_for_session(shell), session_user)
+                shell_argv = wrap_argv_for_user(_shell_argv_for_session(shell), session_user, cwd=cwd)
                 proc = await asyncio.create_subprocess_exec(
                     *shell_argv,
                     stdin=slave_fd,
@@ -895,7 +895,7 @@ class SessionManager:
             except Exception:
                 logger.warning("Failed to allocate PTY, falling back to pipes")
                 proc = await asyncio.create_subprocess_exec(
-                    *wrap_argv_for_user([shell], session_user),
+                    *wrap_argv_for_user([shell], session_user, cwd=cwd),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,

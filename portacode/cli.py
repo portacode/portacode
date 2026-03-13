@@ -25,6 +25,7 @@ from .keypair import (
 from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
 from .updater import build_pip_install_command, run_pip_install_command
+from .utils.runtime_paths import expand_runtime_path
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
@@ -184,6 +185,10 @@ def connect(
             continue
         if len(cleaned) > 500:
             click.echo(click.style(f"Project path too long (max 500 chars): {cleaned[:60]}…", fg="red"))
+            sys.exit(1)
+        cleaned = expand_runtime_path(cleaned)
+        if len(cleaned) > 500:
+            click.echo(click.style(f"Expanded project path too long (max 500 chars): {cleaned[:60]}…", fg="red"))
             sys.exit(1)
         if cleaned not in normalized_project_paths:
             normalized_project_paths.append(cleaned)

@@ -45,11 +45,19 @@ def wrap_shell_command(command: str, user: str, shell: str = "/bin/sh") -> str:
     return f"sudo -H -i -u {quoted_user} -- {quoted_shell} -lc {shlex.quote(command)}"
 
 
-def wrap_argv_for_user(argv: Iterable[str], user: str) -> List[str]:
+def wrap_argv_for_user(argv: Iterable[str], user: str, cwd: Optional[str] = None) -> List[str]:
     argv_list = list(argv)
     if not should_switch_user(user):
         return argv_list
-    return ["sudo", "-H", "-i", "-u", user, "--", *argv_list]
+    if not argv_list:
+        return ["sudo", "-H", "-i", "-u", user, "--"]
+    if not cwd:
+        return ["sudo", "-H", "-i", "-u", user, "--", *argv_list]
+
+    shell_path = _resolve_shell_for_user(user, argv_list[0])
+    exec_command = " ".join(shlex.quote(arg) for arg in argv_list)
+    command = f"cd {shlex.quote(cwd)} && exec {exec_command}"
+    return ["sudo", "-H", "-i", "-u", user, "--", shell_path, "-lc", command]
 
 
 def ensure_parent_dirs(path: str | Path, owner_user: Optional[str] = None) -> None:

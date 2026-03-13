@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from portacode.connection.handlers.runtime_user import (
     wrap_shell_command,
+    wrap_argv_for_user,
     write_text_preserve_metadata,
 )
 
@@ -48,3 +49,14 @@ class RuntimeUserTests(TestCase):
 
         self.assertIn("sudo -H -i -u meena -- /bin/bash -lc", wrapped)
         self.assertIn("openclaw status", wrapped)
+
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
+    def test_wrap_argv_for_user_preserves_login_mode_and_explicitly_reenters_cwd(self, mock_getpwnam, _mock_euid):
+        mock_getpwnam.return_value = type("Pw", (), {"pw_shell": "/bin/bash"})()
+
+        wrapped = wrap_argv_for_user(["/bin/bash", "--login"], "meena", cwd="/home/meena/.openclaw")
+
+        self.assertEqual(wrapped[:5], ["sudo", "-H", "-i", "-u", "meena"])
+        self.assertEqual(wrapped[5:8], ["--", "/bin/bash", "-lc"])
+        self.assertIn("cd /home/meena/.openclaw && exec /bin/bash --login", wrapped[8])
