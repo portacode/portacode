@@ -6,6 +6,7 @@ from portacode.connection.handlers.proxmox_infra import (
     _build_bootstrap_steps,
     _get_provisioning_user_info,
     _resolve_user_data_dir,
+    _sanitize_project_paths,
 )
 
 
@@ -41,6 +42,11 @@ class ProxmoxInfraHandlerTests(TestCase):
     def test_build_bootstrap_steps_skips_portacode_connect_when_requested(self):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=False)
         self.assertFalse(any(step.get("name") == "portacode_connect" for step in steps))
+
+    def test_sanitize_project_paths_keeps_child_relative_markers_raw(self):
+        paths = _sanitize_project_paths(["~/.openclaw", "$HOME/app"])
+
+        self.assertEqual(paths, ["~/.openclaw", "$HOME/app"])
 
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
     @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")

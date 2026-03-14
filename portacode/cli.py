@@ -212,15 +212,6 @@ def connect(
     existing_identity = keypair_files_exist()
     should_pair = pairing_requested and not existing_identity
 
-    if normalized_project_paths and not pairing_requested:
-        click.echo(
-            click.style(
-                "⚠ Project paths were provided but no pairing code was supplied; "
-                "they will be ignored.",
-                fg="yellow",
-            )
-        )
-
     # 2. Load or create keypair (in memory if pairing)
     if should_pair:
         keypair = generate_in_memory_keypair()
@@ -393,7 +384,10 @@ def connect(
     # 3. Start connection manager
     if detach and not non_interactive:
         click.echo("Establishing connection in the background…")
-        p = Process(target=_run_connection_forever, args=(target_gateway, keypair, pid_file))
+        p = Process(
+            target=_run_connection_forever,
+            args=(target_gateway, keypair, pid_file, normalized_project_paths, debug),
+        )
         p.daemon = False  # We want it to live beyond parent process on POSIX; on Windows it's anyway independent
         p.start()
         click.echo(click.style(f"Background process PID: {p.pid}", fg="green"))
@@ -404,7 +398,12 @@ def connect(
         pid_file.write_text(str(os.getpid()))
 
     async def _main() -> None:
-        mgr = ConnectionManager(target_gateway, keypair, debug=debug)
+        mgr = ConnectionManager(
+            target_gateway,
+            keypair,
+            debug=debug,
+            initial_project_paths=normalized_project_paths,
+        )
         await run_until_interrupt(mgr)
 
     try:
@@ -413,13 +412,24 @@ def connect(
         pid_file.unlink(missing_ok=True)
 
 
-def _run_connection_forever(url: str, keypair, pid_file: Path):
+def _run_connection_forever(
+    url: str,
+    keypair,
+    pid_file: Path,
+    initial_project_paths: Optional[list[str]] = None,
+    debug: bool = False,
+):
     """Entry-point for detached background process."""
     try:
         pid_file.write_text(str(os.getpid()))
 
         async def _main() -> None:
-            mgr = ConnectionManager(url, keypair, debug=debug)
+            mgr = ConnectionManager(
+                url,
+                keypair,
+                debug=debug,
+                initial_project_paths=initial_project_paths,
+            )
             await run_until_interrupt(mgr)
 
         asyncio.run(_main())

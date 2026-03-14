@@ -50,7 +50,15 @@ class ConnectionManager:
     WS_PING_INTERVAL = 60.0
     WS_PING_TIMEOUT = 20.0
 
-    def __init__(self, gateway_url: str, keypair: KeyPair, reconnect_delay: float = 1.0, max_retries: int = None, debug: bool = False):
+    def __init__(
+        self,
+        gateway_url: str,
+        keypair: KeyPair,
+        reconnect_delay: float = 1.0,
+        max_retries: int = None,
+        debug: bool = False,
+        initial_project_paths: Optional[list[str]] = None,
+    ):
         self.gateway_url = gateway_url
         self.keypair = keypair
         self.reconnect_delay = reconnect_delay
@@ -69,6 +77,7 @@ class ConnectionManager:
         self._clock_sync_sent_at: Optional[float] = None
         self._clock_sync_failures = 0
         self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
+        self.initial_project_paths = [str(path).strip() for path in (initial_project_paths or []) if str(path).strip()]
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -174,6 +183,16 @@ class ConnectionManager:
             else:
                 print("Press Ctrl+C to close the connection.")
         # Finished authentication flow.
+        await self._register_initial_project_paths()
+
+    async def _register_initial_project_paths(self) -> None:
+        if not self.initial_project_paths or self.websocket is None:
+            return
+        payload = {
+            "event": "register_project_paths",
+            "project_paths": self.initial_project_paths,
+        }
+        await self.websocket.send(json.dumps({"channel": 0, "payload": payload}))
 
     async def _listen(self) -> None:
         assert self.websocket is not None, "WebSocket not ready"

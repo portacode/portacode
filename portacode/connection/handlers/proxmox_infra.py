@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 import platformdirs
 
 from .base import SyncHandler
-from ...utils.runtime_paths import expand_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -1958,9 +1957,6 @@ def _sanitize_project_paths(candidate: Any) -> List[str]:
     for path in parsed:
         if len(path) > 500:
             raise ValueError("project_paths entries cannot exceed 500 characters")
-        path = expand_runtime_path(path)
-        if len(path) > 500:
-            raise ValueError("expanded project_paths entries cannot exceed 500 characters")
         if path in seen:
             continue
         seen.add(path)
@@ -2294,19 +2290,49 @@ def _resolve_user_data_home(vmid: int, user: str) -> str:
     return _resolve_user_data_dir(vmid, user)
 
 
-def _build_root_service_install_command(vmid: int, runtime_user: str, cli_path: str) -> str:
+def _build_root_service_install_command(
+    vmid: int,
+    runtime_user: str,
+    cli_path: str,
+    project_paths: Optional[List[str]] = None,
+) -> str:
     data_home = _resolve_user_data_home(vmid, runtime_user)
-    env_prefix = " ".join(
-        [
-            "PORTACODE_SERVICE_USER=root",
-            f"PORTACODE_DEFAULT_RUNTIME_USER={shlex.quote(runtime_user)}",
-            f"PORTACODE_XDG_DATA_HOME={shlex.quote(data_home)}",
-        ]
-    )
-    return f"{env_prefix} {shlex.quote(cli_path)} service install"
+    env_parts = [
+        "PORTACODE_SERVICE_USER=root",
+        f"PORTACODE_DEFAULT_RUNTIME_USER={shlex.quote(runtime_user)}",
+        f"PORTACODE_XDG_DATA_HOME={shlex.quote(data_home)}",
+    ]
+    for index, path in enumerate(project_paths or [], start=1):
+        cleaned = str(path).strip()
+        if cleaned:
+            env_parts.append(f"PORTACODE_PROJECT_PATH_{index}={shlex.quote(cleaned)}")
+    return f"{' '.join(env_parts)} {shlex.quote(cli_path)} service install"
 
 
-def _enforce_service_venv_execstart(vmid: int, service_user: str, runtime_user: Optional[str] = None) -> Dict[str, bool]:
+def _build_connect_command_for_service_python(
+    python_path: str,
+    *,
+    module: str = "portacode",
+    project_paths: Optional[List[str]] = None,
+) -> str:
+    argv = [python_path, "-m", module, "connect", "--non-interactive"]
+    for path in project_paths or []:
+        cleaned = str(path).strip()
+        if cleaned:
+            argv.extend(["--project-path", cleaned])
+    return shlex.join(argv)
+
+
+def _escape_sed_replacement(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("&", "\\&").replace("#", "\\#")
+
+
+def _enforce_service_venv_execstart(
+    vmid: int,
+    service_user: str,
+    runtime_user: Optional[str] = None,
+    project_paths: Optional[List[str]] = None,
+) -> Dict[str, bool]:
     """Ensure service launchers use venv python when available in the container.
 
     This provides forward compatibility while some deployed portacode versions still
@@ -2316,14 +2342,21 @@ def _enforce_service_venv_execstart(vmid: int, service_user: str, runtime_user: 
     effective_runtime_user = runtime_user or service_user
     default_home = shlex.quote("/root" if service_user == "root" else f"/home/{service_user}")
     runtime_data_home = shlex.quote(_resolve_user_data_home(vmid, effective_runtime_user))
+    connect_command = _build_connect_command_for_service_python(
+        expected_python,
+        project_paths=project_paths,
+    )
+    connect_command_escaped = _escape_sed_replacement(connect_command)
+    expected_execstart = f"ExecStart={connect_command}"
+    openrc_connect_line = f"exec {connect_command} >> /var/log/portacode/connect.log 2>&1"
     command = (
         "if [ -x {py} ]; then "
         "  if [ -f /etc/systemd/system/portacode.service ]; then "
-        "    expected='ExecStart={py} -m portacode connect --non-interactive'; "
+        "    expected={expected_execstart}; "
         "    if grep -Fqx \"$expected\" /etc/systemd/system/portacode.service; then "
         "      echo 'SYSTEMD_ALREADY_VENV=1'; "
         "    else "
-        "      sed -i 's#^ExecStart=.*#ExecStart={py} -m portacode connect --non-interactive#' "
+        "      sed -i 's#^ExecStart=.*#ExecStart={connect_command_escaped}#' "
         "        /etc/systemd/system/portacode.service && "
         "      /bin/systemctl daemon-reload && "
         "      /bin/systemctl restart portacode.service && "
@@ -2333,17 +2366,16 @@ def _enforce_service_venv_execstart(vmid: int, service_user: str, runtime_user: 
         "  if [ -f /usr/local/share/portacode/connect_service.sh ] && command -v rc-service >/dev/null 2>&1; then "
         "    home=$(getent passwd {quoted_user} 2>/dev/null | cut -d: -f6); "
         "    if [ -z \"$home\" ]; then home={default_home}; fi; "
-        "    expected_script='exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1'; "
-        "    expected_script_quoted='exec \"{py}\" -m portacode connect --non-interactive >> \"/var/log/portacode/connect.log\" 2>&1'; "
+        "    expected_script={expected_script}; "
         "    if grep -Fqx \"$expected_script\" /usr/local/share/portacode/connect_service.sh || "
-        "       grep -Fqx \"$expected_script_quoted\" /usr/local/share/portacode/connect_service.sh; then "
+        "       grep -Fqx \"$expected_script\" /usr/local/share/portacode/connect_service.sh; then "
         "      echo 'OPENRC_ALREADY_VENV=1'; "
         "    else "
         "      printf '%s\\n' '#!/bin/sh' "
         "        'export PORTACODE_DEFAULT_RUNTIME_USER={runtime_user}' "
         "        'export XDG_DATA_HOME={runtime_data_home}' "
         "        \"cd \\\"$home\\\"\" "
-        "        'exec {py} -m portacode connect --non-interactive >> /var/log/portacode/connect.log 2>&1' "
+        "        {expected_script} "
         "        >/usr/local/share/portacode/connect_service.sh && "
         "      chmod 755 /usr/local/share/portacode/connect_service.sh && "
         "      echo 'OPENRC_UPDATED_NO_RESTART=1'; "
@@ -2352,6 +2384,9 @@ def _enforce_service_venv_execstart(vmid: int, service_user: str, runtime_user: 
         "fi"
     ).format(
         py=shlex.quote(expected_python),
+        expected_execstart=shlex.quote(expected_execstart),
+        connect_command_escaped=connect_command_escaped,
+        expected_script=shlex.quote(openrc_connect_line),
         quoted_user=shlex.quote(service_user),
         default_home=default_home,
         runtime_user=shlex.quote(effective_runtime_user),
@@ -3514,7 +3549,12 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     cli_path = _resolve_portacode_cli_path(vmid, payload_local["username"])
                     res = _run_pct(
                         vmid,
-                        _build_root_service_install_command(vmid, payload_local["username"], cli_path),
+                        _build_root_service_install_command(
+                            vmid,
+                            payload_local["username"],
+                            cli_path,
+                            project_paths=payload_local.get("project_paths"),
+                        ),
                     )
 
                     if res["returncode"] != 0:
@@ -3540,6 +3580,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         vmid,
                         "root",
                         runtime_user=payload_local["username"],
+                        project_paths=payload_local.get("project_paths"),
                     )
                     logger.info(
                         "create_proxmox_container: service venv enforcement vmid=%s details=%s",
@@ -3711,7 +3752,15 @@ class StartPortacodeServiceHandler(SyncHandler):
         )
 
         cli_path = _resolve_portacode_cli_path(vmid, user)
-        res = _run_pct(vmid, _build_root_service_install_command(vmid, user, cli_path))
+        res = _run_pct(
+            vmid,
+            _build_root_service_install_command(
+                vmid,
+                user,
+                cli_path,
+                project_paths=record.get("project_paths"),
+            ),
+        )
 
         if res["returncode"] != 0:
             _emit_progress_event(
@@ -3732,7 +3781,12 @@ class StartPortacodeServiceHandler(SyncHandler):
             )
             raise RuntimeError(res.get("stderr") or res.get("stdout") or "Service install failed")
 
-        venv_service_adjustment = _enforce_service_venv_execstart(vmid, "root", runtime_user=user)
+        venv_service_adjustment = _enforce_service_venv_execstart(
+            vmid,
+            "root",
+            runtime_user=user,
+            project_paths=record.get("project_paths"),
+        )
         logger.info(
             "start_portacode_service: service venv enforcement vmid=%s details=%s",
             vmid,

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import textwrap
 import os
+import shlex
 from typing import List, Protocol, Union
 import shutil
 import pwd
@@ -35,6 +36,9 @@ __all__ = [
     "ServiceManager",
     "get_manager",
 ]
+
+
+PROJECT_PATH_ENV_PREFIX = "PORTACODE_PROJECT_PATH_"
 
 
 def _resolve_service_user() -> str:
@@ -49,6 +53,28 @@ def _resolve_home_for_user(user: str) -> Path:
         return Path(pwd.getpwnam(user).pw_dir)
     except KeyError:
         return Path("/root") if user == "root" else Path(f"/home/{user}")
+
+
+def _load_connect_project_paths_from_env() -> List[str]:
+    indexed: list[tuple[int, str]] = []
+    for key, value in os.environ.items():
+        if not key.startswith(PROJECT_PATH_ENV_PREFIX):
+            continue
+        suffix = key[len(PROJECT_PATH_ENV_PREFIX):]
+        if not suffix.isdigit():
+            continue
+        cleaned = str(value).strip()
+        if not cleaned:
+            continue
+        indexed.append((int(suffix), cleaned))
+    return [value for _, value in sorted(indexed)]
+
+
+def _build_connect_command(python: str, *, module: str = "portacode") -> str:
+    argv = [python, "-m", module, "connect", "--non-interactive"]
+    for path in _load_connect_project_paths_from_env():
+        argv.extend(["--project-path", path])
+    return shlex.join(argv)
 
 
 class ServiceManager(Protocol):
@@ -148,7 +174,7 @@ class _SystemdUserService:
                 User={self.user}
                 WorkingDirectory={self.home}
                 {env_block}
-                ExecStart={self.python} -m portacode connect --non-interactive
+                ExecStart={_build_connect_command(self.python)}
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5
@@ -165,7 +191,7 @@ class _SystemdUserService:
                 [Service]
                 Type=simple
                 {env_block}
-                ExecStart={self.python} -m portacode.cli connect --non-interactive
+                ExecStart={_build_connect_command(self.python, module="portacode.cli")}
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5
@@ -305,13 +331,14 @@ class _OpenRCService:
     
     def _write_wrapper_script(self) -> None:
         xdg_export_line = f'export XDG_DATA_HOME="{self.xdg_data_home}"' if self.xdg_data_home else ""
+        connect_command = _build_connect_command(self.python)
         script = textwrap.dedent(f"""
             #!/bin/sh
             export PORTACODE_DEFAULT_RUNTIME_USER="{self.runtime_user}"
             {xdg_export_line}
             cd "{self.home}"
             while true; do
-                "{self.python}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+                {connect_command} >> "{self.log_path}" 2>&1
                 rc="$?"
                 if [ "$rc" -eq {AUTH_REJECTED_EXIT_CODE} ]; then
                     echo "Portacode authentication rejected; stopping service restart loop." >> "{self.log_path}"
@@ -404,12 +431,13 @@ class _LaunchdService:
     def install(self) -> None:
         self.plist_path.parent.mkdir(parents=True, exist_ok=True)
         self.script_path.parent.mkdir(parents=True, exist_ok=True)
+        connect_command = _build_connect_command(sys.executable)
         script = textwrap.dedent(
             f"""
             #!/bin/sh
             cd "$HOME" || exit 1
             while true; do
-                "{sys.executable}" -m portacode connect --non-interactive >> "{self.log_path}" 2>&1
+                {connect_command} >> "{self.log_path}" 2>&1
                 rc="$?"
                 if [ "$rc" -eq {AUTH_REJECTED_EXIT_CODE} ]; then
                     echo "Portacode authentication rejected; stopping service restart loop." >> "{self.log_path}"
@@ -505,11 +533,15 @@ class _WindowsTask:
         # Always use wrapper so we can capture logs reliably
         self._script_path.parent.mkdir(parents=True, exist_ok=True)
         py_cmd = f'"{pyw}"' if use_pyw else f'"{python}"'
+        project_args = ""
+        for path in _load_connect_project_paths_from_env():
+            escaped = path.replace('"', '""')
+            project_args += f' --project-path "{escaped}"'
         script = (
             "@echo off\r\n"
             "cd /d %USERPROFILE%\r\n"
             ":loop\r\n"
-            f"{py_cmd} -m portacode connect --non-interactive >> \"%USERPROFILE%\\.local\\share\\portacode\\connect.log\" 2>>&1\r\n"
+            f"{py_cmd} -m portacode connect --non-interactive{project_args} >> \"%USERPROFILE%\\.local\\share\\portacode\\connect.log\" 2>>&1\r\n"
             "set \"RC=%ERRORLEVEL%\"\r\n"
             f"if \"%RC%\"==\"{AUTH_REJECTED_EXIT_CODE}\" exit /b 0\r\n"
             "if \"%RC%\"==\"0\" exit /b 0\r\n"
