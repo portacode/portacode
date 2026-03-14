@@ -68,8 +68,8 @@ class ProxmoxInfraHandlerTests(TestCase):
         issued_command = mock_run_pct.call_args.args[1]
         self.assertIn("sed -i ", issued_command)
         self.assertIn("s#^ExecStart=.*#ExecStart=/opt/portacode-venv/bin/python -m portacode connect --non-interactive", issued_command)
-        self.assertIn("'\"'\"'$HOME/.openclaw'\"'\"'", issued_command)
-        self.assertIn("'\"'\"'$HOME/.openclaw/workspace'\"'\"'", issued_command)
+        self.assertIn("'\"'\"'$$HOME/.openclaw'\"'\"'", issued_command)
+        self.assertIn("'\"'\"'$$HOME/.openclaw/workspace'\"'\"'", issued_command)
 
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
     @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")

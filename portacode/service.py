@@ -70,11 +70,28 @@ def _load_connect_project_paths_from_env() -> List[str]:
     return [value for _, value in sorted(indexed)]
 
 
-def _build_connect_command(python: str, *, module: str = "portacode") -> str:
+def _build_shell_command(argv: List[str]) -> str:
+    return shlex.join(argv)
+
+
+def _build_systemd_execstart(argv: List[str]) -> str:
+    escaped_args = [
+        shlex.quote(arg.replace("%", "%%").replace("$", "$$"))
+        for arg in argv
+    ]
+    return " ".join(escaped_args)
+
+
+def _build_connect_command(
+    python: str,
+    *,
+    module: str = "portacode",
+    renderer=_build_shell_command,
+) -> str:
     argv = [python, "-m", module, "connect", "--non-interactive"]
     for path in _load_connect_project_paths_from_env():
         argv.extend(["--project-path", path])
-    return shlex.join(argv)
+    return renderer(argv)
 
 
 class ServiceManager(Protocol):
@@ -174,7 +191,7 @@ class _SystemdUserService:
                 User={self.user}
                 WorkingDirectory={self.home}
                 {env_block}
-                ExecStart={_build_connect_command(self.python)}
+                ExecStart={_build_connect_command(self.python, renderer=_build_systemd_execstart)}
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5
@@ -191,7 +208,7 @@ class _SystemdUserService:
                 [Service]
                 Type=simple
                 {env_block}
-                ExecStart={_build_connect_command(self.python, module="portacode.cli")}
+                ExecStart={_build_connect_command(self.python, module="portacode.cli", renderer=_build_systemd_execstart)}
                 Restart=on-failure
                 RestartPreventExitStatus={AUTH_REJECTED_EXIT_CODE}
                 RestartSec=5

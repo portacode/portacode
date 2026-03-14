@@ -2314,12 +2314,19 @@ def _build_connect_command_for_service_python(
     *,
     module: str = "portacode",
     project_paths: Optional[List[str]] = None,
+    renderer: str = "shell",
 ) -> str:
     argv = [python_path, "-m", module, "connect", "--non-interactive"]
     for path in project_paths or []:
         cleaned = str(path).strip()
         if cleaned:
             argv.extend(["--project-path", cleaned])
+    if renderer == "systemd":
+        escaped_args = [
+            shlex.quote(arg.replace("%", "%%").replace("$", "$$"))
+            for arg in argv
+        ]
+        return " ".join(escaped_args)
     return shlex.join(argv)
 
 
@@ -2342,14 +2349,20 @@ def _enforce_service_venv_execstart(
     effective_runtime_user = runtime_user or service_user
     default_home = shlex.quote("/root" if service_user == "root" else f"/home/{service_user}")
     runtime_data_home = shlex.quote(_resolve_user_data_home(vmid, effective_runtime_user))
-    connect_command = _build_connect_command_for_service_python(
+    systemd_connect_command = _build_connect_command_for_service_python(
         expected_python,
         project_paths=project_paths,
+        renderer="systemd",
     )
-    connect_command_escaped = _escape_sed_replacement(connect_command)
+    shell_connect_command = _build_connect_command_for_service_python(
+        expected_python,
+        project_paths=project_paths,
+        renderer="shell",
+    )
+    connect_command_escaped = _escape_sed_replacement(systemd_connect_command)
     sed_script = shlex.quote(f"s#^ExecStart=.*#ExecStart={connect_command_escaped}#")
-    expected_execstart = f"ExecStart={connect_command}"
-    openrc_connect_line = f"exec {connect_command} >> /var/log/portacode/connect.log 2>&1"
+    expected_execstart = f"ExecStart={systemd_connect_command}"
+    openrc_connect_line = f"exec {shell_connect_command} >> /var/log/portacode/connect.log 2>&1"
     command = (
         "if [ -x {py} ]; then "
         "  if [ -f /etc/systemd/system/portacode.service ]; then "
