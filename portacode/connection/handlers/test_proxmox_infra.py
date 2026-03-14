@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
     _build_bootstrap_steps,
+    _enforce_service_venv_execstart,
     _get_provisioning_user_info,
     _resolve_user_data_dir,
     _sanitize_project_paths,
@@ -47,6 +48,28 @@ class ProxmoxInfraHandlerTests(TestCase):
         paths = _sanitize_project_paths(["~/.openclaw", "$HOME/app"])
 
         self.assertEqual(paths, ["~/.openclaw", "$HOME/app"])
+
+    @patch("portacode.connection.handlers.proxmox_infra._run_pct")
+    @patch("portacode.connection.handlers.proxmox_infra._resolve_user_data_home", return_value="/home/user/.local/share")
+    def test_enforce_service_venv_execstart_shell_quotes_sed_script_with_project_paths(
+        self,
+        _mock_data_home,
+        mock_run_pct,
+    ):
+        mock_run_pct.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        _enforce_service_venv_execstart(
+            101,
+            "root",
+            runtime_user="user",
+            project_paths=["$HOME/.openclaw", "$HOME/.openclaw/workspace"],
+        )
+
+        issued_command = mock_run_pct.call_args.args[1]
+        self.assertIn("sed -i ", issued_command)
+        self.assertIn("s#^ExecStart=.*#ExecStart=/opt/portacode-venv/bin/python -m portacode connect --non-interactive", issued_command)
+        self.assertIn("'\"'\"'$HOME/.openclaw'\"'\"'", issued_command)
+        self.assertIn("'\"'\"'$HOME/.openclaw/workspace'\"'\"'", issued_command)
 
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
     @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")

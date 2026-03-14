@@ -20,6 +20,7 @@ import os
 import time
 from datetime import datetime, timezone
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from websockets.exceptions import ConnectionClosedError
@@ -75,10 +76,28 @@ from .handlers.project_aware_file_handlers import (
 )
 from .handlers.session import SessionManager
 from .webmin_proxy_config import apply_turnkey_webmin_proxy_config
+from portacode.tunneling.privileged import read_text, run, write_text
 
 logger = logging.getLogger(__name__)
 EXPOSED_SERVICES_MONITOR_PATH = "/etc/portacode/exposed_services.json"
 EXPOSED_SERVICES_MONITOR_INTERVAL_S = 2.0
+EXPOSED_SERVICES_MISSING_SIGNATURE = "__missing__"
+EXPOSED_SERVICES_INVALID_SIGNATURE = "__invalid__"
+EXPOSED_SERVICES_ENV_PATH = Path("/etc/portacode/exposed_services.env")
+EXPOSED_SERVICES_PROFILE_PATH = Path("/etc/profile.d/portacode_exposed_services.sh")
+SYSTEM_ENV_PATH = Path("/etc/environment")
+SYSTEM_ENV_D_PATH = Path("/etc/environment.d/90-portacode-exposed-services.conf")
+DEFAULT_ENV_PATH = Path("/etc/default/portacode_exposed_services")
+SYSTEMD_MANAGER_DROPIN_PATH = Path("/etc/systemd/system.conf.d/90-portacode-exposed-services.conf")
+OPENRC_ENV_PATH = Path("/etc/conf.d/portacode_exposed_services")
+GLOBAL_SHELL_HOOK_PATHS = (
+    Path("/etc/profile"),
+    Path("/etc/bash.bashrc"),
+    Path("/etc/bash/bashrc"),
+    Path("/etc/zsh/zshenv"),
+)
+MANAGED_BLOCK_BEGIN = "# >>> PORTACODE_EXPOSED_SERVICES >>>"
+MANAGED_BLOCK_END = "# <<< PORTACODE_EXPOSED_SERVICES <<<"
 PORTACODE_EXPOSED_ENV_KEYS = (
     "PORTACODE_EXPOSED_SERVICES_JSON",
     "PORTACODE_EXPOSED_PORTS",
@@ -605,13 +624,13 @@ class TerminalManager:
     def _read_exposed_services_snapshot(self) -> Dict[str, Any]:
         path = EXPOSED_SERVICES_MONITOR_PATH
         if not os.path.exists(path):
-            return {"signature": "__missing__", "services": []}
+            return {"signature": EXPOSED_SERVICES_MISSING_SIGNATURE, "services": []}
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 raw = handle.read()
             payload = json.loads(raw)
         except Exception:
-            return {"signature": "__invalid__", "services": []}
+            return {"signature": EXPOSED_SERVICES_INVALID_SIGNATURE, "services": []}
 
         services = payload.get("exposed_services")
         if not isinstance(services, list):
@@ -658,6 +677,185 @@ class TerminalManager:
             env_map[f"PORTACODE_PUBLIC_HOST_{index}"] = host
         return env_map
 
+    def _shell_quote_single(self, value: str) -> str:
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _format_etc_environment_value(self, value: str) -> str:
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    def _format_systemd_default_environment(self, value: str) -> str:
+        return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+    def _build_exposed_services_env_file(self, env_map: Dict[str, str]) -> str:
+        lines = ["# Managed by portacode: do not edit manually."]
+        for key in sorted(env_map):
+            lines.append(f"{key}={self._shell_quote_single(env_map[key])}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _build_exposed_services_profile_script(self) -> str:
+        return (
+            "#!/bin/sh\n"
+            "# Managed by portacode: loads exposure env vars for new shell sessions.\n"
+            f'if [ -f "{EXPOSED_SERVICES_ENV_PATH}" ]; then\n'
+            "  set -a\n"
+            f'  . "{EXPOSED_SERVICES_ENV_PATH}"\n'
+            "  set +a\n"
+            "fi\n"
+        )
+
+    def _build_shell_hook_block(self) -> str:
+        return (
+            f"{MANAGED_BLOCK_BEGIN}\n"
+            "# Managed by portacode: loads exposure env vars for shell sessions.\n"
+            f'if [ -f "{EXPOSED_SERVICES_ENV_PATH}" ]; then\n'
+            "  set -a\n"
+            f'  . "{EXPOSED_SERVICES_ENV_PATH}"\n'
+            "  set +a\n"
+            "fi\n"
+            f"{MANAGED_BLOCK_END}\n"
+        )
+
+    def _strip_managed_block(self, text: str) -> str:
+        lines = (text or "").splitlines(keepends=True)
+        output: list[str] = []
+        in_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == MANAGED_BLOCK_BEGIN:
+                in_block = True
+                continue
+            if stripped == MANAGED_BLOCK_END:
+                in_block = False
+                continue
+            if not in_block:
+                output.append(line)
+        merged = "".join(output).rstrip()
+        return merged + ("\n" if merged else "")
+
+    def _build_environmentd_content(self, env_map: Dict[str, str]) -> str:
+        lines = ["# Managed by portacode: exposed services environment."]
+        for key in sorted(env_map.keys()):
+            lines.append(f"{key}={self._format_etc_environment_value(env_map[key])}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _build_default_env_content(self, env_map: Dict[str, str]) -> str:
+        lines = ["# Managed by portacode: exposed services environment."]
+        for key in sorted(env_map.keys()):
+            lines.append(f"{key}={self._shell_quote_single(env_map[key])}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _build_systemd_manager_dropin(self, env_map: Dict[str, str]) -> str:
+        lines = [
+            "# Managed by portacode: exposed services environment.",
+            "[Manager]",
+        ]
+        for key in sorted(env_map.keys()):
+            assignment = f"{key}={self._format_systemd_default_environment(env_map[key])}"
+            lines.append(f'DefaultEnvironment="{assignment}"')
+        lines.append("")
+        return "\n".join(lines)
+
+    def _build_openrc_env_content(self, env_map: Dict[str, str]) -> str:
+        lines = [
+            "# Managed by portacode: exposed services environment.",
+            "# Sourced by OpenRC scripts that include /etc/conf.d/* shell assignments.",
+        ]
+        for key in sorted(env_map.keys()):
+            lines.append(f"{key}={self._shell_quote_single(env_map[key])}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _merge_system_environment(self, existing_text: str, env_map: Dict[str, str]) -> str:
+        kept_lines: List[str] = []
+        managed_keys = set(env_map.keys())
+        for raw_line in (existing_text or "").splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                kept_lines.append(raw_line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in managed_keys or key.startswith("PORTACODE_PUBLIC_HOST_"):
+                continue
+            kept_lines.append(raw_line)
+
+        for key in sorted(managed_keys):
+            kept_lines.append(f"{key}={self._format_etc_environment_value(env_map[key])}")
+
+        return "\n".join(kept_lines).rstrip() + "\n"
+
+    def _read_text_if_exists(self, path: Path) -> str:
+        try:
+            return read_text(path)
+        except Exception:
+            return ""
+
+    def _write_managed_text_if_changed(self, path: Path, content: str, *, mode: int) -> None:
+        current = self._read_text_if_exists(path)
+        if current == content:
+            return
+        write_text(path, content, mode=mode)
+
+    def _upsert_managed_shell_hook(self, path: Path, *, mode: int) -> None:
+        merged = self._strip_managed_block(self._read_text_if_exists(path)) + self._build_shell_hook_block()
+        self._write_managed_text_if_changed(path, merged, mode=mode)
+
+    def _refresh_exposed_services_service_env(self) -> None:
+        systemd_res = run(
+            ["sh", "-lc", "if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reexec >/dev/null 2>&1 || true; fi"]
+        )
+        if systemd_res.returncode != 0:
+            logger.debug("systemctl daemon-reexec refresh returned %s", systemd_res.returncode)
+        openrc_res = run(
+            ["sh", "-lc", "if command -v env-update >/dev/null 2>&1; then env-update >/dev/null 2>&1 || true; fi"]
+        )
+        if openrc_res.returncode != 0:
+            logger.debug("env-update refresh returned %s", openrc_res.returncode)
+
+    def _sync_exposed_services_compat_files(self, services: List[Dict[str, Any]]) -> None:
+        env_map = self._build_exposed_services_env_map(services)
+        self._write_managed_text_if_changed(
+            EXPOSED_SERVICES_ENV_PATH,
+            self._build_exposed_services_env_file(env_map),
+            mode=0o644,
+        )
+        self._write_managed_text_if_changed(
+            EXPOSED_SERVICES_PROFILE_PATH,
+            self._build_exposed_services_profile_script(),
+            mode=0o755,
+        )
+        for hook_path in GLOBAL_SHELL_HOOK_PATHS:
+            self._upsert_managed_shell_hook(hook_path, mode=0o644)
+        self._write_managed_text_if_changed(
+            SYSTEM_ENV_PATH,
+            self._merge_system_environment(self._read_text_if_exists(SYSTEM_ENV_PATH), env_map),
+            mode=0o644,
+        )
+        self._write_managed_text_if_changed(
+            SYSTEM_ENV_D_PATH,
+            self._build_environmentd_content(env_map),
+            mode=0o644,
+        )
+        self._write_managed_text_if_changed(
+            DEFAULT_ENV_PATH,
+            self._build_default_env_content(env_map),
+            mode=0o644,
+        )
+        self._write_managed_text_if_changed(
+            SYSTEMD_MANAGER_DROPIN_PATH,
+            self._build_systemd_manager_dropin(env_map),
+            mode=0o644,
+        )
+        self._write_managed_text_if_changed(
+            OPENRC_ENV_PATH,
+            self._build_openrc_env_content(env_map),
+            mode=0o644,
+        )
+        self._refresh_exposed_services_service_env()
+
     def _apply_exposed_services_env_to_process(self, services: List[Dict[str, Any]]) -> None:
         env_map = self._build_exposed_services_env_map(services)
         stale_prefixed_keys = [
@@ -674,33 +872,36 @@ class TerminalManager:
     async def _watch_exposed_services(self) -> None:
         while True:
             try:
-                await asyncio.sleep(EXPOSED_SERVICES_MONITOR_INTERVAL_S)
                 snapshot = self._read_exposed_services_snapshot()
                 signature = snapshot.get("signature")
                 if signature == self._last_exposed_services_signature:
+                    await asyncio.sleep(EXPOSED_SERVICES_MONITOR_INTERVAL_S)
                     continue
-                self._last_exposed_services_signature = signature
                 services = snapshot.get("services") or []
 
                 # Keep the running agent env in sync so newly spawned PTY sessions
                 # inherit updated PORTACODE_* variables immediately.
                 self._apply_exposed_services_env_to_process(services)
+                if signature not in {EXPOSED_SERVICES_MISSING_SIGNATURE, EXPOSED_SERVICES_INVALID_SIGNATURE}:
+                    self._sync_exposed_services_compat_files(services)
                 try:
                     apply_turnkey_webmin_proxy_config(services)
                 except Exception as exc:
                     logger.warning("Failed to auto-configure Webmin for exposed services: %s", exc)
 
-                if not self._client_session_manager.has_interested_clients():
-                    continue
+                self._last_exposed_services_signature = signature
 
-                payload = {
-                    "event": "exposed_services_updated",
-                    "exposed_services": services,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await self._send_session_aware(payload)
+                if self._client_session_manager.has_interested_clients():
+                    payload = {
+                        "event": "exposed_services_updated",
+                        "exposed_services": services,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    await self._send_session_aware(payload)
+                await asyncio.sleep(EXPOSED_SERVICES_MONITOR_INTERVAL_S)
             except Exception as exc:
                 logger.exception("Error in exposed-services watcher: %s", exc)
+                await asyncio.sleep(EXPOSED_SERVICES_MONITOR_INTERVAL_S)
 
     async def _send_initial_data_to_clients(self, newly_added_sessions: List[str] = None):
         """Send initial system info and terminal list to connected clients.

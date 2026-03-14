@@ -613,29 +613,7 @@ def _sync_exposed_services_into_container(
         "exposed_services": exposed_ports,
     }
     json_data = (json.dumps(services_payload, indent=2) + "\n").encode("utf-8")
-    env_map = _build_exposed_services_env_map(exposed_ports)
-    env_data = _build_exposed_services_env(exposed_ports).encode("utf-8")
-    profile_data = _build_exposed_services_profile_script().encode("utf-8")
-    envd_data = _build_environmentd_content(env_map).encode("utf-8")
-    default_env_data = _build_default_env_content(env_map).encode("utf-8")
-    systemd_dropin_data = _build_systemd_manager_dropin(env_map).encode("utf-8")
-    openrc_env_data = _build_openrc_env_content(env_map).encode("utf-8")
-
     _push_root_file_to_container(vmid, EXPOSED_SERVICES_JSON_PATH, json_data, mode=0o644)
-    _push_root_file_to_container(vmid, EXPOSED_SERVICES_ENV_PATH, env_data, mode=0o644)
-    _push_root_file_to_container(vmid, EXPOSED_SERVICES_PROFILE_PATH, profile_data, mode=0o755)
-    for hook_path in GLOBAL_SHELL_HOOK_PATHS:
-        _upsert_managed_shell_hook(vmid, hook_path, mode=0o644)
-
-    current_env = _run_pct_exec(vmid, ["cat", SYSTEM_ENV_PATH])
-    existing_text = current_env.stdout if current_env.returncode == 0 else ""
-    merged_environment = _merge_system_environment(existing_text, env_map)
-    _push_root_file_to_container(vmid, SYSTEM_ENV_PATH, merged_environment.encode("utf-8"), mode=0o644)
-    _push_root_file_to_container(vmid, SYSTEM_ENV_D_PATH, envd_data, mode=0o644)
-    _push_root_file_to_container(vmid, DEFAULT_ENV_PATH, default_env_data, mode=0o644)
-    _push_root_file_to_container(vmid, SYSTEMD_MANAGER_DROPIN_PATH, systemd_dropin_data, mode=0o644)
-    _push_root_file_to_container(vmid, OPENRC_ENV_PATH, openrc_env_data, mode=0o644)
-    _best_effort_refresh_service_env(vmid)
 
 
 def _rule_targets_container(rule: Dict[str, Any], container_device_id: str, domain: str) -> bool:

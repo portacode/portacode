@@ -2347,6 +2347,7 @@ def _enforce_service_venv_execstart(
         project_paths=project_paths,
     )
     connect_command_escaped = _escape_sed_replacement(connect_command)
+    sed_script = shlex.quote(f"s#^ExecStart=.*#ExecStart={connect_command_escaped}#")
     expected_execstart = f"ExecStart={connect_command}"
     openrc_connect_line = f"exec {connect_command} >> /var/log/portacode/connect.log 2>&1"
     command = (
@@ -2356,7 +2357,7 @@ def _enforce_service_venv_execstart(
         "    if grep -Fqx \"$expected\" /etc/systemd/system/portacode.service; then "
         "      echo 'SYSTEMD_ALREADY_VENV=1'; "
         "    else "
-        "      sed -i 's#^ExecStart=.*#ExecStart={connect_command_escaped}#' "
+        "      sed -i {sed_script} "
         "        /etc/systemd/system/portacode.service && "
         "      /bin/systemctl daemon-reload && "
         "      /bin/systemctl restart portacode.service && "
@@ -2385,7 +2386,7 @@ def _enforce_service_venv_execstart(
     ).format(
         py=shlex.quote(expected_python),
         expected_execstart=shlex.quote(expected_execstart),
-        connect_command_escaped=connect_command_escaped,
+        sed_script=sed_script,
         expected_script=shlex.quote(openrc_connect_line),
         quoted_user=shlex.quote(service_user),
         default_home=default_home,
