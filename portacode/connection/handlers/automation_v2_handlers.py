@@ -40,6 +40,56 @@ WAIT_FOR_REQUEST_TIMEOUT_SECONDS = 5.0
 WAIT_FOR_DEFAULT_TIMEOUT_SECONDS = 600.0
 
 
+def _input_id_to_env_name(input_id: Any) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", str(input_id or "").strip())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        return ""
+    return normalized.upper()
+
+
+def _normalize_runtime_inputs(raw_inputs: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw_inputs, dict):
+        return {}
+    payload: dict[str, dict[str, Any]] = {}
+    for raw_input_id, raw_definition in raw_inputs.items():
+        input_id = str(raw_input_id or "").strip()
+        env_name = _input_id_to_env_name(input_id)
+        if not input_id or not env_name or not isinstance(raw_definition, dict):
+            continue
+        value = raw_definition.get("value")
+        if value in (None, ""):
+            continue
+        if isinstance(value, (dict, list)):
+            continue
+        payload[input_id] = {
+            "env_name": env_name,
+            "value": str(value),
+            "is_secret": bool(raw_definition.get("is_secret")),
+            "type": str(raw_definition.get("type") or "text"),
+        }
+    return payload
+
+
+def _runtime_input_debug_summary(task_inputs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for input_id, payload in (task_inputs or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("value")
+        summary.append(
+            {
+                "input_id": str(input_id),
+                "env_name": str(payload.get("env_name") or ""),
+                "type": str(payload.get("type") or "text"),
+                "is_secret": bool(payload.get("is_secret")),
+                "value_present": value not in (None, "", []),
+                "value_len": len(str(value or "")) if value not in (None, [], {}) else 0,
+            }
+        )
+    return summary
+
+
 def _trim_text(value: Any, max_chars: int = MAX_STDIO_CHARS) -> str:
     text = "" if value is None else str(value)
     if len(text) <= max_chars:
@@ -115,6 +165,7 @@ class _AutomationRuntimeV2:
         self._runner_task: Optional[asyncio.Task] = None
         self._current_process: Optional[asyncio.subprocess.Process] = None
         self._current_process_task_id: Optional[str] = None
+        self._task_inputs: Dict[str, dict[str, dict[str, Any]]] = {}
         self._change_condition = asyncio.Condition()
         self._event_sender: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._load_state()
@@ -158,6 +209,7 @@ class _AutomationRuntimeV2:
         self,
         task_id: str,
         instructions: Any,
+        inputs: Any,
         default_timeout_seconds: float,
     ) -> Dict[str, Any]:
         if not isinstance(instructions, list):
@@ -204,6 +256,14 @@ class _AutomationRuntimeV2:
                 "state_seq": 1,
             }
             tasks[task_key] = task_state
+            normalized_inputs = _normalize_runtime_inputs(inputs)
+            self._task_inputs[task_key] = normalized_inputs
+            logger.info(
+                "automation_v2 start task=%s received_inputs=%s normalized_inputs=%s",
+                task_key,
+                _runtime_input_debug_summary(inputs if isinstance(inputs, dict) else {}),
+                _runtime_input_debug_summary(normalized_inputs),
+            )
             self._state["active_task_id"] = task_key
             self._persist_state()
             await self._notify_change(dict(task_state))
@@ -247,6 +307,8 @@ class _AutomationRuntimeV2:
             await self._notify_change(dict(state))
             process = self._current_process
             process_task_id = self._current_process_task_id
+            if str(state.get("status") or "").lower() in {"cancelled", "failed", "success"}:
+                self._task_inputs.pop(task_key, None)
 
         if process is not None and process.returncode is None and process_task_id == task_key:
             try:
@@ -257,6 +319,15 @@ class _AutomationRuntimeV2:
                 logger.exception("automation_v2: failed to terminate process for task=%s", task_key)
 
         return await self.get_state(task_key)
+
+    def _build_command_env(self, task_inputs: dict[str, dict[str, Any]]) -> dict[str, str]:
+        env = dict(os.environ)
+        for input_state in task_inputs.values():
+            env_name = str(input_state.get("env_name") or "").strip()
+            if not env_name:
+                continue
+            env[env_name] = str(input_state.get("value") or "")
+        return env
 
     async def wait_for_change(self, task_id: str, since_seq: int | None = None) -> Dict[str, Any]:
         task_key = str(task_id).strip()
@@ -295,11 +366,13 @@ class _AutomationRuntimeV2:
                     state["current_step_status"] = "failed"
                     state["state_seq"] = int(state.get("state_seq") or 0) + 1
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     await self._notify_change(dict(state))
                     return
                 if state.get("status") in {"success", "failed", "cancelled"}:
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     await self._notify_change(dict(state))
                     return
@@ -310,6 +383,7 @@ class _AutomationRuntimeV2:
                     state["completed_at"] = time.time()
                     state["current_step_status"] = "failed"
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     return
                 step_index = int(state.get("current_step_index") or 0)
@@ -319,12 +393,14 @@ class _AutomationRuntimeV2:
                     state["completed_at"] = time.time()
                     state["state_seq"] = int(state.get("state_seq") or 0) + 1
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     await self._notify_change(dict(state))
                     return
                 step = instructions[step_index]
                 command_text = _extract_step_command(step)
                 wait_for_target = _extract_step_wait_for(step)
+                task_inputs = dict(self._task_inputs.get(task_id) or {})
                 if not command_text and not wait_for_target:
                     state["current_step_index"] = step_index + 1
                     state["current_step_status"] = "success"
@@ -413,6 +489,7 @@ class _AutomationRuntimeV2:
                         state["completed_at"] = time.time()
                         state["state_seq"] = int(state.get("state_seq") or 0) + 1
                         self._state["active_task_id"] = None
+                        self._task_inputs.pop(task_id, None)
                         self._persist_state()
                         await self._notify_change(dict(state))
                         return
@@ -432,6 +509,7 @@ class _AutomationRuntimeV2:
                         state["last_error"] = step_result.get("error") or stderr_text or "wait_for failed"
                         state["state_seq"] = int(state.get("state_seq") or 0) + 1
                         self._state["active_task_id"] = None
+                        self._task_inputs.pop(task_id, None)
                         self._persist_state()
                         await self._notify_change(dict(state))
                         return
@@ -452,10 +530,31 @@ class _AutomationRuntimeV2:
                 continue
 
             start = time.monotonic()
+            runtime_user = get_default_runtime_user()
+            preserved_env_names = sorted(
+                env_name
+                for env_name in (
+                    str(input_state.get("env_name") or "").strip()
+                    for input_state in task_inputs.values()
+                )
+                if env_name
+            )
+            logger.info(
+                "automation_v2 command task=%s step=%s runtime_user=%s env_inputs=%s",
+                task_id,
+                step_index,
+                runtime_user,
+                _runtime_input_debug_summary(task_inputs),
+            )
             process = await asyncio.create_subprocess_shell(
-                wrap_shell_command(command_text, get_default_runtime_user()),
+                wrap_shell_command(
+                    command_text,
+                    runtime_user,
+                    preserve_env_names=preserved_env_names,
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._build_command_env(task_inputs),
             )
             self._current_process = process
             self._current_process_task_id = task_id
@@ -587,6 +686,7 @@ class _AutomationRuntimeV2:
                     state["completed_at"] = time.time()
                     state["state_seq"] = int(state.get("state_seq") or 0) + 1
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     await self._notify_change(dict(state))
                     return
@@ -598,6 +698,7 @@ class _AutomationRuntimeV2:
                     state["last_error"] = step_result.get("error") or stderr_text or "command failed"
                     state["state_seq"] = int(state.get("state_seq") or 0) + 1
                     self._state["active_task_id"] = None
+                    self._task_inputs.pop(task_id, None)
                     self._persist_state()
                     await self._notify_change(dict(state))
                     return
@@ -858,6 +959,7 @@ class AutomationV2StartHandler(AsyncHandler):
         _RUNTIME.set_event_sender(self._emit_state_event)
         task_id = message.get("task_id")
         instructions = message.get("instructions")
+        inputs = message.get("inputs")
         timeout_param = message.get("step_timeout_seconds", DEFAULT_STEP_TIMEOUT_SECONDS)
         try:
             timeout_value = float(timeout_param)
@@ -866,7 +968,7 @@ class AutomationV2StartHandler(AsyncHandler):
         except (TypeError, ValueError):
             timeout_value = DEFAULT_STEP_TIMEOUT_SECONDS
 
-        state = await _RUNTIME.start(str(task_id), instructions, timeout_value)
+        state = await _RUNTIME.start(str(task_id), instructions, inputs, timeout_value)
         return {
             "event": "automation_v2_started",
             "task_id": str(task_id),

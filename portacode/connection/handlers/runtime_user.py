@@ -5,7 +5,7 @@ import pwd
 import shlex
 import stat
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 DEFAULT_RUNTIME_USER_ENV = "PORTACODE_DEFAULT_RUNTIME_USER"
 
@@ -36,13 +36,26 @@ def should_switch_user(user: str) -> bool:
     return bool(user and os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0 and user != "root")
 
 
-def wrap_shell_command(command: str, user: str, shell: str = "/bin/sh") -> str:
+def wrap_shell_command(
+    command: str,
+    user: str,
+    shell: str = "/bin/sh",
+    preserve_env_names: Optional[Sequence[str]] = None,
+) -> str:
     if not should_switch_user(user):
         return command
     shell_path = _resolve_shell_for_user(user, shell)
     quoted_user = shlex.quote(user)
     quoted_shell = shlex.quote(shell_path)
-    return f"sudo -H -i -u {quoted_user} -- {quoted_shell} -lc {shlex.quote(command)}"
+    preserved = [
+        str(name or "").strip()
+        for name in (preserve_env_names or [])
+        if str(name or "").strip()
+    ]
+    preserve_fragment = ""
+    if preserved:
+        preserve_fragment = f"--preserve-env={','.join(shlex.quote(name) for name in preserved)} "
+    return f"sudo -H -i {preserve_fragment}-u {quoted_user} -- {quoted_shell} -lc {shlex.quote(command)}"
 
 
 def wrap_argv_for_user(argv: Iterable[str], user: str, cwd: Optional[str] = None) -> List[str]:

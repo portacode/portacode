@@ -50,6 +50,20 @@ class RuntimeUserTests(TestCase):
         self.assertIn("sudo -H -i -u meena -- /bin/bash -lc", wrapped)
         self.assertIn("openclaw status", wrapped)
 
+    @patch("portacode.connection.handlers.runtime_user.get_runtime_user_home", return_value="/home/meena")
+    @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    def test_wrap_shell_command_preserves_requested_env_names(self, _mock_euid, mock_getpwnam, _mock_home):
+        mock_getpwnam.return_value = type("Pw", (), {"pw_shell": "/bin/bash"})()
+
+        wrapped = wrap_shell_command(
+            "env | grep TELEGRAM",
+            "meena",
+            preserve_env_names=["TELEGRAM_BOT_TOKEN", "PORTACODE_DEBUG_INPUT"],
+        )
+
+        self.assertIn("--preserve-env=TELEGRAM_BOT_TOKEN,PORTACODE_DEBUG_INPUT", wrapped)
+
     @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
     @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
     def test_wrap_argv_for_user_preserves_login_mode_and_explicitly_reenters_cwd(self, mock_getpwnam, _mock_euid):
