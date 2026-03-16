@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -79,6 +80,7 @@ class GitManager:
         try:
             self.repo = Repo(self.project_path)
             self.is_git_repo = True
+            self._mark_repo_safe()
             logger.info("Initialized Git repo for project: %s", self.project_path)
             
             # Track initial git processes after repo creation
@@ -86,6 +88,36 @@ class GitManager:
             
         except (InvalidGitRepositoryError, Exception) as e:
             logger.debug("Not a Git repository or Git error: %s", e)
+
+    def _mark_repo_safe(self) -> None:
+        """Ensure the root-run SDK trusts the resolved repo root for read operations."""
+        if not self.repo:
+            return
+
+        repo_root = (self.repo.working_tree_dir or self.project_path).strip()
+        if not repo_root:
+            return
+
+        try:
+            current = subprocess.run(
+                ["git", "config", "--global", "--get-all", "safe.directory"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            current_entries = {line.strip() for line in current.stdout.splitlines() if line.strip()}
+            if repo_root in current_entries:
+                return
+
+            subprocess.run(
+                ["git", "config", "--global", "--add", "safe.directory", repo_root],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info("Marked git repo as safe for SDK access: %s", repo_root)
+        except Exception as exc:
+            logger.warning("Failed to mark git repo as safe %s: %s", repo_root, exc)
     
     def _track_current_git_processes(self):
         """Track currently running git cat-file processes for this repo."""
