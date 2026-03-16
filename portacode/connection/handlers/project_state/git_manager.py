@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .models import GitDetailedStatus, GitFileChange
+from ..runtime_user import get_default_runtime_user, wrap_argv_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,30 @@ class GitManager:
                     continue
         except Exception as e:
             logger.debug("Error tracking git processes: %s", e)
+
+    def _run_git_write(self, args: List[str]) -> subprocess.CompletedProcess:
+        """Run a mutating git command as the configured runtime user."""
+        runtime_user = get_default_runtime_user()
+        cwd = self.repo.working_tree_dir if self.repo and self.repo.working_tree_dir else self.project_path
+        argv = wrap_argv_for_user(["git", *args], runtime_user, cwd=cwd)
+        return subprocess.run(
+            argv,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _remove_file_as_runtime_user(self, file_path: str) -> None:
+        runtime_user = get_default_runtime_user()
+        argv = wrap_argv_for_user(["rm", "-f", file_path], runtime_user, cwd=os.path.dirname(file_path) or None)
+        subprocess.run(
+            argv,
+            cwd=os.path.dirname(file_path) or None,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     
     def reinitialize(self):
         """Reinitialize git repo detection (useful when .git directory is created after initialization)."""
@@ -992,10 +1017,10 @@ class GitManager:
             if self._is_submodule(file_path):
                 logger.info("Detected submodule, using git add command directly: %s", rel_path)
                 # For submodules, use git add directly to stage only the submodule reference
-                self.repo.git.add(rel_path)
+                self._run_git_write(["add", rel_path])
             else:
                 # Use git add -A on the specific file to handle deletions as well
-                self.repo.git.add('-A', '--', rel_path)
+                self._run_git_write(["add", "-A", "--", rel_path])
             
             logger.info("Successfully staged file: %s", rel_path)
             return True
@@ -1017,7 +1042,7 @@ class GitManager:
             if self._is_submodule(file_path):
                 logger.info("Detected submodule, using git restore for unstaging: %s", rel_path)
                 # For submodules, always use git restore --staged (works with submodules)
-                self.repo.git.restore('--staged', rel_path)
+                self._run_git_write(["restore", "--staged", rel_path])
             else:
                 # Check if repository has any commits (HEAD exists)
                 try:
@@ -1028,10 +1053,10 @@ class GitManager:
                 
                 if has_head:
                     # Reset the file from HEAD (unstage) - for repos with commits
-                    self.repo.git.restore('--staged', rel_path)
+                    self._run_git_write(["restore", "--staged", rel_path])
                 else:
                     # For repositories with no commits, use git rm --cached to unstage
-                    self.repo.git.rm('--cached', rel_path)
+                    self._run_git_write(["rm", "--cached", rel_path])
             
             logger.info("Successfully unstaged file: %s", rel_path)
             return True
@@ -1058,13 +1083,13 @@ class GitManager:
             
             if has_head:
                 # Restore both index and working tree from HEAD
-                self.repo.git.restore('--staged', '--worktree', '--', rel_path)
+                self._run_git_write(["restore", "--staged", "--worktree", "--", rel_path])
                 logger.info("Successfully reverted file: %s", rel_path)
             else:
                 # For repositories with no commits, we can't revert to HEAD
                 # Instead, just remove the file to "revert" it to non-existence
                 if os.path.exists(file_path):
-                    os.remove(file_path)
+                    self._remove_file_as_runtime_user(file_path)
                     logger.info("Successfully removed file (no HEAD to revert to): %s", rel_path)
                 else:
                     logger.info("File already does not exist (no HEAD to revert to): %s", rel_path)
@@ -1100,12 +1125,12 @@ class GitManager:
             if submodule_paths:
                 logger.info("Staging submodules using git add directly: %s", submodule_paths)
                 for submodule_path in submodule_paths:
-                    self.repo.git.add(submodule_path)
+                    self._run_git_write(["add", submodule_path])
             
             # Stage regular files using git add -A to capture deletions
             if rel_paths:
                 logger.info("Staging regular files: %s", rel_paths)
-                self.repo.git.add('-A', '--', *rel_paths)
+                self._run_git_write(["add", "-A", "--", *rel_paths])
             
             logger.info("Successfully staged %d files (%d submodules, %d regular)", 
                        len(file_paths), len(submodule_paths), len(rel_paths))
@@ -1149,11 +1174,11 @@ class GitManager:
             if has_head:
                 # Use git restore --staged for all files (works for both regular files and submodules)
                 if all_rel_paths:
-                    self.repo.git.restore('--staged', *all_rel_paths)
+                    self._run_git_write(["restore", "--staged", *all_rel_paths])
             else:
                 # For repositories with no commits, use git rm --cached
                 if all_rel_paths:
-                    self.repo.git.rm('--cached', *all_rel_paths)
+                    self._run_git_write(["rm", "--cached", *all_rel_paths])
             
             logger.info("Successfully unstaged %d files (%d submodules, %d regular)", 
                        len(file_paths), len(submodule_paths), len(rel_paths))
@@ -1190,14 +1215,14 @@ class GitManager:
                         regular_files.append(rel_paths[i])
                 
                 if regular_files:
-                    self.repo.git.restore('--staged', '--worktree', '--', *regular_files)
+                    self._run_git_write(["restore", "--staged", "--worktree", "--", *regular_files])
                     logger.info("Successfully reverted %d files", len(regular_files))
             else:
                 # For repositories with no commits, remove files to "revert" them
                 removed_count = 0
                 for file_path in file_paths:
                     if not self._is_submodule(file_path) and os.path.exists(file_path):
-                        os.remove(file_path)
+                        self._remove_file_as_runtime_user(file_path)
                         removed_count += 1
                 logger.info("Successfully removed %d files (no HEAD to revert to)", removed_count)
             
@@ -1214,7 +1239,7 @@ class GitManager:
         
         try:
             # Use git add . to stage everything - this is the most efficient way
-            self.repo.git.add('.')
+            self._run_git_write(["add", "."])
             logger.info("Successfully staged all changes using 'git add .'")
             return True
             
@@ -1237,10 +1262,10 @@ class GitManager:
             
             if has_head:
                 # Use git restore --staged . to unstage everything
-                self.repo.git.restore('--staged', '.')
+                self._run_git_write(["restore", "--staged", "."])
             else:
                 # For repositories with no commits, remove everything from index
-                self.repo.git.rm('--cached', '-r', '.')
+                self._run_git_write(["rm", "--cached", "-r", "."])
             
             logger.info("Successfully unstaged all changes")
             return True
@@ -1264,7 +1289,7 @@ class GitManager:
             
             if has_head:
                 # Use git restore . to revert all working directory changes
-                self.repo.git.restore('.')
+                self._run_git_write(["restore", "."])
                 logger.info("Successfully reverted all working directory changes")
             else:
                 logger.warning("Cannot revert changes in repository with no commits")
@@ -1308,7 +1333,8 @@ class GitManager:
                 raise RuntimeError("No staged changes to commit")
             
             # Perform the commit
-            commit = self.repo.index.commit(message.strip())
+            self._run_git_write(["commit", "-m", message.strip()])
+            commit = self.repo.head.commit
             logger.info("Successfully committed changes with hash: %s", commit.hexsha)
             logger.info("Commit message: %s", message.strip())
             
