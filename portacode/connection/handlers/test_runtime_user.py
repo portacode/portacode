@@ -74,3 +74,14 @@ class RuntimeUserTests(TestCase):
         self.assertEqual(wrapped[:5], ["sudo", "-H", "-i", "-u", "meena"])
         self.assertEqual(wrapped[5:8], ["--", "/bin/bash", "-lc"])
         self.assertIn("cd /home/meena/.openclaw && exec /bin/bash --login", wrapped[8])
+
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
+    def test_wrap_argv_for_user_uses_shell_for_non_shell_commands(self, mock_getpwnam, _mock_euid):
+        mock_getpwnam.return_value = type("Pw", (), {"pw_shell": "/bin/bash"})()
+
+        wrapped = wrap_argv_for_user(["git", "add", "-A", "--", "README.md"], "meena", cwd="/repo")
+
+        self.assertEqual(wrapped[:5], ["sudo", "-H", "-i", "-u", "meena"])
+        self.assertEqual(wrapped[5:8], ["--", "/bin/bash", "-lc"])
+        self.assertIn("cd /repo && exec git add -A -- README.md", wrapped[8])

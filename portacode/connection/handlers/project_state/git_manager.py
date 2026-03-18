@@ -145,24 +145,49 @@ class GitManager:
         runtime_user = get_default_runtime_user()
         cwd = self.repo.working_tree_dir if self.repo and self.repo.working_tree_dir else self.project_path
         argv = wrap_argv_for_user(["git", *args], runtime_user, cwd=cwd)
-        return subprocess.run(
-            argv,
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            return subprocess.run(
+                argv,
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or f"exit status {exc.returncode}"
+            logger.error(
+                "Git write failed as runtime user %s in %s: git %s (%s)",
+                runtime_user,
+                cwd,
+                " ".join(args),
+                details,
+            )
+            raise RuntimeError(details) from exc
 
     def _remove_file_as_runtime_user(self, file_path: str) -> None:
         runtime_user = get_default_runtime_user()
         argv = wrap_argv_for_user(["rm", "-f", file_path], runtime_user, cwd=os.path.dirname(file_path) or None)
-        subprocess.run(
-            argv,
-            cwd=os.path.dirname(file_path) or None,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                argv,
+                cwd=os.path.dirname(file_path) or None,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or f"exit status {exc.returncode}"
+            logger.error(
+                "Runtime-user file removal failed for %s as %s: %s",
+                file_path,
+                runtime_user,
+                details,
+            )
+            raise RuntimeError(details) from exc
     
     def reinitialize(self):
         """Reinitialize git repo detection (useful when .git directory is created after initialization)."""

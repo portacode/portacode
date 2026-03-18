@@ -15,6 +15,27 @@ from .manager import get_or_create_project_state_manager
 logger = logging.getLogger(__name__)
 
 
+class _ProjectStateGitResponseMixin:
+    """Build command-specific websocket responses for git operations."""
+
+    def _git_error_response(
+        self,
+        *,
+        event: str,
+        project_id: str,
+        error: Exception,
+        **payload: Any,
+    ) -> Dict[str, Any]:
+        response = {
+            "event": event,
+            "project_id": project_id,
+            "success": False,
+            "error": str(error),
+        }
+        response.update({key: value for key, value in payload.items() if value is not None})
+        return response
+
+
 class ProjectStateFolderExpandHandler(AsyncHandler):
     """Handler for expanding project folders."""
     
@@ -357,7 +378,7 @@ class ProjectStateDiffOpenHandler(AsyncHandler):
         }
 
 
-class ProjectStateGitStageHandler(AsyncHandler):
+class ProjectStateGitStageHandler(_ProjectStateGitResponseMixin, AsyncHandler):
     """Handler for staging files in git for a project."""
     
     @property
@@ -402,12 +423,23 @@ class ProjectStateGitStageHandler(AsyncHandler):
             raise ValueError("No git repository found for this project")
         
         # Perform the staging operation
-        if stage_all:
-            success = git_manager.stage_all_changes()
-        elif len(file_paths_to_stage) == 1:
-            success = git_manager.stage_file(file_paths_to_stage[0])
-        else:
-            success = git_manager.stage_files(file_paths_to_stage)
+        try:
+            if stage_all:
+                success = git_manager.stage_all_changes()
+            elif len(file_paths_to_stage) == 1:
+                success = git_manager.stage_file(file_paths_to_stage[0])
+            else:
+                success = git_manager.stage_files(file_paths_to_stage)
+        except Exception as exc:
+            logger.error("Git stage failed for project %s: %s", server_project_id, exc)
+            return self._git_error_response(
+                event="project_state_git_stage_response",
+                project_id=server_project_id,
+                error=exc,
+                file_path=file_path,
+                file_paths=file_paths,
+                stage_all=bool(stage_all) or None,
+            )
 
         if success:
             # Refresh git status only (no filesystem changes from staging)
@@ -435,7 +467,7 @@ class ProjectStateGitStageHandler(AsyncHandler):
         return response
 
 
-class ProjectStateGitUnstageHandler(AsyncHandler):
+class ProjectStateGitUnstageHandler(_ProjectStateGitResponseMixin, AsyncHandler):
     """Handler for unstaging files in git for a project."""
     
     @property
@@ -480,12 +512,23 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
             raise ValueError("No git repository found for this project")
         
         # Perform the unstaging operation
-        if unstage_all:
-            success = git_manager.unstage_all_changes()
-        elif len(file_paths_to_unstage) == 1:
-            success = git_manager.unstage_file(file_paths_to_unstage[0])
-        else:
-            success = git_manager.unstage_files(file_paths_to_unstage)
+        try:
+            if unstage_all:
+                success = git_manager.unstage_all_changes()
+            elif len(file_paths_to_unstage) == 1:
+                success = git_manager.unstage_file(file_paths_to_unstage[0])
+            else:
+                success = git_manager.unstage_files(file_paths_to_unstage)
+        except Exception as exc:
+            logger.error("Git unstage failed for project %s: %s", server_project_id, exc)
+            return self._git_error_response(
+                event="project_state_git_unstage_response",
+                project_id=server_project_id,
+                error=exc,
+                file_path=file_path,
+                file_paths=file_paths,
+                unstage_all=bool(unstage_all) or None,
+            )
 
         if success:
             # Refresh git status only (no filesystem changes from unstaging)
@@ -513,7 +556,7 @@ class ProjectStateGitUnstageHandler(AsyncHandler):
         return response
 
 
-class ProjectStateGitRevertHandler(AsyncHandler):
+class ProjectStateGitRevertHandler(_ProjectStateGitResponseMixin, AsyncHandler):
     """Handler for reverting files in git for a project."""
     
     @property
@@ -558,12 +601,23 @@ class ProjectStateGitRevertHandler(AsyncHandler):
             raise ValueError("No git repository found for this project")
         
         # Perform the revert operation
-        if revert_all:
-            success = git_manager.revert_all_changes()
-        elif len(file_paths_to_revert) == 1:
-            success = git_manager.revert_file(file_paths_to_revert[0])
-        else:
-            success = git_manager.revert_files(file_paths_to_revert)
+        try:
+            if revert_all:
+                success = git_manager.revert_all_changes()
+            elif len(file_paths_to_revert) == 1:
+                success = git_manager.revert_file(file_paths_to_revert[0])
+            else:
+                success = git_manager.revert_files(file_paths_to_revert)
+        except Exception as exc:
+            logger.error("Git revert failed for project %s: %s", server_project_id, exc)
+            return self._git_error_response(
+                event="project_state_git_revert_response",
+                project_id=server_project_id,
+                error=exc,
+                file_path=file_path,
+                file_paths=file_paths,
+                revert_all=bool(revert_all) or None,
+            )
         
         if success:
             # Refresh entire project state to ensure consistency
@@ -590,7 +644,7 @@ class ProjectStateGitRevertHandler(AsyncHandler):
         return response
 
 
-class ProjectStateGitCommitHandler(AsyncHandler):
+class ProjectStateGitCommitHandler(_ProjectStateGitResponseMixin, AsyncHandler):
     """Handler for committing staged changes in git for a project."""
     
     @property
@@ -622,10 +676,7 @@ class ProjectStateGitCommitHandler(AsyncHandler):
             raise ValueError("No git repository found for this project")
         
         # Commit the staged changes
-        success = False
-        error_message = None
         commit_hash = None
-        
         try:
             success = git_manager.commit_changes(commit_message)
             if success:
@@ -639,15 +690,22 @@ class ProjectStateGitCommitHandler(AsyncHandler):
                     reason="git_commit",
                 )
         except Exception as e:
-            error_message = str(e)
-            logger.error("Error during commit: %s", error_message)
+            logger.error("Error during commit: %s", e)
+            response = self._git_error_response(
+                event="project_state_git_commit_response",
+                project_id=server_project_id,
+                error=e,
+                commit_message=commit_message,
+            )
+            response["commit_hash"] = None
+            return response
         
         return {
             "event": "project_state_git_commit_response",
             "project_id": server_project_id,
             "commit_message": commit_message,
             "success": success,
-            "error": error_message,
+            "error": None,
             "commit_hash": commit_hash
         }
 

@@ -67,7 +67,7 @@ def wrap_argv_for_user(argv: Iterable[str], user: str, cwd: Optional[str] = None
     if not cwd:
         return ["sudo", "-H", "-i", "-u", user, "--", *argv_list]
 
-    shell_path = _resolve_shell_for_user(user, argv_list[0])
+    shell_path = _resolve_shell_for_wrapped_argv(user, argv_list[0])
     exec_command = " ".join(shlex.quote(arg) for arg in argv_list)
     command = f"cd {shlex.quote(cwd)} && exec {exec_command}"
     return ["sudo", "-H", "-i", "-u", user, "--", shell_path, "-lc", command]
@@ -163,3 +163,12 @@ def _resolve_shell_for_user(user: str, shell: str) -> str:
     if candidate:
         return candidate
     return shell or "/bin/sh"
+
+
+def _resolve_shell_for_wrapped_argv(user: str, program: str) -> str:
+    candidate = str(program or "").strip()
+    if candidate:
+        name = os.path.basename(candidate)
+        if name in {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish"}:
+            return candidate
+    return _resolve_shell_for_user(user, "/bin/sh")
