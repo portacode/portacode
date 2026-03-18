@@ -74,6 +74,7 @@ from .handlers.project_aware_file_handlers import (
     ProjectAwareFileCreateHandler,
     ProjectAwareFolderCreateHandler,
 )
+from .handlers.file_transfer_handlers import FileUploadHandler, FileDownloadHandler
 from .handlers.session import SessionManager
 from .webmin_proxy_config import apply_turnkey_webmin_proxy_config
 from portacode.tunneling.privileged import read_text, run, write_text
@@ -512,6 +513,8 @@ class TerminalManager:
         self._command_registry.register(ProjectAwareFileCreateHandler)  # Use project-aware version
         self._command_registry.register(ProjectAwareFolderCreateHandler)  # Use project-aware version
         self._command_registry.register(FileRenameHandler)
+        self._command_registry.register(FileUploadHandler)
+        self._command_registry.register(FileDownloadHandler)
         self._command_registry.register(FileSearchHandler)
         self._command_registry.register(ContentRequestHandler)
         self._command_registry.register(FileApplyDiffHandler)

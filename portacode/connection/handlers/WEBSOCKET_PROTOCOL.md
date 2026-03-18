@@ -60,6 +60,8 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_create`](#file_create)
     - [`folder_create`](#folder_create)
     - [`file_rename`](#file_rename)
+    - [`file_upload`](#file_upload)
+    - [`file_download`](#file_download)
     - [`content_request`](#content_request)
   - [Project State Actions](#project-state-actions)
     - [`project_state_folder_expand`](#project_state_folder_expand)
@@ -104,6 +106,8 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_create_response`](#file_create_response)
     - [`folder_create_response`](#folder_create_response)
     - [`file_rename_response`](#file_rename_response)
+    - [`file_upload_response`](#file_upload_response)
+    - [`file_download_response`](#file_download_response)
     - [`content_response`](#content_response)
   - [Project State Events](#project-state-events)
     - [`project_state_initialized`](#project_state_initialized)
@@ -763,6 +767,52 @@ Renames a file or folder. Handled by [`file_rename`](./file_handlers.py).
 
 *   On success, the device will respond with a [`file_rename_response`](#file_rename_response) event.
 *   On error, a generic [`error`](#error) event is sent.
+
+### `file_upload`
+
+Uploads a file to the device. Small files can be sent in a single message; larger files reuse the protocol chunk metadata fields and are reassembled on the device before being written to disk.
+
+**Payload Fields:**
+
+*   `path` (string, mandatory): Absolute destination path for the uploaded file.
+*   `file_name` (string, optional): Original file name for UI/debug metadata.
+*   `mime_type` (string, optional): MIME type supplied by the client.
+*   `file_size` (integer, optional): Original binary file size in bytes.
+*   `overwrite` (boolean, optional): Whether an existing target file may be replaced. Defaults to `false`.
+*   `content_base64` (string, mandatory): Base64-encoded file content for non-chunked uploads, or the current chunk's base64 content for chunked uploads.
+*   `chunked` (boolean, optional): Whether this upload uses multiple messages. Defaults to `false`.
+*   `request_id` (string, recommended): Unique request identifier used to match upload responses.
+
+**Chunked Upload Fields (when `chunked` is true):**
+
+*   `transfer_id` (string, mandatory): Unique identifier for the upload transfer.
+*   `chunk_index` (integer, mandatory): Zero-based chunk index.
+*   `chunk_count` (integer, mandatory): Total number of chunks.
+*   `chunk_size` (integer, mandatory): Size of this chunk payload in bytes.
+*   `total_size` (integer, mandatory): Total byte size of the complete base64 payload.
+*   `content_hash` (string, mandatory): SHA-256 of the full base64 payload.
+*   `chunk_hash` (string, mandatory): SHA-256 of the current chunk payload.
+*   `is_final_chunk` (boolean, mandatory): Whether this is the last chunk.
+
+**Responses:**
+
+*   The device will respond with one or more [`file_upload_response`](#file_upload_response) events using the same `request_id`.
+*   Chunked uploads may emit intermediate acknowledgements with `complete: false` before the final success response.
+*   On error, a generic [`error`](#error) event is sent or `file_upload_response.success` is `false`.
+
+### `file_download`
+
+Downloads a file from the device. The binary file is base64-encoded for transport. Large payloads are automatically chunked using the same transfer fields used by `content_response`.
+
+**Payload Fields:**
+
+*   `path` (string, mandatory): Absolute path of the file to download.
+*   `request_id` (string, recommended): Unique identifier used to correlate one or more response messages.
+
+**Responses:**
+
+*   On success, the device will respond with one or more [`file_download_response`](#file_download_response) events.
+*   On error, a generic [`error`](#error) event is sent or `file_download_response.success` is `false`.
 
 ### `content_request`
 
@@ -1582,6 +1632,51 @@ Confirms that a file or folder has been renamed successfully in response to a `f
 *   `new_name` (string, mandatory): The new name of the item.
 *   `is_directory` (boolean, mandatory): Indicates whether the renamed item is a directory.
 *   `success` (boolean, mandatory): Indicates whether the rename was successful.
+
+### <a name="file_upload_response"></a>`file_upload_response`
+
+Acknowledges a `file_upload` action.
+
+**Event Fields:**
+
+*   `request_id` (string, recommended): Correlates the response to the upload request.
+*   `path` (string, mandatory): Destination path on the device.
+*   `file_name` (string, optional): Original file name metadata.
+*   `mime_type` (string, optional): MIME type metadata.
+*   `bytes_written` (integer, optional): Number of binary bytes written once the upload completes.
+*   `file_size` (integer, optional): Final binary file size in bytes.
+*   `chunked` (boolean, mandatory): Whether the upload used chunking.
+*   `chunk_received` (boolean, optional): Indicates an intermediate chunk acknowledgement.
+*   `complete` (boolean, mandatory): `false` for intermediate chunk acknowledgements, `true` once the file has been fully written.
+*   `success` (boolean, mandatory): Whether the upload is still valid or completed successfully.
+*   `error` (string, optional): Error details when `success` is `false`.
+
+### <a name="file_download_response"></a>`file_download_response`
+
+Returns file content for a `file_download` action. File bytes are transported as base64 text and may be chunked for large files.
+
+**Event Fields:**
+
+*   `request_id` (string, recommended): Correlates the response to the original download request.
+*   `path` (string, mandatory): Absolute file path on the device.
+*   `file_name` (string, mandatory): Basename of the file.
+*   `mime_type` (string, optional): MIME type metadata.
+*   `file_size` (integer, mandatory): Original binary file size in bytes.
+*   `content_base64` (string, optional): Full base64 payload or the current chunk payload when `success` is `true`.
+*   `success` (boolean, mandatory): Whether the file was read successfully.
+*   `error` (string, optional): Error details when `success` is `false`.
+*   `chunked` (boolean, mandatory): Whether this response is part of a chunked transfer.
+
+**Chunked Transfer Fields (when `chunked` is true):**
+
+*   `transfer_id` (string, mandatory): Unique transfer identifier.
+*   `chunk_index` (integer, mandatory): Zero-based chunk index.
+*   `chunk_count` (integer, mandatory): Total number of chunks.
+*   `chunk_size` (integer, mandatory): Chunk size in bytes.
+*   `total_size` (integer, mandatory): Total base64 payload size in bytes.
+*   `content_hash` (string, mandatory): SHA-256 hash of the full base64 payload.
+*   `chunk_hash` (string, mandatory): SHA-256 hash of the current chunk payload.
+*   `is_final_chunk` (boolean, mandatory): Whether this is the last chunk.
 
 ### <a name="content_response"></a>`content_response`
 
