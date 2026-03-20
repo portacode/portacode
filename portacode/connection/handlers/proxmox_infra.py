@@ -1127,8 +1127,8 @@ def _ensure_bridge(bridge: str = DEFAULT_BRIDGE) -> Dict[str, Any]:
     nat_service = f"portacode-{bridge}-nat.service"
     dns_service = f"portacode-{bridge}-dnsmasq.service"
     _run_checked_command(
-        ["/bin/systemctl", "enable", "--now", nat_service, dns_service],
-        context=f"Failed enabling/starting {nat_service} and {dns_service}",
+        ["/bin/systemctl", "enable", nat_service, dns_service],
+        context=f"Failed enabling {nat_service} and {dns_service}",
     )
 
     ifup_result = _call_subprocess(["/sbin/ifup", bridge], check=False)
@@ -1158,6 +1158,11 @@ def _ensure_bridge(bridge: str = DEFAULT_BRIDGE) -> Dict[str, Any]:
                 f"Failed to bring up bridge {bridge}: {'; '.join(retry_details)}; "
                 "ifreload command not found for retry"
             )
+
+    _run_checked_command(
+        ["/bin/systemctl", "restart", nat_service, dns_service],
+        context=f"Failed starting {nat_service} and {dns_service}",
+    )
 
     _run_checked_command(
         ["/sbin/ip", "link", "show", "dev", bridge],
