@@ -46,6 +46,12 @@ def cli() -> None:
 @click.option("--log-categories", "log_categories", help="Comma-separated list of log categories to show (e.g., 'connection,auth,git'). Use 'list' to see available categories.")
 @click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
               help="Skip interactive prompts (used by background service)")
+@click.option(
+    "--exit-after-setup",
+    "exit_after_setup",
+    is_flag=True,
+    help="Exit successfully after pairing and any requested setup instead of starting the live connection",
+)
 @click.option("--pairing-code", "pairing_code_opt", envvar="PORTACODE_PAIRING_CODE", help="Provide a temporary pairing code for zero-copy onboarding")
 @click.option("--device-name", "device_name_opt", envvar="PORTACODE_DEVICE_NAME", help="Custom device name to display during pairing")
 @click.option(
@@ -94,6 +100,7 @@ def connect(
     debug: bool,
     log_categories: Optional[str],
     non_interactive: bool,
+    exit_after_setup: bool,
     pairing_code_opt: Optional[str],
     device_name_opt: Optional[str],
     project_paths_opt: Tuple[str, ...],
@@ -104,6 +111,9 @@ def connect(
     proxmox_setup_retry_delay: float,
 ) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
+
+    if detach and exit_after_setup:
+        raise click.UsageError("--detach and --exit-after-setup cannot be used together.")
 
     # Set up debug logging if requested
     if debug:
@@ -375,6 +385,10 @@ def connect(
                 )
             )
             asyncio.run(asyncio.sleep(proxmox_setup_retry_delay))
+
+    if exit_after_setup:
+        click.echo(click.style("Bootstrap steps completed. Exiting without starting a live connection.", fg="green"))
+        return
 
     # 3. Start connection manager
     if detach and not non_interactive:
