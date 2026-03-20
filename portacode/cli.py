@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import os
 import subprocess
 import sys
@@ -496,7 +497,11 @@ def _run_control_command(
             return False, None
 
         ctl = mgr.mux.get_channel(0)
-        await ctl.send(payload)
+        request_id = f"ctl:{secrets.token_urlsafe(6)}"
+        request_payload = dict(payload)
+        request_payload["request_id"] = request_id
+        reply_waiter = mgr.register_control_reply_waiter(request_id)
+        await ctl.send(request_payload)
 
         last_reply: Optional[dict] = None
         succeeded = success_events is None
@@ -504,7 +509,7 @@ def _run_control_command(
             with click.progressbar(length=wait_loops, label=label) as bar:
                 for _ in range(wait_loops):
                     try:
-                        reply = await asyncio.wait_for(ctl.recv(), timeout=0.1)
+                        reply = await asyncio.wait_for(reply_waiter.get(), timeout=0.1)
                         click.echo(click.style("< " + json.dumps(reply, indent=2), fg="cyan"))
                         if isinstance(reply, dict):
                             last_reply = reply
@@ -518,6 +523,7 @@ def _run_control_command(
                         pass
                     bar.update(1)
         finally:
+            mgr.clear_control_reply_waiter(request_id)
             await mgr.stop()
 
         return succeeded, last_reply

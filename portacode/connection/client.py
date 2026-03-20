@@ -4,7 +4,7 @@ import asyncio
 import logging
 import signal
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import json
 import base64
 import sys
@@ -79,6 +79,7 @@ class ConnectionManager:
         self._clock_sync_failures = 0
         self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
         self.initial_project_paths = [str(path).strip() for path in (initial_project_paths or []) if str(path).strip()]
+        self._pending_control_replies: dict[str, asyncio.Queue[Any]] = {}
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -102,6 +103,15 @@ class ConnectionManager:
             return True
         except asyncio.TimeoutError:
             return False
+
+    def register_control_reply_waiter(self, request_id: str) -> asyncio.Queue[Any]:
+        """Register a waiter for a control reply correlated by request_id."""
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._pending_control_replies[request_id] = queue
+        return queue
+
+    def clear_control_reply_waiter(self, request_id: str) -> None:
+        self._pending_control_replies.pop(request_id, None)
 
     async def _runner(self) -> None:
         attempt = 0
@@ -234,6 +244,12 @@ class ConnectionManager:
                                 payload["trace"]["ping"] = device_receive_time - payload["trace"]["client_send"]
                             message = json.dumps(data)
                             logger.info(f"📥 Device received traced message: {payload['request_id']}")
+                    if self._pending_control_replies and isinstance(payload, dict):
+                        request_id = payload.get("request_id")
+                        if isinstance(request_id, str):
+                            waiter = self._pending_control_replies.get(request_id)
+                            if waiter is not None:
+                                waiter.put_nowait(payload)
 
                 if self.mux:
                     await self.mux.on_raw_message(message)
