@@ -68,6 +68,7 @@ class ConnectionManager:
 
         self._task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._authenticated_event = asyncio.Event()
 
         self.websocket: Optional[WebSocketClientProtocol] = None
         self.mux: Optional[Multiplexer] = None
@@ -91,10 +92,22 @@ class ConnectionManager:
         if self._task is not None:
             await self._task
 
+    async def wait_until_authenticated(self, timeout: Optional[float] = None) -> bool:
+        """Wait until gateway authentication completes successfully."""
+        try:
+            if timeout is None:
+                await self._authenticated_event.wait()
+            else:
+                await asyncio.wait_for(self._authenticated_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def _runner(self) -> None:
         attempt = 0
         while not self._stop_event.is_set():
             try:
+                self._authenticated_event.clear()
                 if attempt:
                     delay = min(self.reconnect_delay * 2 ** (attempt - 1), 30)
                     logger.warning("Reconnecting in %.1f s (attempt %d)…", LogCategory.CONNECTION, delay, attempt)
@@ -168,6 +181,7 @@ class ConnectionManager:
         status = await self.websocket.recv()
         if status != "ok":
             raise AuthenticationRejectedError(f"Gateway rejected authentication: {status}")
+        self._authenticated_event.set()
         # Print success message in green and show close instructions
         try:
             import click

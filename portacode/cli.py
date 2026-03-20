@@ -495,11 +495,8 @@ def _run_control_command(
         mgr = ConnectionManager(gateway, selected_keypair, debug=debug)
         await mgr.start()
 
-        for _ in range(20):
-            if mgr.mux is not None:
-                break
-            await asyncio.sleep(0.1)
-        if mgr.mux is None:
+        authenticated = await mgr.wait_until_authenticated(timeout=2.0)
+        if not authenticated or mgr.mux is None:
             click.echo("Failed to initialise connection – aborting.")
             await mgr.stop()
             return False, None
@@ -566,12 +563,8 @@ def send_control(message: str, gateway: Optional[str]) -> None:  # noqa: D401 �
         mgr = ConnectionManager(target_gateway, keypair, debug=debug)
         await mgr.start()
 
-        # Wait until mux is available & authenticated (rudimentary – 2s timeout)
-        for _ in range(20):
-            if mgr.mux is not None:
-                break
-            await asyncio.sleep(0.1)
-        if mgr.mux is None:
+        authenticated = await mgr.wait_until_authenticated(timeout=2.0)
+        if not authenticated or mgr.mux is None:
             click.echo("Failed to initialise connection – aborting.")
             await mgr.stop()
             return
@@ -608,11 +601,8 @@ def revert_proxmox_infra(gateway: Optional[str]) -> None:  # noqa: D401 – Clic
         mgr = ConnectionManager(target_gateway, keypair, debug=False)
         await mgr.start()
 
-        for _ in range(20):
-            if mgr.mux is not None:
-                break
-            await asyncio.sleep(0.1)
-        if mgr.mux is None:
+        authenticated = await mgr.wait_until_authenticated(timeout=2.0)
+        if not authenticated or mgr.mux is None:
             click.echo("Failed to initialise connection – aborting.")
             await mgr.stop()
             return
