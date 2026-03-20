@@ -210,10 +210,10 @@ def connect(
 
     pairing_requested = bool(pairing_code)
     existing_identity = keypair_files_exist()
-    should_pair = pairing_requested and not existing_identity
+    should_pair = pairing_requested
 
     # 2. Load or create keypair (in memory if pairing)
-    if should_pair:
+    if should_pair and not existing_identity:
         keypair = generate_in_memory_keypair()
     else:
         keypair = get_or_create_keypair()
@@ -232,16 +232,10 @@ def connect(
         except PairingError as exc:
             click.echo(click.style(f"Pairing failed: {exc}", fg="red"))
             sys.exit(1)
-        # Persist keypair after successful approval
-        keypair = keypair.persist()
+        # Persist only when we generated a fresh in-memory identity for pairing.
+        if hasattr(keypair, "persist"):
+            keypair = keypair.persist()
         click.echo(click.style("✅ Pairing approved. Continuing with connection…", fg="green"))
-    elif pairing_requested and existing_identity:
-        click.echo(
-            click.style(
-                "ℹ Pairing code provided but an existing device identity was found; skipping pairing step.",
-                fg="yellow",
-            )
-        )
 
     fingerprint = fingerprint_public_key(keypair.public_key_pem)
 
