@@ -83,8 +83,6 @@ This workflow works great for headless setups and containers: export the environ
 # Start a connection (runs until closed)
 portacode connect
 
-# Run connection in background
-portacode connect --detach
 
 # Check version
 portacode --version

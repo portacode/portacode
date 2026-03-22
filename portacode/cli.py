@@ -5,7 +5,6 @@ import secrets
 import os
 import subprocess
 import sys
-from multiprocessing import Process
 from pathlib import Path
 import signal
 import json
@@ -41,7 +40,6 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
-@click.option("--detach", "detach", "-d", is_flag=True, help="Run connection in background")
 @click.option("--debug", "debug", is_flag=True, help="Enable debug logging")
 @click.option("--log-categories", "log_categories", help="Comma-separated list of log categories to show (e.g., 'connection,auth,git'). Use 'list' to see available categories.")
 @click.option("--non-interactive", "non_interactive", is_flag=True, envvar="PORTACODE_NON_INTERACTIVE", hidden=True,
@@ -96,7 +94,6 @@ def cli() -> None:
 )
 def connect(
     gateway: Optional[str],
-    detach: bool,
     debug: bool,
     log_categories: Optional[str],
     non_interactive: bool,
@@ -111,9 +108,6 @@ def connect(
     proxmox_setup_retry_delay: float,
 ) -> None:  # noqa: D401 – Click callback
     """Connect this machine to Portacode gateway."""
-
-    if detach and exit_after_setup:
-        raise click.UsageError("--detach and --exit-after-setup cannot be used together.")
 
     # Set up debug logging if requested
     if debug:
@@ -390,21 +384,7 @@ def connect(
         click.echo(click.style("Bootstrap steps completed. Exiting without starting a live connection.", fg="green"))
         return
 
-    # 3. Start connection manager
-    if detach and not non_interactive:
-        click.echo("Establishing connection in the background…")
-        p = Process(
-            target=_run_connection_forever,
-            args=(target_gateway, keypair, pid_file, normalized_project_paths, debug),
-        )
-        p.daemon = False  # We want it to live beyond parent process on POSIX; on Windows it's anyway independent
-        p.start()
-        click.echo(click.style(f"Background process PID: {p.pid}", fg="green"))
-        return
-
-    # Foreground mode → run in current event-loop
-    if not detach:
-        pid_file.write_text(str(os.getpid()))
+    pid_file.write_text(str(os.getpid()))
 
     async def _main() -> None:
         mgr = ConnectionManager(
@@ -416,31 +396,6 @@ def connect(
         await run_until_interrupt(mgr)
 
     try:
-        asyncio.run(_main())
-    finally:
-        pid_file.unlink(missing_ok=True)
-
-
-def _run_connection_forever(
-    url: str,
-    keypair,
-    pid_file: Path,
-    initial_project_paths: Optional[list[str]] = None,
-    debug: bool = False,
-):
-    """Entry-point for detached background process."""
-    try:
-        pid_file.write_text(str(os.getpid()))
-
-        async def _main() -> None:
-            mgr = ConnectionManager(
-                url,
-                keypair,
-                debug=debug,
-                initial_project_paths=initial_project_paths,
-            )
-            await run_until_interrupt(mgr)
-
         asyncio.run(_main())
     finally:
         pid_file.unlink(missing_ok=True)
