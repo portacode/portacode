@@ -1,6 +1,7 @@
 """Terminal session management."""
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -241,7 +242,18 @@ class TerminalSession:
         async def _pump() -> None:
             try:
                 while True:
-                    data = await self.proc.stdout.read(1024)
+                    try:
+                        data = await self.proc.stdout.read(1024)
+                    except OSError as exc:
+                        # PTY readers can raise EIO when the slave side closes. Treat it
+                        # as a normal EOF so terminal shutdown does not surface as an error.
+                        if exc.errno == errno.EIO:
+                            logger.debug(
+                                "Terminal %s PTY closed during read; treating EIO as EOF",
+                                self.id,
+                            )
+                            break
+                        raise
                     if not data:
                         break
                     text = data.decode(errors="ignore")
