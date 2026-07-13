@@ -161,6 +161,67 @@ services:
         options:
           max-size: "50m"
           max-file: "3"
+  alert-evaluator:
+    profiles: ["alerts"]
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    container_name: portacode-alert-evaluator
+    restart: unless-stopped
+    command: ["python", "manage.py", "evaluate_alert_rules", "--run-forever", "--interval", "30"]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
+  alert-notifier:
+    profiles: ["alerts"]
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "manage.py", "run_alert_notification_workers", "--poll-interval", "2"]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    deploy:
+      replicas: 2
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
+  alert-metrics-rollup:
+    profiles: ["alerts"]
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile
+    container_name: portacode-alert-metrics-rollup
+    restart: unless-stopped
+    command: ["python", "manage.py", "rollup_device_metrics", "--run-forever", "--interval", "3600"]
+    env_file:
+      - main.env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
   reacher:
     image: reacherhq/backend:latest
     env_file:

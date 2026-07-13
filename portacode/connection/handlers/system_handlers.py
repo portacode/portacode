@@ -410,6 +410,76 @@ def _get_cloudflare_forwarding_state() -> Dict[str, Any]:
     return {"rules": rules, "updated_at": state.get("updated_at")}
 
 
+def _parse_os_release() -> Dict[str, str]:
+    """Parse /etc/os-release into a dict (ID, ID_LIKE, PRETTY_NAME, VERSION_ID, ...)."""
+    values: Dict[str, str] = {}
+    try:
+        with open("/etc/os-release", "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    except (FileNotFoundError, OSError):
+        pass
+    return values
+
+
+# Ordered so the most specific/common family wins when ID_LIKE lists multiple ancestors
+# (e.g. Rocky Linux declares `ID_LIKE="rhel centos fedora"`).
+_FAMILY_KEYWORDS = ["debian", "ubuntu", "rhel", "fedora", "suse", "arch", "alpine", "gentoo"]
+_FAMILY_ALIASES = {"ubuntu": "debian", "fedora": "rhel"}
+
+
+def _derive_os_family(os_release: Dict[str, str], system: str) -> str:
+    """Normalize a distro's ID/ID_LIKE into a family tag usable for alert-rule-template
+    compatibility matching (e.g. an Ubuntu device matches a 'debian family' template),
+    instead of exact-string matching a display name."""
+    if system == "Darwin":
+        return "darwin"
+    if system == "Windows":
+        return "windows"
+    if system != "Linux":
+        return system.lower() if system else ""
+
+    haystack = f"{os_release.get('ID', '')} {os_release.get('ID_LIKE', '')}".lower()
+    for keyword in _FAMILY_KEYWORDS:
+        if keyword in haystack:
+            return _FAMILY_ALIASES.get(keyword, keyword)
+    # Fall back to the raw ID (e.g. a distro we don't recognize yet) rather than empty,
+    # so at least exact-ID compatibility expressions still work.
+    return os_release.get("ID", "").lower()
+
+
+def _detect_capabilities(system: str) -> List[str]:
+    """Opportunistically detect capability tags used by alert-rule-template compatibility
+    expressions (e.g. `"docker" in capabilities`). Intentionally not exhaustive -- an
+    undetected capability just excludes templates that require it, rather than erroring."""
+    capabilities: List[str] = []
+    if system != "Linux":
+        return capabilities
+
+    if shutil.which("docker"):
+        capabilities.append("docker")
+    if shutil.which("podman"):
+        capabilities.append("podman")
+    if shutil.which("systemctl"):
+        capabilities.append("systemd")
+    if shutil.which("apt") or shutil.which("apt-get"):
+        capabilities.append("apt")
+    if shutil.which("yum") or shutil.which("dnf"):
+        capabilities.append("yum")
+    if shutil.which("pacman"):
+        capabilities.append("pacman")
+    try:
+        if _detect_cgroup_v2():
+            capabilities.append("cgroup_v2")
+    except Exception:  # pragma: no cover - defensive, capability detection must never crash system_info
+        pass
+    return capabilities
+
+
 def _get_os_info() -> Dict[str, Any]:
     """Get operating system information with robust error handling."""
     try:
@@ -417,10 +487,13 @@ def _get_os_info() -> Dict[str, Any]:
         logger.debug("Detected system: %s", system)
         default_shell = _resolve_default_shell(system)
         default_cwd = get_runtime_user_home()
+        os_release = _parse_os_release() if system == "Linux" else {}
 
         if system == "Linux":
             os_type = "Linux"
-            # Try to get more specific Linux distribution info
+            os_id = os_release.get("ID", "")
+            os_version_id = os_release.get("VERSION_ID", "")
+            # Try to get a human-readable distribution name/version string
             try:
                 import distro
 
@@ -428,43 +501,49 @@ def _get_os_info() -> Dict[str, Any]:
                 logger.debug("Using distro package for OS version: %s", os_version)
             except ImportError:
                 logger.debug("distro package not available, trying /etc/os-release")
-                try:
-                    with open("/etc/os-release", "r") as f:
-                        for line in f:
-                            if line.startswith("PRETTY_NAME="):
-                                os_version = line.split("=", 1)[1].strip().strip('"')
-                                logger.debug("Found OS version from /etc/os-release: %s", os_version)
-                                break
-                        else:
-                            os_version = f"{system} {platform.release()}"
-                            logger.debug("Using platform.release() for OS version: %s", os_version)
-                except FileNotFoundError:
+                if os_release.get("PRETTY_NAME"):
+                    os_version = os_release["PRETTY_NAME"]
+                    logger.debug("Found OS version from /etc/os-release: %s", os_version)
+                else:
                     os_version = f"{system} {platform.release()}"
-                    logger.debug("Using platform.release() fallback for OS version: %s", os_version)
+                    logger.debug("Using platform.release() for OS version: %s", os_version)
 
         elif system == "Darwin":  # macOS
             os_type = "macOS"
+            os_id = "macos"
+            os_version_id = platform.mac_ver()[0]
             os_version = f"macOS {platform.mac_ver()[0]}"
 
         elif system == "Windows":
             os_type = "Windows"
+            os_id = "windows"
+            os_version_id = platform.release()
             os_version = f"{platform.system()} {platform.release()}"
 
         else:
             os_type = system
+            os_id = system.lower()
+            os_version_id = platform.release()
             os_version = f"{system} {platform.release()}"
-        
+
         result = {
             "os_type": os_type,
             "os_version": os_version,
             "architecture": platform.machine(),
             "default_shell": default_shell,
             "default_cwd": default_cwd,
+            # Structured taxonomy for alert-rule-template compatibility matching (see
+            # docs/device-health-alerting-plan.md §4.2) -- normalized/machine-readable,
+            # unlike `os_version` above which stays a human-readable display string.
+            "os_family": _derive_os_family(os_release, system),
+            "os_id": os_id,
+            "os_version_id": os_version_id,
+            "capabilities": _detect_capabilities(system),
         }
-        
+
         logger.debug("Successfully collected OS info: %s", result)
         return result
-        
+
     except Exception as e:
         logger.error("Failed to collect OS info: %s", e, exc_info=True)
         # Return minimal fallback info instead of failing completely
@@ -474,6 +553,10 @@ def _get_os_info() -> Dict[str, Any]:
             "architecture": platform.machine() if hasattr(platform, "machine") else "Unknown",
             "default_shell": _resolve_default_shell(platform.system()),
             "default_cwd": get_runtime_user_home(),
+            "os_family": "",
+            "os_id": "",
+            "os_version_id": "",
+            "capabilities": [],
         }
 
 
