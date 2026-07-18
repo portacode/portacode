@@ -52,6 +52,13 @@ def prepare_codex_command() -> None:
     except CodexPreparationError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(click.style(f"Codex is ready: {config_path}", fg="green"))
+    click.echo(
+        click.style(
+            "For this terminal only, run: export OPENAI_API_KEY=portacode-local\n"
+            "New terminal sessions are already configured.",
+            fg="yellow",
+        )
+    )
 
 
 @cli.command()
