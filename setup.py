@@ -41,6 +41,7 @@ setup(
         "ntplib>=0.4.0",
         "importlib_resources>=6.0",
         "requests>=2.31",
+        "httpx>=0.27",
     ],
     extras_require={
         "dev": ["black", "flake8", "pytest"],

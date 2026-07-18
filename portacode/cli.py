@@ -26,6 +26,7 @@ from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
 from .updater import build_pip_install_command, run_pip_install_command
 from .utils.runtime_paths import expand_runtime_path
+from .codex_prepare import CodexPreparationError, prepare_codex
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
@@ -36,6 +37,21 @@ MAX_PROJECT_PATHS = 10
 @click.version_option(__version__, "-v", "--version", message="Portacode %(version)s")
 def cli() -> None:
     """Portacode command-line interface."""
+
+
+@cli.group()
+def prepare() -> None:
+    """Prepare supported developer tools for this Portacode device."""
+
+
+@prepare.command("codex")
+def prepare_codex_command() -> None:
+    """Install and configure Codex CLI for the local device-authenticated proxy."""
+    try:
+        config_path = prepare_codex()
+    except CodexPreparationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(click.style(f"Codex is ready: {config_path}", fg="green"))
 
 
 @cli.command()

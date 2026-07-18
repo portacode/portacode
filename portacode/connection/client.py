@@ -15,6 +15,7 @@ import websockets
 from websockets import WebSocketClientProtocol
 
 from ..keypair import KeyPair
+from ..codex_loopback_proxy import CodexLoopbackProxy
 from .multiplex import Multiplexer
 from ..logging_categories import get_categorized_logger, LogCategory
 from ..exit_codes import AUTH_REJECTED_EXIT_CODE
@@ -80,6 +81,7 @@ class ConnectionManager:
         self._remaining_initial_syncs = self.CLOCK_SYNC_INITIAL_REQUESTS
         self.initial_project_paths = [str(path).strip() for path in (initial_project_paths or []) if str(path).strip()]
         self._pending_control_replies: dict[str, asyncio.Queue[Any]] = {}
+        self._codex_loopback_proxy: Optional[CodexLoopbackProxy] = None
 
     async def start(self) -> None:
         """Start the background task that maintains the connection."""
@@ -92,6 +94,9 @@ class ConnectionManager:
         self._stop_event.set()
         if self._task is not None:
             await self._task
+        if self._codex_loopback_proxy is not None:
+            await self._codex_loopback_proxy.stop()
+            self._codex_loopback_proxy = None
 
     async def wait_until_authenticated(self, timeout: Optional[float] = None) -> bool:
         """Wait until gateway authentication completes successfully."""
@@ -136,6 +141,7 @@ class ConnectionManager:
 
                     # Authenticate – abort loop on auth failures
                     await self._authenticate()
+                    await self._start_codex_loopback_proxy()
 
                     # ------------------------------------------------------------------
                     # Initialise or re-attach terminal/control management (channel 0)
@@ -208,6 +214,11 @@ class ConnectionManager:
                 print("Press Ctrl+C to close the connection.")
         # Finished authentication flow.
         await self._register_initial_project_paths()
+
+    async def _start_codex_loopback_proxy(self) -> None:
+        if self._codex_loopback_proxy is None:
+            self._codex_loopback_proxy = CodexLoopbackProxy(self.keypair)
+        await self._codex_loopback_proxy.start()
 
     async def _register_initial_project_paths(self) -> None:
         if not self.initial_project_paths or self.websocket is None:

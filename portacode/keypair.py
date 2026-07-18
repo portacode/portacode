@@ -33,11 +33,15 @@ class KeyPair:
 
     def sign_challenge(self, challenge: str) -> bytes:
         """Sign a challenge string with the private key."""
+        return self.sign_bytes(challenge.encode())
+
+    def sign_bytes(self, payload: bytes) -> bytes:
+        """Sign an opaque payload for a Portacode service request."""
         private_key = serialization.load_pem_private_key(
             self.private_key_pem, password=None
         )
         return private_key.sign(
-            challenge.encode(),
+            payload,
             padding.PKCS1v15(),
             hashes.SHA256(),
         )
@@ -57,8 +61,7 @@ class KeyPair:
 
 
 def _generate_keypair() -> Tuple[bytes, bytes]:
-    # Use 1024 bits for smaller demo keys (not secure for production)
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
     private_pem = private_key.private_bytes(
         encoding=Encoding.PEM,
         format=PrivateFormat.TraditionalOpenSSL,
@@ -79,8 +82,11 @@ def get_or_create_keypair() -> KeyPair:
 
     if not priv_path.exists() or not pub_path.exists():
         logging.info(f"No keys found, generating new one and saving to {key_dir}")
+        key_dir.mkdir(parents=True, exist_ok=True)
+        key_dir.chmod(0o700)
         private_pem, public_pem = _generate_keypair()
         priv_path.write_bytes(private_pem)
+        priv_path.chmod(0o600)
         pub_path.write_bytes(public_pem)
         keypair = KeyPair(priv_path, pub_path)
         keypair._is_new = True
@@ -119,9 +125,12 @@ class InMemoryKeyPair:
         return self._public_pem
 
     def sign_challenge(self, challenge: str) -> bytes:
+        return self.sign_bytes(challenge.encode())
+
+    def sign_bytes(self, payload: bytes) -> bytes:
         private_key = serialization.load_pem_private_key(self._private_pem, password=None)
         return private_key.sign(
-            challenge.encode(),
+            payload,
             padding.PKCS1v15(),
             hashes.SHA256(),
         )
@@ -138,9 +147,11 @@ class InMemoryKeyPair:
         """Write the keypair to disk and return a regular KeyPair."""
         key_dir = self._key_dir
         key_dir.mkdir(parents=True, exist_ok=True)
+        key_dir.chmod(0o700)
         priv_path = key_dir / PRIVATE_KEY_FILE
         pub_path = key_dir / PUBLIC_KEY_FILE
         priv_path.write_bytes(self._private_pem)
+        priv_path.chmod(0o600)
         pub_path.write_bytes(self._public_pem)
         keypair = KeyPair(priv_path, pub_path)
         keypair._is_new = True  # type: ignore[attr-defined]
