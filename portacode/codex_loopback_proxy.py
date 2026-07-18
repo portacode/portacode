@@ -135,10 +135,11 @@ class CodexLoopbackProxy:
         content_type = request_headers.get("content-type")
         if content_type:
             headers["Content-Type"] = content_type
+        gateway_path = path[3:] if path.startswith("/v1") else path
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 method,
-                f"{self.gateway_url}/device{path.removeprefix('/v1')}",
+                f"{self.gateway_url}/device{gateway_path}",
                 content=body,
                 headers=headers,
             ) as response:
