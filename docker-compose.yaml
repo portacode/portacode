@@ -108,6 +108,34 @@ services:
         options:
           max-size: "50m"
           max-file: "3"
+
+  # Multi-tenant Codex Connect + Responses gateway (ChatGPT subscription auth).
+  # Start with 1 replica; scale later if needed. Not per-user containers.
+  codex-gateway:
+    build:
+      context: ./server/portacode_django
+      dockerfile: Dockerfile.codex-gateway
+    container_name: portacode-codex-gateway
+    restart: unless-stopped
+    command: ["python", "manage.py", "run_codex_gateway", "--host", "0.0.0.0", "--port", "8080"]
+    env_file:
+      - main.env
+    environment:
+      CODEX_GATEWAY_INTERNAL_URL: http://codex-gateway:8080
+      CODEX_GATEWAY_PUBLIC_BASE_URL: "${CODEX_GATEWAY_PUBLIC_BASE_URL:-https://codexapi.portacode.com}"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./server/portacode_django:/app
+    logging:
+        driver: json-file
+        options:
+          max-size: "50m"
+          max-file: "3"
+
   automation-worker:
     build:
       context: ./server/portacode_django
