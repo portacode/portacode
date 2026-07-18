@@ -38,6 +38,7 @@ _LINK_EVENT_ROOT = Path(user_data_dir("portacode", "portacode")) / "link_events"
 _LINK_EVENT_POLL_INTERVAL = 0.5  # seconds
 LINK_EVENT_THROTTLE_SECONDS = 5.0
 LINK_CAPTURE_ORIGINAL_BROWSER_ENV = "PORTACODE_LINK_CAPTURE_ORIGINAL_BROWSER"
+CODEX_ENV_PATH = Path("/etc/portacode/codex.env")
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,16 @@ _DEFAULT_ENV = {
 
 
 def _build_child_env() -> Dict[str, str]:
-    """Return a copy of os.environ with sensible fallbacks added."""
+    """Return a copy of os.environ with sensible fallbacks and managed vars."""
     env = os.environ.copy()
+    try:
+        for raw_line in CODEX_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            key, separator, value = raw_line.partition("=")
+            if separator and key == "OPENAI_API_KEY" and value:
+                # The file is managed locally by ``portacode prepare codex``.
+                env[key] = value
+    except OSError:
+        pass
     for k, v in _DEFAULT_ENV.items():
         env.setdefault(k, v)
     env.setdefault("COLUMNS", str(TERMINAL_COLUMNS))

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import AsyncHandler
 from .runtime_user import get_default_runtime_user, wrap_shell_command
-from .session import SessionManager
+from .session import SessionManager, _build_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -314,11 +314,14 @@ class TerminalExecHandler(AsyncHandler):
             except (TypeError, ValueError) as exc:
                 raise ValueError("timeout must be a positive number") from exc
 
-        env = None
+        # Start from the same managed environment as interactive PTY sessions.
+        # In particular, Codex's local marker is loaded from Portacode's
+        # environment file instead of relying on PAM or a login shell.
+        env = _build_child_env()
         if env_spec is not None:
             if not isinstance(env_spec, dict):
                 raise ValueError("env must be an object/dict of environment variables")
-            env = {str(k): str(v) for k, v in env_spec.items()}
+            env.update({str(k): str(v) for k, v in env_spec.items()})
 
         project_id = message.get("project_id")
 

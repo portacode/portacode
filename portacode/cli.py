@@ -48,6 +48,7 @@ def prepare() -> None:
 def prepare_codex_command() -> None:
     """Install and configure Codex CLI for the local device-authenticated proxy."""
     try:
+        click.echo("Preparing Codex. First-time installation can take a few minutes...")
         config_path = prepare_codex()
     except CodexPreparationError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -37,9 +37,12 @@ class CodexPreparationError(RuntimeError):
 
 
 def _run(command: Iterable[str]) -> None:
-    result = subprocess.run(list(command), text=True)
+    """Run setup tools without letting their progress controls corrupt the PTY."""
+    result = subprocess.run(list(command), text=True, capture_output=True)
     if result.returncode:
-        raise CodexPreparationError(f"Command failed ({result.returncode}): {' '.join(command)}")
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        detail = f"\n{output[-4000:]}" if output else ""
+        raise CodexPreparationError(f"Command failed ({result.returncode}): {' '.join(command)}{detail}")
 
 
 def _node_major() -> int:
@@ -61,6 +64,15 @@ def _sudo_prefix() -> list[str]:
     if not shutil.which("sudo"):
         raise CodexPreparationError("Administrator privileges are required but sudo is unavailable.")
     return ["sudo"]
+
+
+def _authorize_sudo_if_needed() -> None:
+    """Prompt before captured installer output would otherwise hide sudo's prompt."""
+    if platform.system().lower() not in {"linux", "darwin"} or not _sudo_prefix():
+        return
+    result = subprocess.run(["sudo", "-v"], text=True)
+    if result.returncode:
+        raise CodexPreparationError("Administrator authorization is required to prepare Codex.")
 
 
 def _install_node_if_needed() -> None:
@@ -129,6 +141,18 @@ def _set_local_sentinel() -> None:
     system = platform.system().lower()
     os.environ["OPENAI_API_KEY"] = LOCAL_SENTINEL
     if system == "linux":
+        # Portacode terminals load this directly, including sessions started by
+        # a long-running agent that pre-dates the prepare command.
+        managed_setup = (
+            "install -d -m 755 /etc/portacode && "
+            "printf '%s\\n' 'OPENAI_API_KEY=portacode-local' > /etc/portacode/codex.env && "
+            "chmod 644 /etc/portacode/codex.env && "
+            "printf '%s\\n' '# Managed by portacode prepare codex.' "
+            "'if [ -r /etc/portacode/codex.env ]; then' '  set -a' "
+            "'  . /etc/portacode/codex.env' '  set +a' 'fi' > /etc/profile.d/portacode_codex.sh && "
+            "chmod 644 /etc/profile.d/portacode_codex.sh"
+        )
+        _run([*_sudo_prefix(), "sh", "-c", managed_setup])
         _run([*_sudo_prefix(), "sh", "-c", 'grep -q "^OPENAI_API_KEY=portacode-local$" /etc/environment || printf "%s\\n" "OPENAI_API_KEY=portacode-local" >> /etc/environment'])
     elif system == "darwin":
         zshenv = Path.home() / ".zshenv"
@@ -156,6 +180,7 @@ def _verify_loopback_proxy() -> None:
 
 def prepare_codex() -> Path:
     """Install Codex and configure it to use the device-authenticated proxy."""
+    _authorize_sudo_if_needed()
     _install_node_if_needed()
     _install_codex()
     config_path = _write_config()
