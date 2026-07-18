@@ -67,8 +67,13 @@ def _sudo_prefix() -> list[str]:
 
 
 def _authorize_sudo_if_needed() -> None:
-    """Prompt before captured installer output would otherwise hide sudo's prompt."""
+    """Use passwordless sudo when available before prompting interactively."""
     if platform.system().lower() not in {"linux", "darwin"} or not _sudo_prefix():
+        return
+    non_interactive = subprocess.run(
+        ["sudo", "-n", "true"], text=True, capture_output=True
+    )
+    if non_interactive.returncode == 0:
         return
     result = subprocess.run(["sudo", "-v"], text=True)
     if result.returncode:
