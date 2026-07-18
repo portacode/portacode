@@ -32,6 +32,7 @@ DEFAULT_STEP_TIMEOUT_SECONDS = 7200.0
 MAX_STDIO_CHARS = 8000
 OUTPUT_FLUSH_INTERVAL_S = 1.0
 STATE_FILE_PATH = Path("/tmp/portacode_automation_v2_state.json")
+SYSTEM_ENV_PATH = Path("/etc/environment")
 EXPOSED_SERVICES_FILE_PATH = Path("/etc/portacode/exposed_services.json")
 EXPOSED_SERVICES_ENV_KEY = "PORTACODE_EXPOSED_SERVICES_JSON"
 WAIT_FOR_PLACEHOLDER_RE = re.compile(r"\[exposed:(\d{1,5})\]", flags=re.IGNORECASE)
@@ -69,6 +70,26 @@ def _normalize_runtime_inputs(raw_inputs: Any) -> dict[str, dict[str, Any]]:
             "type": str(raw_definition.get("type") or "text"),
         }
     return payload
+
+
+def _persist_inputs_to_system_environment(raw_ids: Any, task_inputs: dict[str, dict[str, Any]]) -> None:
+    if not isinstance(raw_ids, list):
+        return
+    selected = [str(input_id) for input_id in raw_ids if str(input_id) in task_inputs]
+    if not selected:
+        return
+    entries = {task_inputs[input_id]["env_name"]: task_inputs[input_id]["value"] for input_id in selected}
+    if any("\n" in value or "\r" in value for value in entries.values()):
+        raise ValueError("persisted environment input values must not contain newlines")
+    existing = SYSTEM_ENV_PATH.read_text(encoding="utf-8") if SYSTEM_ENV_PATH.exists() else ""
+    kept = [line for line in existing.splitlines() if line.split("=", 1)[0].strip() not in entries]
+    for name, value in entries.items():
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        kept.append(f'{name}="{escaped}"')
+    temp_path = SYSTEM_ENV_PATH.with_suffix(".portacode.tmp")
+    temp_path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+    os.chmod(temp_path, 0o644)
+    temp_path.replace(SYSTEM_ENV_PATH)
 
 
 def _runtime_input_debug_summary(task_inputs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -211,6 +232,7 @@ class _AutomationRuntimeV2:
         instructions: Any,
         inputs: Any,
         default_timeout_seconds: float,
+        persist_environment_inputs: Any = None,
     ) -> Dict[str, Any]:
         if not isinstance(instructions, list):
             raise ValueError("instructions must be a list")
@@ -257,6 +279,7 @@ class _AutomationRuntimeV2:
             }
             tasks[task_key] = task_state
             normalized_inputs = _normalize_runtime_inputs(inputs)
+            _persist_inputs_to_system_environment(persist_environment_inputs, normalized_inputs)
             self._task_inputs[task_key] = normalized_inputs
             logger.info(
                 "automation_v2 start task=%s received_inputs=%s normalized_inputs=%s",
@@ -960,6 +983,7 @@ class AutomationV2StartHandler(AsyncHandler):
         task_id = message.get("task_id")
         instructions = message.get("instructions")
         inputs = message.get("inputs")
+        persist_environment_inputs = message.get("persist_environment_inputs")
         timeout_param = message.get("step_timeout_seconds", DEFAULT_STEP_TIMEOUT_SECONDS)
         try:
             timeout_value = float(timeout_param)
@@ -968,7 +992,7 @@ class AutomationV2StartHandler(AsyncHandler):
         except (TypeError, ValueError):
             timeout_value = DEFAULT_STEP_TIMEOUT_SECONDS
 
-        state = await _RUNTIME.start(str(task_id), instructions, inputs, timeout_value)
+        state = await _RUNTIME.start(str(task_id), instructions, inputs, timeout_value, persist_environment_inputs)
         return {
             "event": "automation_v2_started",
             "task_id": str(task_id),
