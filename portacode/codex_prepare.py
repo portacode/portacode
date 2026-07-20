@@ -39,10 +39,15 @@ class CodexPreparationError(RuntimeError):
     pass
 
 
-def _run(command: Iterable[str]) -> None:
-    """Run setup tools without letting their progress controls corrupt the PTY."""
+def _run(command: Iterable[str], *, ok_returncodes: tuple[int, ...] = (0,)) -> None:
+    """Run setup tools without letting their progress controls corrupt the PTY.
+
+    ``ok_returncodes`` mirrors other Portacode install helpers (cloudflared,
+    PyYAML, Proxmox infra): ``apt-get update`` often exits 100 on Proxmox hosts
+    without an enterprise subscription even when Debian mirrors are fine.
+    """
     result = subprocess.run(list(command), text=True, capture_output=True)
-    if result.returncode:
+    if result.returncode not in ok_returncodes:
         output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         detail = f"\n{output[-4000:]}" if output else ""
         raise CodexPreparationError(f"Command failed ({result.returncode}): {' '.join(command)}{detail}")
@@ -93,7 +98,9 @@ def _install_node_if_needed() -> None:
         if "alpine" in release:
             _run([*_sudo_prefix(), "apk", "add", "--no-cache", "nodejs", "npm"])
         elif any(name in release for name in ("debian", "ubuntu")):
-            _run([*_sudo_prefix(), "apt-get", "update"])
+            # Exit 100: Proxmox enterprise.proxmox.com 401 without subscription.
+            # Same tolerance as ensure_cloudflared / ensure_pyyaml / proxmox_infra.
+            _run([*_sudo_prefix(), "apt-get", "update"], ok_returncodes=(0, 100))
             _run([*_sudo_prefix(), "apt-get", "install", "-y", "ca-certificates", "curl"])
             node_setup = "bash -" if not _sudo_prefix() else "sudo -E bash -"
             _run(["sh", "-c", f"curl -fsSL https://deb.nodesource.com/setup_22.x | {node_setup}"])
