@@ -806,8 +806,14 @@ def restart_command(method: str, verbose: bool) -> None:
 @cli.command("setversion")
 @click.argument("version", required=True)
 def set_version_command(version: str) -> None:
-    """Install a specific Portacode version and restart the system service."""
-    click.echo(f"Installing Portacode {version}…")
+    """Install a Portacode version and restart the system service.
+
+    VERSION may be an explicit release (e.g. ``1.2.3``) or ``latest`` to
+    install the newest version available on PyPI.
+    """
+    resolved_version = None if version.lower() == "latest" else version
+    display_version = "latest" if resolved_version is None else resolved_version
+    click.echo(f"Installing Portacode {display_version}…")
     interactive_tty = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive_tty and os.geteuid() != 0:
         click.echo(
@@ -817,14 +823,16 @@ def set_version_command(version: str) -> None:
             )
         )
     result = run_pip_install_command(
-        build_pip_install_command(version=version),
+        build_pip_install_command(version=resolved_version),
         allow_sudo_fallback=True,
         interactive_sudo=interactive_tty,
     )
     if result.returncode != 0:
         error_msg = (result.stderr or result.stdout or "").strip() or "unknown error"
-        raise click.ClickException(f"Failed to install Portacode {version}: {error_msg}")
-    click.echo(click.style(f"✔ Portacode {version} installed", fg="green"))
+        raise click.ClickException(
+            f"Failed to install Portacode {display_version}: {error_msg}"
+        )
+    click.echo(click.style(f"✔ Portacode {display_version} installed", fg="green"))
     from .restart import request_restart, running_under_systemd
 
     in_service = running_under_systemd() and not (sys.stdin.isatty() or sys.stdout.isatty())

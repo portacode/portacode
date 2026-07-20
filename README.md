@@ -87,6 +87,12 @@ portacode connect
 # Check version
 portacode --version
 
+# Install a specific version (restarts the service)
+portacode setversion 1.2.3
+
+# Upgrade to the latest version from PyPI
+portacode setversion latest
+
 # Get help
 portacode --help
 ```
