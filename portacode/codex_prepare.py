@@ -6,13 +6,14 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, Mapping, MutableMapping, Optional
 
 from .codex_loopback_proxy import CODEX_LOOPBACK_HOST, CODEX_LOOPBACK_PORT
 
@@ -30,6 +31,8 @@ env_key = "OPENAI_API_KEY"
 '''
 
 LOCAL_SENTINEL = "portacode-local"
+CODEX_ENV_PATH = Path("/etc/portacode/codex.env")
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 
 
 class CodexPreparationError(RuntimeError):
@@ -142,32 +145,121 @@ def _write_config() -> Path:
     return config_path
 
 
+def read_codex_env_file(path: Optional[Path] = None) -> Dict[str, str]:
+    """Parse KEY=VALUE lines from the managed Codex env file."""
+    path = path or CODEX_ENV_PATH
+    values: Dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, separator, value = line.partition("=")
+            if separator and key:
+                values[key] = value
+    except OSError:
+        pass
+    return values
+
+
+def apply_codex_env_to_mapping(
+    env: MutableMapping[str, str],
+    path: Optional[Path] = None,
+) -> None:
+    """Ensure OPENAI_API_KEY (and other managed vars) are present for child processes.
+
+    Shell profiles / IDE terminals already source ``/etc/portacode/codex.env``.
+    The long-running Portacode systemd service does not, so callers that spawn
+    Codex (or interactive shells) must merge this file explicitly.
+    """
+    file_values = read_codex_env_file(path)
+    for key, value in file_values.items():
+        if value:
+            env[key] = value
+    # Always guarantee the local proxy sentinel unless a non-empty value exists.
+    if not (env.get(OPENAI_API_KEY_ENV) or "").strip():
+        env[OPENAI_API_KEY_ENV] = file_values.get(OPENAI_API_KEY_ENV) or LOCAL_SENTINEL
+
+
+def build_codex_subprocess_env(
+    base: Optional[Mapping[str, str]] = None,
+    path: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Environment for Codex CLI / app-server subprocesses."""
+    env = dict(base or os.environ)
+    apply_codex_env_to_mapping(env, path=path)
+    return env
+
+
+def _install_systemd_codex_environment_file() -> None:
+    """Make Portacode's systemd unit load ``/etc/portacode/codex.env`` on start.
+
+    systemd does not source ``/etc/profile.d`` or ``/etc/environment`` for
+    ``Type=simple`` services the way login shells do. A drop-in EnvironmentFile
+    is the reliable propagation path for the agent process itself.
+    """
+    dropin_body = (
+        "# Managed by portacode prepare codex.\n"
+        "[Service]\n"
+        f"EnvironmentFile=-{CODEX_ENV_PATH}\n"
+    )
+    system_unit = Path("/etc/systemd/system/portacode.service")
+    user_unit = Path.home() / ".config/systemd/user/portacode.service"
+
+    if system_unit.exists():
+        dropin_dir = Path("/etc/systemd/system/portacode.service.d")
+        dropin_path = dropin_dir / "codex.conf"
+        script = (
+            f"install -d -m 755 {shlex.quote(str(dropin_dir))} && "
+            f"printf '%s' {shlex.quote(dropin_body)} > {shlex.quote(str(dropin_path))} && "
+            f"chmod 644 {shlex.quote(str(dropin_path))}"
+        )
+        _run([*_sudo_prefix(), "sh", "-c", script])
+        subprocess.run([*_sudo_prefix(), "systemctl", "daemon-reload"], check=False)
+        return
+
+    if user_unit.exists():
+        dropin_dir = Path.home() / ".config/systemd/user/portacode.service.d"
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        dropin_path = dropin_dir / "codex.conf"
+        dropin_path.write_text(dropin_body, encoding="utf-8")
+        dropin_path.chmod(0o644)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+
+
 def _set_local_sentinel() -> None:
     system = platform.system().lower()
-    os.environ["OPENAI_API_KEY"] = LOCAL_SENTINEL
+    os.environ[OPENAI_API_KEY_ENV] = LOCAL_SENTINEL
     if system == "linux":
         # Portacode terminals load this directly, including sessions started by
         # a long-running agent that pre-dates the prepare command.
         managed_setup = (
             "install -d -m 755 /etc/portacode && "
-            "printf '%s\\n' 'OPENAI_API_KEY=portacode-local' > /etc/portacode/codex.env && "
-            "chmod 644 /etc/portacode/codex.env && "
+            f"printf '%s\\n' '{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}' > {CODEX_ENV_PATH} && "
+            f"chmod 644 {CODEX_ENV_PATH} && "
             "printf '%s\\n' '# Managed by portacode prepare codex.' "
-            "'if [ -r /etc/portacode/codex.env ]; then' '  set -a' "
-            "'  . /etc/portacode/codex.env' '  set +a' 'fi' > /etc/profile.d/portacode_codex.sh && "
+            f"'if [ -r {CODEX_ENV_PATH} ]; then' '  set -a' "
+            f"'  . {CODEX_ENV_PATH}' '  set +a' 'fi' > /etc/profile.d/portacode_codex.sh && "
             "chmod 644 /etc/profile.d/portacode_codex.sh"
         )
         _run([*_sudo_prefix(), "sh", "-c", managed_setup])
-        _run([*_sudo_prefix(), "sh", "-c", 'grep -q "^OPENAI_API_KEY=portacode-local$" /etc/environment || printf "%s\\n" "OPENAI_API_KEY=portacode-local" >> /etc/environment'])
+        _run([
+            *_sudo_prefix(),
+            "sh",
+            "-c",
+            f'grep -q "^{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}$" /etc/environment || '
+            f'printf "%s\\n" "{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}" >> /etc/environment',
+        ])
+        _install_systemd_codex_environment_file()
     elif system == "darwin":
         zshenv = Path.home() / ".zshenv"
-        line = "export OPENAI_API_KEY=portacode-local\n"
+        line = f"export {OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}\n"
         if not zshenv.exists() or line not in zshenv.read_text(encoding="utf-8", errors="ignore"):
             with zshenv.open("a", encoding="utf-8") as handle:
                 handle.write(line)
-        subprocess.run(["launchctl", "setenv", "OPENAI_API_KEY", LOCAL_SENTINEL], check=False)
+        subprocess.run(["launchctl", "setenv", OPENAI_API_KEY_ENV, LOCAL_SENTINEL], check=False)
     elif system == "windows":
-        _run(["setx", "OPENAI_API_KEY", LOCAL_SENTINEL])
+        _run(["setx", OPENAI_API_KEY_ENV, LOCAL_SENTINEL])
 
 
 def _verify_loopback_proxy() -> None:

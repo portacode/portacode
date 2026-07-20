@@ -173,7 +173,12 @@ class _SystemdUserService:
         
         # Capture current SHELL for the service to prevent using /bin/sh in containers/virtualized environments
         current_shell = os.getenv("SHELL", "/bin/bash")
-        env_lines = [f"Environment=SHELL={current_shell}"]
+        env_lines = [
+            f"Environment=SHELL={current_shell}",
+            # Optional until `portacode prepare codex` creates the file. Ensures the
+            # long-running agent (and Codex app-server children) see OPENAI_API_KEY.
+            "EnvironmentFile=-/etc/portacode/codex.env",
+        ]
         if self.system_mode:
             env_lines.append(f"Environment=PORTACODE_DEFAULT_RUNTIME_USER={self.runtime_user}")
             if self.xdg_data_home:

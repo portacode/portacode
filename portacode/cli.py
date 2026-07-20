@@ -56,7 +56,9 @@ def prepare_codex_command() -> None:
     click.echo(
         click.style(
             "For this terminal only, run: export OPENAI_API_KEY=portacode-local\n"
-            "New terminal sessions are already configured.",
+            "New IDE terminals load /etc/portacode/codex.env automatically.\n"
+            "The Portacode systemd service loads that file via EnvironmentFile "
+            "(restart the service once if this device was prepared before that support).",
             fg="yellow",
         )
     )

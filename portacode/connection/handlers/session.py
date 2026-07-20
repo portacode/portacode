@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, List, TYPE_CHECKING
 
 from platformdirs import user_data_dir
 
+from portacode.codex_prepare import CODEX_ENV_PATH, apply_codex_env_to_mapping
 from portacode.link_capture import prepare_link_capture_bin
 from .runtime_user import get_default_runtime_user, wrap_argv_for_user
 
@@ -38,7 +39,6 @@ _LINK_EVENT_ROOT = Path(user_data_dir("portacode", "portacode")) / "link_events"
 _LINK_EVENT_POLL_INTERVAL = 0.5  # seconds
 LINK_EVENT_THROTTLE_SECONDS = 5.0
 LINK_CAPTURE_ORIGINAL_BROWSER_ENV = "PORTACODE_LINK_CAPTURE_ORIGINAL_BROWSER"
-CODEX_ENV_PATH = Path("/etc/portacode/codex.env")
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +72,8 @@ _DEFAULT_ENV = {
 def _build_child_env() -> Dict[str, str]:
     """Return a copy of os.environ with sensible fallbacks and managed vars."""
     env = os.environ.copy()
-    try:
-        for raw_line in CODEX_ENV_PATH.read_text(encoding="utf-8").splitlines():
-            key, separator, value = raw_line.partition("=")
-            if separator and key == "OPENAI_API_KEY" and value:
-                # The file is managed locally by ``portacode prepare codex``.
-                env[key] = value
-    except OSError:
-        pass
+    # Managed by ``portacode prepare codex`` (/etc/portacode/codex.env).
+    apply_codex_env_to_mapping(env)
     for k, v in _DEFAULT_ENV.items():
         env.setdefault(k, v)
     env.setdefault("COLUMNS", str(TERMINAL_COLUMNS))

@@ -49,6 +49,7 @@ class ServiceCommandTests(TestCase):
 
             unit_text = service.service_path.read_text(encoding="utf-8")
             self.assertIn("ExecStart=/opt/portacode-venv/bin/python -m portacode connect --non-interactive", unit_text)
+            self.assertIn("EnvironmentFile=-/etc/portacode/codex.env", unit_text)
             self.assertIn("--project-path '$$HOME/.openclaw'", unit_text)
             self.assertIn("--project-path '$$HOME/.openclaw/workspace'", unit_text)
             self.assertLess(unit_text.index("$$HOME/.openclaw"), unit_text.index("$$HOME/.openclaw/workspace"))

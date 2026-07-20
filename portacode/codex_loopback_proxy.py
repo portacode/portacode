@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -13,6 +14,7 @@ from typing import Dict, Optional, Tuple
 
 import httpx
 
+from .codex_usage_limit import note_usage_limit_resets_at
 from .keypair import KeyPair
 
 LOGGER = logging.getLogger(__name__)
@@ -22,6 +24,26 @@ CODEX_LOOPBACK_PORT = 61789
 DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses"}
+
+FORWARD_RESPONSE_HEADERS = frozenset(
+    {
+        "content-type",
+        "cache-control",
+        "x-codex-active-limit",
+        "x-codex-primary-reset-at",
+        "x-codex-secondary-reset-at",
+        "x-codex-primary-used-percent",
+        "x-codex-secondary-used-percent",
+        "x-codex-primary-window-minutes",
+        "x-codex-secondary-window-minutes",
+        "x-codex-promo-message",
+        "x-codex-credits-available",
+        "x-codex-credits-balance",
+        "x-portacode-resets-at",
+        "x-request-id",
+        "cf-ray",
+    }
+)
 
 
 class CodexLoopbackProxy:
@@ -123,6 +145,44 @@ class CodexLoopbackProxy:
             raise ValueError("Request body exceeds the local Codex proxy limit")
         return method.upper(), path, headers, await reader.readexactly(length) if length else b""
 
+    def _collect_response_headers(self, response: httpx.Response) -> Dict[str, str]:
+        out: Dict[str, str] = {
+            "Content-Type": response.headers.get("content-type", "application/json"),
+            "Cache-Control": "no-store",
+            "Connection": "close",
+        }
+        for name, value in response.headers.items():
+            key = name.lower()
+            if key in FORWARD_RESPONSE_HEADERS and key not in {"content-type", "cache-control"}:
+                out[name] = value
+        return out
+
+    def _note_resets_from_error(self, response: httpx.Response, body: bytes) -> None:
+        resets_at = None
+        header_val = response.headers.get("x-portacode-resets-at") or response.headers.get(
+            "x-codex-primary-reset-at"
+        )
+        if header_val:
+            try:
+                resets_at = int(header_val)
+            except ValueError:
+                resets_at = None
+        if resets_at is None and body:
+            try:
+                payload = json.loads(body.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                err = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+                for key in ("resets_at", "resetsAt"):
+                    if key in err:
+                        try:
+                            resets_at = int(err[key])
+                            break
+                        except (TypeError, ValueError):
+                            pass
+        note_usage_limit_resets_at(resets_at)
+
     async def _forward(
         self,
         writer: asyncio.StreamWriter,
@@ -143,14 +203,25 @@ class CodexLoopbackProxy:
                 content=body,
                 headers=headers,
             ) as response:
-                response_headers = {
-                    "Content-Type": response.headers.get("content-type", "application/json"),
-                    "Cache-Control": "no-store",
-                    "Connection": "close",
-                }
+                response_headers = self._collect_response_headers(response)
+                status_text = response.reason_phrase or "OK"
+
+                if response.status_code >= 400:
+                    err_body = await response.aread()
+                    self._note_resets_from_error(response, err_body)
+                    response_headers["Content-Length"] = str(len(err_body))
+                    writer.write(
+                        f"HTTP/1.1 {response.status_code} {status_text}\r\n".encode("ascii")
+                    )
+                    for name, value in response_headers.items():
+                        writer.write(f"{name}: {value}\r\n".encode("latin-1"))
+                    writer.write(b"\r\n")
+                    writer.write(err_body)
+                    await writer.drain()
+                    return
+
                 if response.headers.get("content-length"):
                     response_headers["Content-Length"] = response.headers["content-length"]
-                status_text = response.reason_phrase or "OK"
                 writer.write(f"HTTP/1.1 {response.status_code} {status_text}\r\n".encode("ascii"))
                 for name, value in response_headers.items():
                     writer.write(f"{name}: {value}\r\n".encode("latin-1"))

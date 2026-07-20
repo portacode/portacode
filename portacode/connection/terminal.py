@@ -68,6 +68,13 @@ from .handlers import (
     AutomationV2StartHandler,
     AutomationV2StateHandler,
     AutomationV2CancelHandler,
+    CodexStatusHandler,
+    CodexThreadListHandler,
+    CodexThreadStartHandler,
+    CodexThreadResumeHandler,
+    CodexTurnStartHandler,
+    CodexTurnInterruptHandler,
+    CodexPrepareHandler,
 )
 from .handlers.project_aware_file_handlers import (
     ProjectAwareFileWriteHandler,
@@ -546,6 +553,14 @@ class TerminalManager:
         self._command_registry.register(AutomationV2StartHandler)
         self._command_registry.register(AutomationV2StateHandler)
         self._command_registry.register(AutomationV2CancelHandler)
+        # Codex chat handlers
+        self._command_registry.register(CodexStatusHandler)
+        self._command_registry.register(CodexThreadListHandler)
+        self._command_registry.register(CodexThreadStartHandler)
+        self._command_registry.register(CodexThreadResumeHandler)
+        self._command_registry.register(CodexTurnStartHandler)
+        self._command_registry.register(CodexTurnInterruptHandler)
+        self._command_registry.register(CodexPrepareHandler)
 
     # ---------------------------------------------------------------------
     # Control loop – receives commands from gateway
