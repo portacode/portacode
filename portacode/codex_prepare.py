@@ -13,7 +13,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 from .codex_loopback_proxy import CODEX_LOOPBACK_HOST, CODEX_LOOPBACK_PORT
 
@@ -282,12 +282,26 @@ def _verify_loopback_proxy() -> None:
         raise CodexPreparationError("Portacode's local Codex proxy returned an unhealthy response.")
 
 
-def prepare_codex() -> Path:
-    """Install Codex and configure it to use the device-authenticated proxy."""
+def prepare_codex(on_progress: Optional[Callable[[str], None]] = None) -> Path:
+    """Install Codex and configure it to use the device-authenticated proxy.
+
+    ``on_progress`` receives short human-readable step labels so UIs can show
+    what the automatic setup is doing.
+    """
+    def progress(message: str) -> None:
+        if on_progress:
+            on_progress(message)
+
+    progress("Checking administrator access…")
     _authorize_sudo_if_needed()
+    progress("Installing Node.js if needed…")
     _install_node_if_needed()
+    progress("Installing Codex CLI…")
     _install_codex()
+    progress("Writing Codex configuration…")
     config_path = _write_config()
+    progress("Configuring local API access…")
     _set_local_sentinel()
+    progress("Verifying Portacode proxy…")
     _verify_loopback_proxy()
     return config_path

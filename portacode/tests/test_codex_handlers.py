@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict
 
 import pytest
 
 from portacode.connection.handlers.codex_handlers import (
     CodexChatManager,
+    CodexPrepareHandler,
     CodexStatusHandler,
     CodexThreadListHandler,
     CodexThreadStartHandler,
@@ -93,6 +95,7 @@ async def test_codex_status_ready():
     payload = channel.sent[0]
     assert payload["event"] == "codex_status"
     assert payload["ready"] is True
+    assert payload["prepare_running"] is False
     assert payload["project_id"] == "p-1"
     assert payload["client_sessions"] == ["sess-1"]
 
@@ -230,3 +233,89 @@ async def test_error_notification_attaches_resets_at(monkeypatch):
     params = channel.sent[0]["notification"]["params"]
     assert params["error"]["resetsAt"] == 1772180859
     assert params["error"]["resets_at"] == 1772180859
+
+
+@pytest.mark.asyncio
+async def test_codex_prepare_already_running_reports_step():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    manager._prepare_running = True
+    manager._prepare_step = "Installing Codex CLI…"
+    context["codex_manager"] = manager
+
+    handler = CodexPrepareHandler(channel, context)
+    await handler.handle({"cmd": "codex_prepare", "project_id": "p-1"}, reply_channel="rc-1")
+
+    payload = channel.sent[0]
+    assert payload["event"] == "codex_prepare_started"
+    assert payload["already_running"] is True
+    assert payload["step"] == "Installing Codex CLI…"
+
+
+@pytest.mark.asyncio
+async def test_codex_status_includes_prepare_state(monkeypatch):
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    manager._prepare_running = True
+    manager._prepare_step = "Installing Node.js if needed…"
+    context["codex_manager"] = manager
+
+    monkeypatch.setattr(
+        "portacode.connection.handlers.codex_handlers.CodexAppServer.get_binary_path",
+        staticmethod(lambda: None),
+    )
+
+    handler = CodexStatusHandler(channel, context)
+    await handler.handle({"cmd": "codex_status", "project_id": "p-1"}, reply_channel="rc-1")
+
+    payload = channel.sent[0]
+    assert payload["event"] == "codex_status"
+    assert payload["ready"] is False
+    assert payload["prepare_running"] is True
+    assert payload["prepare_step"] == "Installing Node.js if needed…"
+
+
+@pytest.mark.asyncio
+async def test_codex_prepare_emits_progress_and_done(monkeypatch):
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    steps: list[str] = []
+
+    def fake_prepare(*, on_progress=None):
+        if on_progress:
+            on_progress("Installing Codex CLI…")
+            steps.append("Installing Codex CLI…")
+        return "/tmp/config.toml"
+
+    async def fake_recycle():
+        return None
+
+    monkeypatch.setattr("portacode.codex_prepare.prepare_codex", fake_prepare)
+    manager.bridge.recycle = fake_recycle  # type: ignore[method-assign]
+
+    handler = CodexPrepareHandler(channel, context)
+    result = await handler.execute({"cmd": "codex_prepare", "project_id": "p-1"})
+    assert result["event"] == "codex_prepare_started"
+
+    # Allow the background task to finish.
+    for _ in range(50):
+        if any(msg.get("event") == "codex_prepare_done" for msg in channel.sent):
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail("codex_prepare_done was not emitted")
+
+    events = [msg.get("event") for msg in channel.sent]
+    assert "codex_prepare_progress" in events
+    done = next(msg for msg in channel.sent if msg.get("event") == "codex_prepare_done")
+    assert done["success"] is True
+    assert manager._prepare_running is False
+    assert steps == ["Installing Codex CLI…"]

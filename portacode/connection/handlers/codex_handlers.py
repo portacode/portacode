@@ -43,6 +43,10 @@ class CodexChatManager:
         self.bridge = CodexAppServer(on_notification=self._on_notification)
         self._thread_project: Dict[str, str] = {}
         self._cwd_project: Dict[str, str] = {}
+        # Survives page reloads via codex_status so the IDE can restore UI.
+        self._prepare_running = False
+        self._prepare_step: Optional[str] = None
+        self._prepare_error: Optional[str] = None
 
     async def _on_notification(self, method: str, params: Dict[str, Any]) -> None:
         # Attach usage-limit reset timestamp captured by the loopback proxy.
@@ -224,14 +228,24 @@ class CodexStatusHandler(CodexAsyncHandler):
                 LOGGER.debug("codex_status: app-server not healthy: %s", exc)
                 error_message = str(exc)
 
+        manager = _get_manager(self)
+        if ready:
+            manager._prepare_error = None
+            manager._prepare_step = None
+
         payload = {
             "event": "codex_status",
             "installed": installed,
             "version": version,
             "ready": ready,
+            "prepare_running": bool(manager._prepare_running),
         }
         if error_message:
             payload["error_message"] = error_message
+        if manager._prepare_step:
+            payload["prepare_step"] = manager._prepare_step
+        if manager._prepare_error and not ready:
+            payload["prepare_error"] = manager._prepare_error
         project_id = _project_id(message)
         if project_id:
             payload["project_id"] = project_id
@@ -439,38 +453,83 @@ class CodexPrepareHandler(CodexAsyncHandler):
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         project_id = _project_id(message)
         manager = _get_manager(self)
-        if getattr(manager, "_prepare_running", False):
-            payload = {"event": "codex_prepare_started", "already_running": True}
+        if manager._prepare_running:
+            payload = {
+                "event": "codex_prepare_started",
+                "already_running": True,
+                "step": manager._prepare_step or "Setting up Codex…",
+            }
             if project_id:
                 payload["project_id"] = project_id
             return payload
 
         manager._prepare_running = True
+        manager._prepare_error = None
+        manager._prepare_step = "Starting Codex setup…"
         asyncio.create_task(self._run_prepare(manager, project_id))
 
-        payload = {"event": "codex_prepare_started"}
+        payload = {
+            "event": "codex_prepare_started",
+            "step": manager._prepare_step,
+        }
         if project_id:
             payload["project_id"] = project_id
         return payload
 
+    async def _emit_progress(
+        self,
+        manager: CodexChatManager,
+        project_id: Optional[str],
+        step: str,
+    ) -> None:
+        payload = {"event": "codex_prepare_progress", "step": step}
+        if project_id:
+            payload["project_id"] = project_id
+        await manager.sender.send(payload, project_id=project_id)
+
     async def _run_prepare(self, manager: CodexChatManager, project_id: Optional[str]) -> None:
         from portacode.codex_prepare import CodexPreparationError, prepare_codex
 
+        loop = asyncio.get_running_loop()
+
+        def on_progress(step: str) -> None:
+            manager._prepare_step = step
+            future = asyncio.run_coroutine_threadsafe(
+                self._emit_progress(manager, project_id, step),
+                loop,
+            )
+            try:
+                future.result(timeout=10)
+            except Exception:  # pragma: no cover - best-effort UI updates
+                LOGGER.debug("Failed to emit codex_prepare_progress", exc_info=True)
+
+        payload: Dict[str, Any] = {
+            "event": "codex_prepare_done",
+            "success": False,
+            "error": "Codex setup did not finish.",
+        }
         try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, prepare_codex)
+            await self._emit_progress(manager, project_id, manager._prepare_step or "Starting Codex setup…")
+            await loop.run_in_executor(None, lambda: prepare_codex(on_progress=on_progress))
+            manager._prepare_step = "Starting Codex…"
+            await self._emit_progress(manager, project_id, manager._prepare_step)
             # Drop any app-server started before the sentinel was available so
             # the next chat command respawns with OPENAI_API_KEY injected.
             try:
                 await manager.bridge.recycle()
             except Exception:
                 LOGGER.exception("Failed to recycle Codex app-server after prepare")
+            manager._prepare_error = None
             payload = {"event": "codex_prepare_done", "success": True}
         except CodexPreparationError as exc:
             LOGGER.warning("codex_prepare failed: %s", exc)
+            manager._prepare_error = str(exc)
+            manager._prepare_step = None
             payload = {"event": "codex_prepare_done", "success": False, "error": str(exc)}
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.exception("codex_prepare crashed")
+            manager._prepare_error = str(exc)
+            manager._prepare_step = None
             payload = {"event": "codex_prepare_done", "success": False, "error": str(exc)}
         finally:
             manager._prepare_running = False
