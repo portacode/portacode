@@ -9,13 +9,15 @@ from pathlib import Path
 import signal
 import json
 import socket
+import time
 from typing import Optional, Tuple
 
 import click
 import pyperclip
 
 from . import __version__
-from .data import get_pid_file, is_process_running
+from .data import get_gateway_lock_file, get_pid_file, is_process_running
+from .singleton import GatewayLock
 from .keypair import (
     get_or_create_keypair,
     fingerprint_public_key,
@@ -164,8 +166,38 @@ def connect(
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
 
-    # 1. Ensure only a single connection per user
+    # 1. Ensure only a single connection per host.  The lifetime-held lock is
+    # atomic; the historical PID file is retained so rolling upgrades can
+    # interoperate with older Portacode versions.
     pid_file = get_pid_file()
+    gateway_lock = GatewayLock(get_gateway_lock_file())
+    if not gateway_lock.acquire():
+        other_pid = gateway_lock.read_pid()
+        message = "Another portacode connection is active."
+        if other_pid:
+            message = f"Another portacode connection (PID {other_pid}) is active."
+        click.echo(click.style(message, fg="yellow"))
+
+        replace = non_interactive
+        if not non_interactive:
+            replace = click.confirm("Terminate the existing connection?", default=False)
+        if not replace:
+            click.echo("Aborting.")
+            sys.exit(1)
+        if not other_pid or not is_process_running(other_pid):
+            click.echo(click.style("Unable to identify the lock owner; aborting safely.", fg="red"))
+            sys.exit(1)
+
+        if non_interactive:
+            click.echo(click.style("Non-interactive mode: terminating the existing connection automatically.", fg="bright_black"))
+        _terminate_process(other_pid)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not gateway_lock.acquire():
+            time.sleep(0.05)
+        if not gateway_lock.held:
+            click.echo(click.style("Existing connection did not release the singleton lock; aborting.", fg="red"))
+            sys.exit(1)
+
     if pid_file.exists():
         try:
             other_pid = int(pid_file.read_text())
@@ -191,13 +223,17 @@ def connect(
                 if non_interactive:
                     click.echo(click.style("Non-interactive mode: terminating the existing connection automatically.", fg="bright_black"))
                     _terminate_process(other_pid)
-                    pid_file.unlink(missing_ok=True)
                 elif click.confirm("Terminate the existing connection?", default=False):
                     _terminate_process(other_pid)
-                    pid_file.unlink(missing_ok=True)
                 else:
                     click.echo("Aborting.")
                     sys.exit(1)
+                _wait_for_process_exit(other_pid, timeout=5.0)
+                try:
+                    if int(pid_file.read_text()) == other_pid:
+                        pid_file.unlink(missing_ok=True)
+                except (FileNotFoundError, ValueError, OSError):
+                    pass
         else:
             # Stale pidfile
             pid_file.unlink(missing_ok=True)
@@ -408,9 +444,11 @@ def connect(
 
     if exit_after_setup:
         click.echo(click.style("Bootstrap steps completed. Exiting without starting a live connection.", fg="green"))
+        gateway_lock.release()
         return
 
     pid_file.write_text(str(os.getpid()))
+    gateway_lock.write_pid(os.getpid())
 
     async def _main() -> None:
         mgr = ConnectionManager(
@@ -424,7 +462,14 @@ def connect(
     try:
         asyncio.run(_main())
     finally:
-        pid_file.unlink(missing_ok=True)
+        # An older client may have replaced this file while we were shutting
+        # down.  Never delete a PID file that no longer belongs to us.
+        try:
+            if int(pid_file.read_text()) == os.getpid():
+                pid_file.unlink(missing_ok=True)
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+        gateway_lock.release()
 
 
 def _terminate_process(pid: int):
@@ -440,6 +485,15 @@ def _terminate_process(pid: int):
             os.kill(pid, signal.SIGTERM)  # type: ignore[name-defined]
         except OSError:
             pass
+
+
+def _wait_for_process_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_process_running(pid):
+            return True
+        time.sleep(0.05)
+    return not is_process_running(pid)
 
 
 def _is_transient_proxmox_setup_failure(reply: object) -> bool:
