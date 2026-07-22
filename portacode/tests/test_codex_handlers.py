@@ -98,6 +98,7 @@ async def test_codex_status_ready():
     assert payload["prepare_running"] is False
     assert payload["project_id"] == "p-1"
     assert payload["client_sessions"] == ["sess-1"]
+    assert "model_select" in payload.get("features", [])
 
 
 @pytest.mark.asyncio
@@ -174,6 +175,59 @@ async def test_codex_turn_start():
     assert payload["event"] == "codex_turn_started"
     assert payload["threadId"] == "th-1"
     assert manager.bridge.calls[-1] == ("turn/start", {"threadId": "th-1", "input": [{"type": "text", "text": "hi"}]})
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_forwards_model():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_turn_start",
+            "project_id": "p-1",
+            "threadId": "th-1",
+            "text": "hi",
+            "model": "gpt-5.6-sol",
+        },
+        reply_channel="rc-1",
+    )
+
+    assert manager.bridge.calls[-1] == (
+        "turn/start",
+        {
+            "threadId": "th-1",
+            "input": [{"type": "text", "text": "hi"}],
+            "model": "gpt-5.6-sol",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_start_forwards_model():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexThreadStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_thread_start",
+            "project_id": "p-1",
+            "cwd": "/tmp/proj",
+            "model": "gpt-5.6-terra",
+        },
+        reply_channel="rc-1",
+    )
+
+    start_call = next(c for c in manager.bridge.calls if c[0] == "thread/start")
+    assert start_call[1]["model"] == "gpt-5.6-terra"
 
 
 @pytest.mark.asyncio

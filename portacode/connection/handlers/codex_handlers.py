@@ -239,6 +239,9 @@ class CodexStatusHandler(CodexAsyncHandler):
             "version": version,
             "ready": ready,
             "prepare_running": bool(manager._prepare_running),
+            # Capability flags for the browser UI. Absent on older Portacode
+            # CLIs — chat must hide model selection rather than error.
+            "features": ["model_select"],
         }
         if error_message:
             payload["error_message"] = error_message
@@ -395,7 +398,9 @@ class CodexTurnStartHandler(CodexAsyncHandler):
             "threadId": thread_id,
             "input": [{"type": "text", "text": text}],
         }
-        # Optional reasoning controls.
+        # Optional model / reasoning controls (Codex Desktop-style overrides).
+        if message.get("model"):
+            params["model"] = message["model"]
         if message.get("effort"):
             params["effort"] = message["effort"]
         if message.get("summary"):

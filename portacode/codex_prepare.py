@@ -17,8 +17,9 @@ from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 from .codex_loopback_proxy import CODEX_LOOPBACK_HOST, CODEX_LOOPBACK_PORT
 
-CODEX_CONFIG = '''model = "gpt-5.4"
-model_provider = "portacode_proxy"
+# Do not pin `model` here — let the installed Codex CLI default apply, and let
+# the Portacode chat UI override via thread/start when the device supports it.
+CODEX_CONFIG = '''model_provider = "portacode_proxy"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 cli_auth_credentials_store = "file"
