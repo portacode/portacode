@@ -33,6 +33,7 @@ class CodexAppServer:
         command: Optional[List[str]] = None,
         client_info: Optional[Dict[str, Any]] = None,
         on_notification: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        on_unexpected_exit: Optional[Callable[[Optional[int]], Awaitable[None]]] = None,
         _process_factory: Optional[Callable[..., Awaitable[Any]]] = None,
     ) -> None:
         self.command = command or list(DEFAULT_CODEX_COMMAND)
@@ -44,6 +45,7 @@ class CodexAppServer:
             client_info = {"name": "portacode", "version": _portacode_version}
         self.client_info = client_info
         self.on_notification = on_notification
+        self.on_unexpected_exit = on_unexpected_exit
         self._process_factory = _process_factory or asyncio.create_subprocess_exec
 
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -384,6 +386,11 @@ class CodexAppServer:
                 )
                 return
             LOGGER.warning("Codex app-server process exited (code %s); restarting", self._proc.returncode)
+            if self.on_unexpected_exit is not None:
+                try:
+                    await self.on_unexpected_exit(self._proc.returncode)
+                except Exception:
+                    LOGGER.exception("Codex app-server exit handler failed")
             await self._kill_locked()
         try:
             await self.start()

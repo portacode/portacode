@@ -331,6 +331,47 @@ async def test_codex_turn_interrupt():
 
 
 @pytest.mark.asyncio
+async def test_codex_turn_interrupt_resolves_active_turn_when_browser_missed_id():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    manager._thread_active_turn["th-1"] = "turn-active"
+    context["codex_manager"] = manager
+
+    handler = CodexTurnInterruptHandler(channel, context)
+    await handler.handle(
+        {"cmd": "codex_turn_interrupt", "project_id": "p-1", "threadId": "th-1"},
+        reply_channel="rc-1",
+    )
+
+    assert manager.bridge.calls[-1] == (
+        "turn/interrupt",
+        {"threadId": "th-1", "turnId": "turn-active"},
+    )
+    assert "th-1" not in manager._thread_active_turn
+
+
+@pytest.mark.asyncio
+async def test_codex_bridge_exit_terminates_active_browser_turn():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    manager._thread_active_turn["th-1"] = "turn-1"
+
+    await manager._on_bridge_exit(137)
+
+    payload = channel.sent[-1]
+    assert payload["event"] == "codex_event"
+    assert payload["project_id"] == "p-1"
+    assert payload["notification"]["method"] == "error"
+    assert payload["notification"]["params"]["turnId"] == "turn-1"
+    assert "exit code 137" in payload["notification"]["params"]["error"]["message"]
+    assert not manager._thread_active_turn
+
+
+@pytest.mark.asyncio
 async def test_notification_forwarding_targets_project():
     channel = DummyControlChannel()
     context = _context()
@@ -344,6 +385,22 @@ async def test_notification_forwarding_targets_project():
     assert payload["project_id"] == "p-1"
     assert payload["notification"]["method"] == "item/agentMessage/delta"
     assert payload["client_sessions"] == ["sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_thread_events_include_new_tab_before_session_registry_updates():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    manager.subscribe_thread("th-1", "new-tab-session")
+
+    await manager._on_notification(
+        "item/agentMessage/delta",
+        {"threadId": "th-1", "delta": "live"},
+    )
+
+    assert channel.sent[-1]["client_sessions"] == ["new-tab-session", "sess-1"]
 
 
 @pytest.mark.asyncio

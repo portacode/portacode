@@ -87,17 +87,23 @@ class _SessionAwareSender:
         self.control_channel = control_channel
         self.context = context
 
-    async def send(self, payload: Dict[str, Any], project_id: Optional[str] = None) -> None:
+    async def send(
+        self,
+        payload: Dict[str, Any],
+        project_id: Optional[str] = None,
+        explicit_sessions: Optional[List[str]] = None,
+    ) -> None:
+        target_sessions = set(explicit_sessions or [])
         client_session_manager = self.context.get("client_session_manager")
         if client_session_manager and client_session_manager.has_interested_clients():
-            target_sessions = client_session_manager.get_target_sessions(project_id)
-            if target_sessions:
-                payload = dict(payload)
-                payload["client_sessions"] = target_sessions
+            target_sessions.update(client_session_manager.get_target_sessions(project_id))
             reply_channel = client_session_manager.get_reply_channel_for_compatibility()
             if reply_channel:
                 payload = dict(payload)
                 payload["reply_channel"] = reply_channel
+        if target_sessions:
+            payload = dict(payload)
+            payload["client_sessions"] = sorted(target_sessions)
 
         await self.control_channel.send(payload)
 
@@ -107,13 +113,45 @@ class CodexChatManager:
 
     def __init__(self, control_channel: Any, context: Dict[str, Any]) -> None:
         self.sender = _SessionAwareSender(control_channel, context)
-        self.bridge = CodexAppServer(on_notification=self._on_notification)
+        self.bridge = CodexAppServer(
+            on_notification=self._on_notification,
+            on_unexpected_exit=self._on_bridge_exit,
+        )
         self._thread_project: Dict[str, str] = {}
         self._cwd_project: Dict[str, str] = {}
+        self._thread_active_turn: Dict[str, str] = {}
+        self._thread_sessions: Dict[str, set[str]] = {}
         # Survives page reloads via codex_status so the IDE can restore UI.
         self._prepare_running = False
         self._prepare_step: Optional[str] = None
         self._prepare_error: Optional[str] = None
+
+    async def _on_bridge_exit(self, returncode: Optional[int]) -> None:
+        """Turn an app-server crash into terminal events for waiting browsers."""
+        active = list(self._thread_active_turn.items())
+        self._thread_active_turn.clear()
+        for thread_id, turn_id in active:
+            project_id = self._thread_project.get(thread_id)
+            if not project_id:
+                continue
+            suffix = f" (exit code {returncode})" if returncode is not None else ""
+            params = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "error": {
+                    "message": f"The local Codex app-server stopped unexpectedly{suffix}.",
+                    "additionalDetails": "Portacode is restarting it. Retry the message after it reconnects.",
+                },
+            }
+            await self.sender.send(
+                {
+                    "event": "codex_event",
+                    "notification": {"method": "error", "params": params},
+                    "project_id": project_id,
+                },
+                project_id=project_id,
+                explicit_sessions=list(self._thread_sessions.get(thread_id, set())),
+            )
 
     async def _on_notification(self, method: str, params: Dict[str, Any]) -> None:
         # Attach usage-limit reset timestamp captured by the loopback proxy.
@@ -131,6 +169,13 @@ class CodexChatManager:
                 params["turn"] = turn
 
         self._remember_thread_from_params(params)
+        thread_id = params.get("threadId") or (params.get("thread") or {}).get("id")
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        turn_id = params.get("turnId") or turn.get("id")
+        if thread_id and method == "turn/started" and turn_id:
+            self._thread_active_turn[str(thread_id)] = str(turn_id)
+        elif thread_id and method == "turn/completed":
+            self._thread_active_turn.pop(str(thread_id), None)
         project_id = self._resolve_project_id(params)
         if not project_id:
             # Unresolved project_id would fan out to every open project tab.
@@ -144,7 +189,11 @@ class CodexChatManager:
             "notification": {"method": method, "params": params},
             "project_id": project_id,
         }
-        await self.sender.send(event_payload, project_id=project_id)
+        await self.sender.send(
+            event_payload,
+            project_id=project_id,
+            explicit_sessions=list(self._thread_sessions.get(str(thread_id), set())) if thread_id else None,
+        )
 
     def _remember_thread_from_params(self, params: Dict[str, Any]) -> None:
         """Opportunistically map threadId → project when cwd is already known."""
@@ -174,6 +223,16 @@ class CodexChatManager:
             self._thread_project[str(thread_id)] = project_id
         if cwd and project_id:
             self._cwd_project[cwd] = project_id
+
+    def subscribe_thread(self, thread_id: str, client_session: Optional[str]) -> None:
+        """Route future thread events to a tab even before session discovery catches up."""
+        if not thread_id or not client_session:
+            return
+        sessions = self._thread_sessions.setdefault(str(thread_id), set())
+        sessions.add(str(client_session))
+        # Avoid an unbounded collection of stale channel names after many reconnects.
+        while len(sessions) > 32:
+            sessions.pop()
 
     async def ensure_started(self) -> None:
         await self.bridge.start()
@@ -544,6 +603,7 @@ class CodexThreadStartHandler(CodexAsyncHandler):
             raise CodexAppServerError("thread/start did not return a thread id")
 
         manager.record_thread(thread_id, cwd, project_id or cwd)
+        manager.subscribe_thread(thread_id, message.get("source_client_session"))
 
         payload = {
             "event": "codex_thread_started",
@@ -576,6 +636,7 @@ class CodexThreadResumeHandler(CodexAsyncHandler):
         # those notifications to the requesting project from the outset.
         if project_id:
             manager.record_thread(thread_id, cwd, project_id)
+        manager.subscribe_thread(thread_id, message.get("source_client_session"))
 
         resume_result, items, active_turn = await _resume_thread_history(
             manager, thread_id=thread_id, cwd=cwd
@@ -590,6 +651,9 @@ class CodexThreadResumeHandler(CodexAsyncHandler):
         }
         if active_turn:
             payload["activeTurn"] = active_turn
+            active_turn_id = active_turn.get("id") or active_turn.get("turnId")
+            if active_turn_id:
+                manager._thread_active_turn[str(thread_id)] = str(active_turn_id)
         if project_id:
             payload["project_id"] = project_id
         return payload
@@ -623,6 +687,7 @@ class CodexTurnStartHandler(CodexAsyncHandler):
         # so the browser cannot miss the event that clears its streaming state.
         if project_id:
             manager.record_thread(thread_id, cwd, project_id)
+        manager.subscribe_thread(thread_id, message.get("source_client_session"))
 
         params = {
             "threadId": thread_id,
@@ -637,11 +702,15 @@ class CodexTurnStartHandler(CodexAsyncHandler):
             params["summary"] = message["summary"]
 
         result = await manager.bridge.call("turn/start", params)
+        turn = _turn_from_result(result)
+        turn_id = turn.get("id") or turn.get("turnId")
+        if turn_id:
+            manager._thread_active_turn[str(thread_id)] = str(turn_id)
 
         payload = {
             "event": "codex_turn_started",
             "threadId": thread_id,
-            "turn": _turn_from_result(result),
+            "turn": turn,
         }
         if project_id:
             payload["project_id"] = project_id
@@ -658,12 +727,16 @@ class CodexTurnInterruptHandler(CodexAsyncHandler):
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         thread_id = message.get("threadId")
         turn_id = message.get("turnId")
-        if not thread_id or not turn_id:
-            raise ValueError("threadId and turnId are required")
+        if not thread_id:
+            raise ValueError("threadId is required")
 
         manager = _get_manager(self)
+        turn_id = turn_id or manager._thread_active_turn.get(str(thread_id))
+        if not turn_id:
+            raise ValueError("No active turn was found for this thread")
         await manager.ensure_started()
         await manager.bridge.call("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        manager._thread_active_turn.pop(str(thread_id), None)
 
         project_id = _project_id(message)
         payload = {"event": "codex_turn_interrupted", "threadId": thread_id, "turnId": turn_id}
