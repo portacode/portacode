@@ -75,6 +75,31 @@ class RuntimeUserTests(TestCase):
         self.assertEqual(wrapped[5:8], ["--", "/bin/bash", "-lc"])
         self.assertIn("cd /home/meena/.openclaw && exec /bin/bash --login", wrapped[8])
 
+    @patch("portacode.connection.handlers.runtime_user.shutil.which", side_effect=lambda name: "/usr/sbin/runuser" if name == "runuser" else None)
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    def test_wrap_argv_for_user_non_login_uses_runuser(self, _mock_euid, _mock_which):
+        wrapped = wrap_argv_for_user(
+            ["codex", "app-server"],
+            "meena",
+            preserve_env_names=["OPENAI_API_KEY", "CODEX_HOME"],
+            login=False,
+        )
+        self.assertEqual(
+            wrapped,
+            ["/usr/sbin/runuser", "-u", "meena", "--preserve-environment", "--", "codex", "app-server"],
+        )
+
+    @patch("portacode.connection.handlers.runtime_user.shutil.which", return_value=None)
+    @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
+    def test_wrap_argv_for_user_non_login_falls_back_to_sudo_n(self, _mock_euid, _mock_which):
+        wrapped = wrap_argv_for_user(
+            ["codex", "app-server"],
+            "meena",
+            login=False,
+        )
+        self.assertEqual(wrapped[:5], ["sudo", "-n", "-H", "-u", "meena"])
+        self.assertEqual(wrapped[5:], ["--", "codex", "app-server"])
+
     @patch("portacode.connection.handlers.runtime_user.os.geteuid", return_value=0)
     @patch("portacode.connection.handlers.runtime_user.pwd.getpwnam")
     def test_wrap_argv_for_user_uses_shell_for_non_shell_commands(self, mock_getpwnam, _mock_euid):

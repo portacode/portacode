@@ -216,9 +216,30 @@ class ConnectionManager:
         await self._register_initial_project_paths()
 
     async def _start_codex_loopback_proxy(self) -> None:
-        if self._codex_loopback_proxy is None:
-            self._codex_loopback_proxy = CodexLoopbackProxy(self.keypair)
-        await self._codex_loopback_proxy.start()
+        """Start the local Codex HTTP proxy without taking down the agent.
+
+        The proxy runs on an isolated thread. Bind/start failures must not kill
+        the websocket service — Codex simply won't work until the next reconnect
+        succeeds in binding ``127.0.0.1:61789``.
+        """
+        try:
+            if self._codex_loopback_proxy is None:
+                self._codex_loopback_proxy = CodexLoopbackProxy(self.keypair)
+            await self._codex_loopback_proxy.start()
+        except Exception as exc:
+            logger.error(
+                "Codex loopback proxy failed to start (Codex CLI/UI will hang or fail until fixed): %s",
+                LogCategory.CONNECTION,
+                exc,
+            )
+            # Drop a half-started instance so the next reconnect can retry cleanly.
+            proxy = self._codex_loopback_proxy
+            self._codex_loopback_proxy = None
+            if proxy is not None:
+                try:
+                    await proxy.stop()
+                except Exception:
+                    pass
 
     async def _register_initial_project_paths(self) -> None:
         if not self.initial_project_paths or self.websocket is None:

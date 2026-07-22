@@ -52,6 +52,14 @@ class FakeBridge:
                 "nextCursor": None,
             },
             "thread/resume": {"thread": {"id": "th-1"}},
+            "thread/turns/list": {
+                "data": [
+                    {
+                        "id": "turn-1",
+                        "items": [{"id": "msg-1", "role": "user", "text": "hello"}],
+                    }
+                ]
+            },
             "thread/read": {
                 "thread": {
                     "id": "th-1",
@@ -68,7 +76,7 @@ class FakeBridge:
     async def healthy(self) -> bool:
         return True
 
-    async def call(self, method: str, params: dict) -> Any:
+    async def call(self, method: str, params: dict, timeout: float = 60.0) -> Any:
         self.calls.append((method, params))
         return self.responses.get(method, {})
 
@@ -158,8 +166,11 @@ async def test_codex_thread_resume():
     assert payload["event"] == "codex_thread_resumed"
     assert payload["items"][0]["text"] == "hello"
     assert manager._thread_project["th-1"] == "p-1"
-    read_call = next(c for c in manager.bridge.calls if c[0] == "thread/read")
-    assert read_call[1]["includeTurns"] is True
+    resume_call = next(c for c in manager.bridge.calls if c[0] == "thread/resume")
+    assert resume_call[1]["excludeTurns"] is True
+    turns_call = next(c for c in manager.bridge.calls if c[0] == "thread/turns/list")
+    assert turns_call[1]["threadId"] == "th-1"
+    assert not any(c[0] == "thread/read" for c in manager.bridge.calls)
 
 
 @pytest.mark.asyncio
@@ -333,6 +344,144 @@ async def test_notification_forwarding_targets_project():
     assert payload["project_id"] == "p-1"
     assert payload["notification"]["method"] == "item/agentMessage/delta"
     assert payload["client_sessions"] == ["sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_notification_without_project_mapping_is_dropped():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    await manager._on_notification("item/agentMessage/delta", {"threadId": "unknown", "delta": "hello"})
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_records_thread_mapping():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_turn_start",
+            "project_id": "p-1",
+            "threadId": "th-9",
+            "cwd": "/tmp/proj",
+            "text": "hi",
+        },
+        reply_channel="rc-1",
+    )
+    assert manager._thread_project["th-9"] == "p-1"
+    assert manager._cwd_project["/tmp/proj"] == "p-1"
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_routes_notification_before_rpc_response():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    async def call(method: str, params: dict, timeout: float = 60.0):
+        assert method == "turn/start"
+        await manager._on_notification(
+            "error",
+            {
+                "threadId": "th-9",
+                "turnId": "turn-1",
+                "willRetry": False,
+                "error": {"message": "request failed"},
+            },
+        )
+        return {"turn": {"id": "turn-1"}}
+
+    manager.bridge.call = call  # type: ignore[method-assign]
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_turn_start",
+            "project_id": "p-1",
+            "threadId": "th-9",
+            "cwd": "/tmp/proj",
+            "text": "hi",
+        },
+        reply_channel="rc-1",
+    )
+
+    notification = next(item for item in channel.sent if item.get("event") == "codex_event")
+    assert notification["project_id"] == "p-1"
+    assert notification["notification"]["method"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_resume_includes_active_turn():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    manager.bridge.responses["thread/turns/list"] = {
+        "data": [
+            {
+                "id": "turn-live",
+                "status": "inProgress",
+                "items": [{"id": "msg-1", "role": "assistant", "text": "partial"}],
+            }
+        ]
+    }
+    context["codex_manager"] = manager
+
+    handler = CodexThreadResumeHandler(channel, context)
+    await handler.handle(
+        {"cmd": "codex_thread_resume", "project_id": "p-1", "threadId": "th-1", "cwd": "/tmp/proj"},
+        reply_channel="rc-1",
+    )
+    payload = channel.sent[0]
+    assert payload["activeTurn"]["id"] == "turn-live"
+    assert payload["activeTurn"]["status"] == "inProgress"
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_resume_falls_back_when_turns_list_missing():
+    from portacode.connection.codex_app_server import CodexAppServerError
+
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+
+    async def call(method: str, params: dict, timeout: float = 60.0):
+        manager.bridge.calls.append((method, params))
+        if method == "thread/turns/list":
+            raise CodexAppServerError("unknown method")
+        if method == "thread/read":
+            return {
+                "thread": {"id": "th-1"},
+                "initialTurnsPage": {
+                    "data": [
+                        {
+                            "id": "turn-1",
+                            "items": [{"id": "msg-1", "role": "user", "text": "recovered"}],
+                        }
+                    ]
+                },
+            }
+        return manager.bridge.responses.get(method, {})
+
+    manager.bridge.call = call  # type: ignore[method-assign]
+    context["codex_manager"] = manager
+
+    handler = CodexThreadResumeHandler(channel, context)
+    await handler.handle(
+        {"cmd": "codex_thread_resume", "project_id": "p-1", "threadId": "th-1"},
+        reply_channel="rc-1",
+    )
+    payload = channel.sent[0]
+    assert payload["items"][0]["text"] == "recovered"
+    assert any(c[0] == "thread/read" and c[1].get("excludeTurns") for c in manager.bridge.calls)
 
 
 @pytest.mark.asyncio

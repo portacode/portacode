@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -17,6 +18,8 @@ from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 from .codex_loopback_proxy import CODEX_LOOPBACK_HOST, CODEX_LOOPBACK_PORT
 
+LOGGER = logging.getLogger(__name__)
+
 # Do not pin `model` here — let the installed Codex CLI default apply, and let
 # the Portacode chat UI override via thread/start when the device supports it.
 CODEX_CONFIG = '''model_provider = "portacode_proxy"
@@ -24,11 +27,17 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 cli_auth_credentials_store = "file"
 
+# Force all model traffic through the local Portacode device proxy.
+# Newer Codex builds prefer WebSockets to api.openai.com; that bypasses our
+# proxy and treats OPENAI_API_KEY=portacode-local as a real OpenAI key (401).
+openai_base_url = "http://127.0.0.1:61789/v1"
+
 [model_providers.portacode_proxy]
 name = "Portacode Device Proxy"
 base_url = "http://127.0.0.1:61789/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
+supports_websockets = false
 '''
 
 LOCAL_SENTINEL = "portacode-local"
@@ -145,12 +154,70 @@ def _install_codex() -> None:
         raise CodexPreparationError("Codex CLI installation completed but codex is not on PATH.")
 
 
-def _write_config() -> Path:
-    config_path = Path.home() / ".codex" / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(CODEX_CONFIG, encoding="utf-8")
-    config_path.chmod(0o600)
+def _extract_project_trust_blocks(existing: str) -> str:
+    """Keep Codex ``[projects."..."] trust_level`` stanzas when rewriting config."""
+    blocks: list[str] = []
+    current: list[str] = []
+    in_projects = False
+    for line in existing.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_projects and current:
+                blocks.append("\n".join(current).rstrip())
+            current = []
+            in_projects = stripped.startswith("[projects.")
+            if in_projects:
+                current = [line]
+            continue
+        if in_projects:
+            current.append(line)
+    if in_projects and current:
+        blocks.append("\n".join(current).rstrip())
+    if not blocks:
+        return ""
+    return "\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def write_codex_config(codex_home: Optional[Path] = None) -> Path:
+    """Write the managed Codex config into the shared CODEX_HOME.
+
+    Always refreshes the Portacode proxy provider so runtime-user homes
+    (e.g. ``/home/bishoy/.codex``) cannot keep a stale default that sends
+    traffic to ``api.openai.com`` with the local sentinel key.
+    Preserves existing ``[projects.*]`` trust entries.
+    """
+    home = Path(codex_home) if codex_home is not None else resolve_codex_home()
+    home.mkdir(parents=True, exist_ok=True)
+    config_path = home / "config.toml"
+    existing = ""
+    try:
+        if config_path.is_file():
+            existing = config_path.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    body = CODEX_CONFIG.rstrip() + "\n" + _extract_project_trust_blocks(existing)
+    config_path.write_text(body, encoding="utf-8")
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        from portacode.connection.handlers.runtime_user import (
+            chown_path_if_possible,
+            get_default_runtime_user,
+        )
+
+        owner = get_default_runtime_user()
+        chown_path_if_possible(home, owner)
+        chown_path_if_possible(config_path, owner)
+    except Exception:
+        pass
     return config_path
+
+
+def _write_config() -> Path:
+    """Backward-compatible alias used by ``prepare_codex``."""
+    return write_codex_config()
 
 
 def read_codex_env_file(path: Optional[Path] = None) -> Dict[str, str]:
@@ -170,6 +237,161 @@ def read_codex_env_file(path: Optional[Path] = None) -> Dict[str, str]:
     return values
 
 
+def _runtime_user_home() -> Path:
+    try:
+        from portacode.connection.handlers.runtime_user import get_runtime_user_home
+
+        return Path(get_runtime_user_home())
+    except Exception:
+        return Path.home()
+
+
+def resolve_codex_home() -> Path:
+    """Return the Codex state directory shared by app-server and interactive CLI.
+
+    Web chat and ``codex resume`` must use the same store. When the Portacode
+    agent runs as root it previously defaulted to ``/root/.codex`` while IDE
+    terminals (as the workspace user) used ``$HOME/.codex`` — so the CLI could
+    not see web-created chats.
+    """
+    preferred = _runtime_user_home() / ".codex"
+    explicit = (os.environ.get("CODEX_HOME") or "").strip()
+    if not explicit:
+        return preferred
+
+    path = Path(explicit).expanduser()
+    # Remap stale root homes so CLI (runtime user) and app-server stay aligned.
+    try:
+        from portacode.connection.handlers.runtime_user import get_default_runtime_user
+
+        runtime_user = get_default_runtime_user()
+    except Exception:
+        runtime_user = ""
+    if (
+        hasattr(os, "geteuid")
+        and os.geteuid() == 0
+        and runtime_user
+        and runtime_user != "root"
+        and (str(path) == "/root/.codex" or str(path).startswith("/root/.codex/"))
+    ):
+        return preferred
+    return path
+
+
+def _persist_codex_home_env(codex_home: Path) -> None:
+    """Ensure interactive shells (profile.d) pick up the shared CODEX_HOME."""
+    if platform.system().lower() != "linux":
+        return
+    path = Path(CODEX_ENV_PATH)
+    desired = f"CODEX_HOME={codex_home}"
+    try:
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return
+    lines = existing.splitlines()
+    out: list[str] = []
+    found = False
+    for line in lines:
+        if line.startswith("CODEX_HOME="):
+            if not found:
+                out.append(desired)
+                found = True
+            continue
+        out.append(line)
+    if not found:
+        if out and out[-1] != "":
+            out.append("")
+        out.append(desired)
+    body = "\n".join(out).rstrip() + "\n"
+    if body == existing:
+        return
+    script = (
+        f"install -d -m 755 /etc/portacode && "
+        f"printf '%s' {shlex.quote(body)} > {shlex.quote(str(path))} && "
+        f"chmod 644 {shlex.quote(str(path))}"
+    )
+    try:
+        _run([*_sudo_prefix(), "sh", "-c", script])
+    except Exception:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o644)
+        except OSError:
+            pass
+
+
+def ensure_codex_home() -> Path:
+    """Create CODEX_HOME and seed it from /root/.codex sessions when needed."""
+    import shutil
+
+    codex_home = resolve_codex_home()
+    codex_home.mkdir(parents=True, exist_ok=True)
+    sessions_dir = codex_home / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    root_codex = Path("/root/.codex")
+    root_sessions = root_codex / "sessions"
+    seeded_paths: list[Path] = []
+    if (
+        hasattr(os, "geteuid")
+        and os.geteuid() == 0
+        and root_sessions.is_dir()
+        and codex_home.resolve() != root_codex.resolve()
+    ):
+        for src in root_sessions.rglob("*.jsonl"):
+            try:
+                rel = src.relative_to(root_sessions)
+            except ValueError:
+                continue
+            dest = sessions_dir / rel
+            if dest.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dest)
+                seeded_paths.append(dest)
+                seeded_paths.append(dest.parent)
+            except OSError:
+                continue
+        for name in ("config.toml", "auth.json"):
+            src = root_codex / name
+            dest = codex_home / name
+            if src.is_file() and not dest.exists():
+                try:
+                    shutil.copy2(src, dest)
+                    seeded_paths.append(dest)
+                except OSError:
+                    pass
+        # Chown seeded files (copy2 preserves root ownership). Avoid a full-tree
+        # walk on every spawn — that raced the initialize handshake.
+        try:
+            from portacode.connection.handlers.runtime_user import (
+                chown_path_if_possible,
+                get_default_runtime_user,
+            )
+
+            owner = get_default_runtime_user()
+            chown_path_if_possible(codex_home, owner)
+            chown_path_if_possible(sessions_dir, owner)
+            for path in seeded_paths:
+                chown_path_if_possible(path, owner)
+            for extra in (codex_home / "tmp", codex_home / ".tmp"):
+                if extra.exists():
+                    chown_path_if_possible(extra, owner)
+        except Exception:
+            pass
+    try:
+        write_codex_config(codex_home)
+    except Exception:
+        LOGGER.debug("Could not refresh managed Codex config.toml", exc_info=True)
+    try:
+        _persist_codex_home_env(codex_home)
+    except Exception:
+        pass
+    return codex_home
+
+
 def apply_codex_env_to_mapping(
     env: MutableMapping[str, str],
     path: Optional[Path] = None,
@@ -187,6 +409,9 @@ def apply_codex_env_to_mapping(
     # Always guarantee the local proxy sentinel unless a non-empty value exists.
     if not (env.get(OPENAI_API_KEY_ENV) or "").strip():
         env[OPENAI_API_KEY_ENV] = file_values.get(OPENAI_API_KEY_ENV) or LOCAL_SENTINEL
+    # Keep interactive CLI and app-server on the same session store.
+    if not (env.get("CODEX_HOME") or "").strip():
+        env["CODEX_HOME"] = str(resolve_codex_home())
 
 
 def build_codex_subprocess_env(
@@ -196,6 +421,10 @@ def build_codex_subprocess_env(
     """Environment for Codex CLI / app-server subprocesses."""
     env = dict(base or os.environ)
     apply_codex_env_to_mapping(env, path=path)
+    try:
+        env["CODEX_HOME"] = str(ensure_codex_home())
+    except Exception:
+        env.setdefault("CODEX_HOME", str(resolve_codex_home()))
     return env
 
 
@@ -241,9 +470,13 @@ def _set_local_sentinel() -> None:
     if system == "linux":
         # Portacode terminals load this directly, including sessions started by
         # a long-running agent that pre-dates the prepare command.
+        codex_home = str(resolve_codex_home())
         managed_setup = (
             "install -d -m 755 /etc/portacode && "
-            f"printf '%s\\n' '{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}' > {CODEX_ENV_PATH} && "
+            f"printf '%s\\n' "
+            f"'{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}' "
+            f"'CODEX_HOME={codex_home}' "
+            f"> {CODEX_ENV_PATH} && "
             f"chmod 644 {CODEX_ENV_PATH} && "
             "printf '%s\\n' '# Managed by portacode prepare codex.' "
             f"'if [ -r {CODEX_ENV_PATH} ]; then' '  set -a' "

@@ -22,6 +22,8 @@ class KeyPair:
     def __init__(self, private_key_path: Path, public_key_path: Path):
         self.private_key_path = private_key_path
         self.public_key_path = public_key_path
+        self._private_key = None
+        self._public_key_der_b64: str | None = None
 
     @property
     def private_key_pem(self) -> bytes:
@@ -31,16 +33,20 @@ class KeyPair:
     def public_key_pem(self) -> bytes:
         return self.public_key_path.read_bytes()
 
+    def _load_private_key(self):
+        if self._private_key is None:
+            self._private_key = serialization.load_pem_private_key(
+                self.private_key_pem, password=None
+            )
+        return self._private_key
+
     def sign_challenge(self, challenge: str) -> bytes:
         """Sign a challenge string with the private key."""
         return self.sign_bytes(challenge.encode())
 
     def sign_bytes(self, payload: bytes) -> bytes:
         """Sign an opaque payload for a Portacode service request."""
-        private_key = serialization.load_pem_private_key(
-            self.private_key_pem, password=None
-        )
-        return private_key.sign(
+        return self._load_private_key().sign(
             payload,
             padding.PKCS1v15(),
             hashes.SHA256(),
@@ -48,9 +54,14 @@ class KeyPair:
 
     def public_key_der_b64(self) -> str:
         """Return the public key as base64-encoded DER (single line)."""
-        pubkey = serialization.load_pem_public_key(self.public_key_pem)
-        der = pubkey.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        return base64.b64encode(der).decode()
+        if self._public_key_der_b64 is None:
+            pubkey = serialization.load_pem_public_key(self.public_key_pem)
+            der = pubkey.public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            self._public_key_der_b64 = base64.b64encode(der).decode()
+        return self._public_key_der_b64
 
     @staticmethod
     def der_b64_to_pem(der_b64: str) -> bytes:
@@ -128,20 +139,27 @@ class InMemoryKeyPair:
         return self.sign_bytes(challenge.encode())
 
     def sign_bytes(self, payload: bytes) -> bytes:
-        private_key = serialization.load_pem_private_key(self._private_pem, password=None)
-        return private_key.sign(
+        if getattr(self, "_private_key", None) is None:
+            self._private_key = serialization.load_pem_private_key(
+                self._private_pem, password=None
+            )
+        return self._private_key.sign(
             payload,
             padding.PKCS1v15(),
             hashes.SHA256(),
         )
 
     def public_key_der_b64(self) -> str:
+        cached = getattr(self, "_public_key_der_b64", None)
+        if cached is not None:
+            return cached
         pubkey = serialization.load_pem_public_key(self._public_pem)
         der = pubkey.public_bytes(
             encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        return base64.b64encode(der).decode()
+        self._public_key_der_b64 = base64.b64encode(der).decode()
+        return self._public_key_der_b64
 
     def persist(self) -> KeyPair:
         """Write the keypair to disk and return a regular KeyPair."""

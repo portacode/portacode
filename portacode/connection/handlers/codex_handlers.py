@@ -130,14 +130,31 @@ class CodexChatManager:
                 params = dict(params)
                 params["turn"] = turn
 
+        self._remember_thread_from_params(params)
         project_id = self._resolve_project_id(params)
+        if not project_id:
+            # Unresolved project_id would fan out to every open project tab.
+            LOGGER.debug(
+                "Dropping Codex notification %s — no project mapping for thread/cwd",
+                method,
+            )
+            return
         event_payload = {
             "event": "codex_event",
             "notification": {"method": method, "params": params},
+            "project_id": project_id,
         }
-        if project_id:
-            event_payload["project_id"] = project_id
         await self.sender.send(event_payload, project_id=project_id)
+
+    def _remember_thread_from_params(self, params: Dict[str, Any]) -> None:
+        """Opportunistically map threadId → project when cwd is already known."""
+        if not isinstance(params, dict):
+            return
+        thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
+        thread_id = params.get("threadId") or thread.get("id")
+        cwd = params.get("cwd") or thread.get("cwd")
+        if thread_id and cwd and cwd in self._cwd_project:
+            self._thread_project[str(thread_id)] = self._cwd_project[cwd]
 
     def _resolve_project_id(self, params: Dict[str, Any]) -> Optional[str]:
         # Most notifications contain a threadId. Try that first.
@@ -152,9 +169,11 @@ class CodexChatManager:
 
         return None
 
-    def record_thread(self, thread_id: str, cwd: str, project_id: str) -> None:
-        self._thread_project[thread_id] = project_id
-        self._cwd_project[cwd] = project_id
+    def record_thread(self, thread_id: str, cwd: Optional[str], project_id: str) -> None:
+        if thread_id and project_id:
+            self._thread_project[str(thread_id)] = project_id
+        if cwd and project_id:
+            self._cwd_project[cwd] = project_id
 
     async def ensure_started(self) -> None:
         await self.bridge.start()
@@ -226,6 +245,133 @@ def _items_from_read_result(result: Dict[str, Any]) -> list:
             if isinstance(turn_items, list):
                 items.extend(turn_items)
     return items
+
+
+def _turns_from_page(page: Any) -> list:
+    """Normalize thread/turns/list or initialTurnsPage payloads to a turn list."""
+    if isinstance(page, list):
+        return page
+    if not isinstance(page, dict):
+        return []
+    for key in ("data", "turns", "items"):
+        value = page.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _items_from_turns(turns: list) -> list:
+    items: list = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        turn_items = turn.get("items")
+        if isinstance(turn_items, list):
+            items.extend(turn_items)
+    return items
+
+
+def _active_turn_from_turns(turns: list) -> Optional[Dict[str, Any]]:
+    for turn in reversed(turns):
+        if not isinstance(turn, dict):
+            continue
+        status = str(turn.get("status") or "").lower()
+        if status in {"inprogress", "in_progress", "active", "running"}:
+            return turn
+    return None
+
+
+def _active_turn_from_read_result(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the in-progress turn from thread/read, if any."""
+    if not isinstance(result, dict):
+        return None
+    thread = _thread_from_result(result)
+    turns = thread.get("turns") or result.get("turns") or []
+    if not isinstance(turns, list):
+        return None
+    return _active_turn_from_turns(turns)
+
+
+async def _resume_thread_history(
+    manager: "CodexChatManager",
+    *,
+    thread_id: str,
+    cwd: Optional[str],
+) -> tuple[Dict[str, Any], list, Optional[Dict[str, Any]]]:
+    """Resume a thread without hydrating the full rollout in one giant payload.
+
+    Attachment-heavy threads (zip/html/images) hang Codex when resume/read
+    returns every turn inline. Prefer excludeTurns + paginated turns/list.
+    """
+    resume_params: Dict[str, Any] = {"threadId": thread_id, "excludeTurns": True}
+    if cwd:
+        resume_params["cwd"] = cwd
+
+    resume_result: Dict[str, Any] = {}
+    try:
+        resume_result = await manager.bridge.call(
+            "thread/resume", resume_params, timeout=120.0
+        )
+    except CodexAppServerError as exc:
+        # Older Codex builds may not know excludeTurns — fall back carefully.
+        message = str(exc).lower()
+        if "excludeturns" in message or "unknown" in message or "invalid" in message:
+            legacy = {"threadId": thread_id}
+            if cwd:
+                legacy["cwd"] = cwd
+            resume_result = await manager.bridge.call(
+                "thread/resume", legacy, timeout=180.0
+            )
+            thread = _thread_from_result(resume_result)
+            turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+            if turns:
+                return resume_result, _items_from_turns(turns), _active_turn_from_turns(turns)
+        else:
+            raise
+
+    # Newer servers may embed a first page on resume.
+    page = resume_result.get("initialTurnsPage") if isinstance(resume_result, dict) else None
+    turns = _turns_from_page(page)
+    if turns:
+        return resume_result, _items_from_turns(turns), _active_turn_from_turns(turns)
+
+    try:
+        turns_page = await manager.bridge.call(
+            "thread/turns/list",
+            {
+                "threadId": thread_id,
+                "limit": 80,
+                "sortDirection": "asc",
+            },
+            timeout=120.0,
+        )
+        turns = _turns_from_page(turns_page)
+        return resume_result, _items_from_turns(turns), _active_turn_from_turns(turns)
+    except (CodexAppServerError, asyncio.TimeoutError):
+        LOGGER.debug("thread/turns/list unavailable; trying lightweight thread/read", exc_info=True)
+
+    # Avoid includeTurns:true — attachment-heavy rollouts hang Codex app-server.
+    try:
+        read_result = await manager.bridge.call(
+            "thread/read",
+            {"threadId": thread_id, "excludeTurns": True},
+            timeout=30.0,
+        )
+        page = read_result.get("initialTurnsPage") if isinstance(read_result, dict) else None
+        turns = _turns_from_page(page)
+        if turns:
+            return resume_result, _items_from_turns(turns), _active_turn_from_turns(turns)
+        thread = _thread_from_result(read_result)
+        inline = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+        if inline:
+            return resume_result, _items_from_turns(inline), _active_turn_from_turns(inline)
+    except (CodexAppServerError, asyncio.TimeoutError):
+        LOGGER.warning(
+            "Could not load history for thread %s after resume; returning empty items",
+            thread_id,
+            exc_info=True,
+        )
+    return resume_result, [], None
 
 
 def _turn_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -426,25 +572,24 @@ class CodexThreadResumeHandler(CodexAsyncHandler):
         manager = _get_manager(self)
         await manager.ensure_started()
 
-        resume_params: Dict[str, Any] = {"threadId": thread_id}
-        if cwd:
-            resume_params["cwd"] = cwd
-        await manager.bridge.call("thread/resume", resume_params)
-
-        read_result = await manager.bridge.call(
-            "thread/read",
-            {"threadId": thread_id, "includeTurns": True},
-        )
-        items = _items_from_read_result(read_result)
-
-        if cwd and project_id:
+        # thread/resume can emit notifications before its RPC response. Route
+        # those notifications to the requesting project from the outset.
+        if project_id:
             manager.record_thread(thread_id, cwd, project_id)
+
+        resume_result, items, active_turn = await _resume_thread_history(
+            manager, thread_id=thread_id, cwd=cwd
+        )
+        thread = _thread_from_result(resume_result)
 
         payload = {
             "event": "codex_thread_resumed",
             "threadId": thread_id,
+            "thread": thread,
             "items": items,
         }
+        if active_turn:
+            payload["activeTurn"] = active_turn
         if project_id:
             payload["project_id"] = project_id
         return payload
@@ -471,6 +616,14 @@ class CodexTurnStartHandler(CodexAsyncHandler):
         manager = _get_manager(self)
         await manager.ensure_started()
 
+        project_id = _project_id(message)
+        cwd = message.get("cwd")
+        # Codex may emit turn/started, retry, or terminal error notifications
+        # before the turn/start RPC response. Establish routing before the call
+        # so the browser cannot miss the event that clears its streaming state.
+        if project_id:
+            manager.record_thread(thread_id, cwd, project_id)
+
         params = {
             "threadId": thread_id,
             "input": _build_turn_input(text or "", attachments),
@@ -484,7 +637,6 @@ class CodexTurnStartHandler(CodexAsyncHandler):
             params["summary"] = message["summary"]
 
         result = await manager.bridge.call("turn/start", params)
-        project_id = _project_id(message)
 
         payload = {
             "event": "codex_turn_started",

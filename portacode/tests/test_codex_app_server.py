@@ -119,6 +119,21 @@ async def test_spawn_injects_openai_api_key(tmp_path, monkeypatch):
     env_file.write_text("OPENAI_API_KEY=portacode-local\n", encoding="utf-8")
     monkeypatch.setattr("portacode.codex_prepare.CODEX_ENV_PATH", env_file)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_default_runtime_user",
+        lambda message=None: "bishoy",
+    )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_runtime_user_home",
+        lambda message=None: str(home),
+    )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.should_switch_user",
+        lambda user: True,
+    )
+    monkeypatch.setattr("portacode.codex_prepare.ensure_codex_home", lambda: home / ".codex")
 
     proc = FakeProcess([{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "v2"}}])
     bridge = CodexAppServer(_process_factory=_factory_for(proc))
@@ -126,6 +141,60 @@ async def test_spawn_injects_openai_api_key(tmp_path, monkeypatch):
 
     env = getattr(proc, "spawn_kwargs", {}).get("env") or {}
     assert env.get("OPENAI_API_KEY") == "portacode-local"
+    assert env.get("HOME") == str(home)
+    assert env.get("USER") == "bishoy"
+    assert env.get("CODEX_HOME") == str(home / ".codex")
+    assert getattr(proc, "spawn_kwargs", {}).get("cwd") == str(home)
+    # factory receives argv as *args before stdout/stdin kwargs
+    await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_spawn_runs_as_runtime_user(tmp_path, monkeypatch):
+    env_file = tmp_path / "codex.env"
+    env_file.write_text("OPENAI_API_KEY=portacode-local\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr("portacode.codex_prepare.CODEX_ENV_PATH", env_file)
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_default_runtime_user",
+        lambda message=None: "bishoy",
+    )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_runtime_user_home",
+        lambda message=None: str(home),
+    )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.should_switch_user",
+        lambda user: True,
+    )
+    def _which(name: str):
+        if name == "runuser":
+            return "/usr/sbin/runuser"
+        if name in {"codex", "codex.cmd"}:
+            return "/usr/bin/codex"
+        return None
+
+    monkeypatch.setattr("portacode.connection.handlers.runtime_user.shutil.which", _which)
+    monkeypatch.setattr("portacode.connection.codex_app_server.shutil.which", _which)
+    monkeypatch.setattr("portacode.codex_prepare.ensure_codex_home", lambda: home / ".codex")
+
+    seen: list[tuple] = []
+    seen_kwargs: list[dict] = []
+
+    async def factory(*args, **kwargs):
+        seen.append(args)
+        seen_kwargs.append(kwargs)
+        proc = FakeProcess([{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "v2"}}])
+        proc.spawn_kwargs = kwargs
+        return proc
+
+    bridge = CodexAppServer(_process_factory=factory)
+    await bridge.start()
+    assert seen
+    assert seen[0][:5] == ("/usr/sbin/runuser", "-u", "bishoy", "--preserve-environment", "--")
+    assert "codex" in seen[0]
+    assert seen_kwargs[0].get("cwd") == str(home)
     await bridge.stop()
 
 
