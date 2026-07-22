@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import mimetypes
 from pathlib import Path
@@ -13,6 +14,11 @@ from portacode.connection.codex_app_server import CodexAppServer, CodexAppServer
 from portacode.connection.handlers.base import AsyncHandler
 
 LOGGER = logging.getLogger(__name__)
+MAX_UI_COMMAND_OUTPUT_BYTES = 256 * 1024
+MAX_LIVE_TEXT_BYTES = 512 * 1024
+MAX_LIVE_ITEMS_PER_THREAD = 64
+MAX_LIVE_SNAPSHOT_BYTES = 4 * 1024 * 1024
+MAX_TRACKED_LIVE_THREADS = 64
 
 _IMAGE_SUFFIXES = {
     ".png",
@@ -121,6 +127,9 @@ class CodexChatManager:
         self._cwd_project: Dict[str, str] = {}
         self._thread_active_turn: Dict[str, str] = {}
         self._thread_sessions: Dict[str, set[str]] = {}
+        # Materialized in-progress items live with the device agent, not a
+        # browser websocket. New/reconnected tabs receive these on resume.
+        self._thread_live_items: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Survives page reloads via codex_status so the IDE can restore UI.
         self._prepare_running = False
         self._prepare_step: Optional[str] = None
@@ -174,8 +183,16 @@ class CodexChatManager:
         turn_id = params.get("turnId") or turn.get("id")
         if thread_id and method == "turn/started" and turn_id:
             self._thread_active_turn[str(thread_id)] = str(turn_id)
+            self._thread_live_items[str(thread_id)] = {}
+            while len(self._thread_live_items) > MAX_TRACKED_LIVE_THREADS:
+                oldest = next(iter(self._thread_live_items))
+                if oldest == str(thread_id) and len(self._thread_live_items) > 1:
+                    oldest = next(key for key in self._thread_live_items if key != str(thread_id))
+                self._thread_live_items.pop(oldest, None)
         elif thread_id and method == "turn/completed":
             self._thread_active_turn.pop(str(thread_id), None)
+        if thread_id:
+            params = self._materialize_and_bound_notification(str(thread_id), method, params)
         project_id = self._resolve_project_id(params)
         if not project_id:
             # Unresolved project_id would fan out to every open project tab.
@@ -194,6 +211,98 @@ class CodexChatManager:
             project_id=project_id,
             explicit_sessions=list(self._thread_sessions.get(str(thread_id), set())) if thread_id else None,
         )
+
+    @staticmethod
+    def _bounded_text(value: str, limit: int) -> str:
+        raw = value.encode("utf-8")
+        if len(raw) <= limit:
+            return value
+        marker = "\n[Portacode truncated oversized live output.]\n"
+        budget = max(limit - len(marker.encode("utf-8")), 0)
+        return raw[:budget].decode("utf-8", errors="ignore") + marker
+
+    def _materialize_and_bound_notification(
+        self, thread_id: str, method: str, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Bound UI command output and retain a reconnectable live snapshot."""
+        params = copy.deepcopy(params)
+        raw = params.get("item") if isinstance(params.get("item"), dict) else params
+        item_id = raw.get("id") or params.get("itemId") or params.get("id")
+        if not item_id or not method.startswith("item/"):
+            return params
+
+        item_id = str(item_id)
+        items = self._thread_live_items.setdefault(thread_id, {})
+        item = items.setdefault(item_id, {"id": item_id})
+        incoming_type = raw.get("type")
+        if incoming_type:
+            item["type"] = incoming_type
+        elif "commandExecution" in method:
+            item["type"] = "commandExecution"
+            item.setdefault("role", "tool")
+        elif "reasoning" in method:
+            item["type"] = "reasoning"
+            item.setdefault("role", "reasoning")
+        elif "agentMessage" in method or "message/delta" in method:
+            item["type"] = "agentMessage"
+            item.setdefault("role", "assistant")
+        for key in ("role", "command", "status"):
+            if raw.get(key) is not None:
+                item[key] = copy.deepcopy(raw[key])
+
+        is_command = "commandExecution" in method or item.get("type") == "commandExecution"
+        text_key = None
+        incoming = ""
+        if method == "item/commandExecution/outputDelta":
+            text_key, incoming = "output", raw.get("delta") or raw.get("output") or ""
+        elif method in {"item/agentMessage/delta", "item/message/delta"}:
+            text_key, incoming = "text", raw.get("delta") or raw.get("text") or ""
+        elif method in {"item/reasoning/textDelta", "item/reasoning/summaryTextDelta"}:
+            text_key, incoming = "reasoning", raw.get("delta") or raw.get("text") or ""
+        elif method in {"item/started", "item/completed"}:
+            if is_command:
+                text_key = "output"
+                incoming = raw.get("output") or (raw.get("commandExecution") or {}).get("output") or raw.get("aggregatedOutput") or ""
+            else:
+                incoming = raw.get("text") or ""
+                text_key = "text" if incoming else None
+
+        if text_key and isinstance(incoming, str):
+            limit = MAX_UI_COMMAND_OUTPUT_BYTES if text_key == "output" else MAX_LIVE_TEXT_BYTES
+            if method in {"item/started", "item/completed"}:
+                combined = incoming
+            else:
+                combined = str(item.get(text_key) or "") + incoming
+            bounded = self._bounded_text(combined, limit)
+            item[text_key] = bounded
+            # Forward only the portion that fits for deltas; completed items
+            # carry a bounded aggregate so the browser cannot restore the blob.
+            if method.endswith("/outputDelta") or method.endswith("/delta") or method.endswith("textDelta") or method.endswith("summaryTextDelta"):
+                previous = combined[:-len(incoming)] if incoming else combined
+                allowed = bounded[len(previous):] if bounded.startswith(previous) else ""
+                if "delta" in raw:
+                    raw["delta"] = allowed
+                elif text_key in raw:
+                    raw[text_key] = allowed
+            elif text_key == "output":
+                raw["output"] = bounded
+                raw.pop("aggregatedOutput", None)
+                if isinstance(raw.get("commandExecution"), dict):
+                    raw["commandExecution"]["output"] = bounded
+        while len(items) > MAX_LIVE_ITEMS_PER_THREAD:
+            oldest = next(iter(items))
+            if oldest == item_id and len(items) > 1:
+                oldest = next(key for key in items if key != item_id)
+            items.pop(oldest, None)
+        while sum(len(str(value).encode("utf-8")) for value in items.values()) > MAX_LIVE_SNAPSHOT_BYTES and len(items) > 1:
+            oldest = next(iter(items))
+            if oldest == item_id:
+                oldest = next(key for key in items if key != item_id)
+            items.pop(oldest, None)
+        return params
+
+    def live_items(self, thread_id: str) -> List[Dict[str, Any]]:
+        return copy.deepcopy(list(self._thread_live_items.get(str(thread_id), {}).values()))
 
     def _remember_thread_from_params(self, params: Dict[str, Any]) -> None:
         """Opportunistically map threadId → project when cwd is already known."""
@@ -356,6 +465,7 @@ async def _resume_thread_history(
     *,
     thread_id: str,
     cwd: Optional[str],
+    already_active: bool = False,
 ) -> tuple[Dict[str, Any], list, Optional[Dict[str, Any]]]:
     """Resume a thread without hydrating the full rollout in one giant payload.
 
@@ -366,11 +476,12 @@ async def _resume_thread_history(
     if cwd:
         resume_params["cwd"] = cwd
 
-    resume_result: Dict[str, Any] = {}
+    resume_result: Dict[str, Any] = {"thread": {"id": thread_id}}
     try:
-        resume_result = await manager.bridge.call(
-            "thread/resume", resume_params, timeout=120.0
-        )
+        if not already_active:
+            resume_result = await manager.bridge.call(
+                "thread/resume", resume_params, timeout=120.0
+            )
     except CodexAppServerError as exc:
         # Older Codex builds may not know excludeTurns — fall back carefully.
         message = str(exc).lower()
@@ -639,15 +750,23 @@ class CodexThreadResumeHandler(CodexAsyncHandler):
         manager.subscribe_thread(thread_id, message.get("source_client_session"))
 
         resume_result, items, active_turn = await _resume_thread_history(
-            manager, thread_id=thread_id, cwd=cwd
+            manager,
+            thread_id=thread_id,
+            cwd=cwd,
+            already_active=str(thread_id) in manager._thread_active_turn,
         )
         thread = _thread_from_result(resume_result)
+        if not active_turn:
+            known_turn_id = manager._thread_active_turn.get(str(thread_id))
+            if known_turn_id:
+                active_turn = {"id": known_turn_id, "status": "inProgress"}
 
         payload = {
             "event": "codex_thread_resumed",
             "threadId": thread_id,
             "thread": thread,
             "items": items,
+            "liveItems": manager.live_items(thread_id),
         }
         if active_turn:
             payload["activeTurn"] = active_turn

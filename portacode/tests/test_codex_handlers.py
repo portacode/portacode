@@ -404,6 +404,71 @@ async def test_resumed_thread_events_include_new_tab_before_session_registry_upd
 
 
 @pytest.mark.asyncio
+async def test_live_stream_is_materialized_and_replayed_to_new_tab():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    await manager._on_notification("turn/started", {"threadId": "th-1", "turnId": "turn-live"})
+    await manager._on_notification(
+        "item/agentMessage/delta",
+        {"threadId": "th-1", "itemId": "msg-live", "delta": "partial "},
+    )
+    await manager._on_notification(
+        "item/agentMessage/delta",
+        {"threadId": "th-1", "itemId": "msg-live", "delta": "answer"},
+    )
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexThreadResumeHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_thread_resume",
+            "project_id": "p-1",
+            "threadId": "th-1",
+            "cwd": "/tmp/proj",
+            "source_client_session": "new-tab",
+        }
+    )
+
+    payload = channel.sent[-1]
+    assert payload["activeTurn"]["id"] == "turn-live"
+    assert payload["liveItems"] == [{
+        "id": "msg-live",
+        "type": "agentMessage",
+        "role": "assistant",
+        "text": "partial answer",
+    }]
+    # Opening the same active thread must not call thread/resume and disturb it.
+    assert not any(method == "thread/resume" for method, _ in manager.bridge.calls)
+
+
+@pytest.mark.asyncio
+async def test_command_output_is_bounded_before_forwarding_and_snapshotting():
+    from portacode.connection.handlers.codex_handlers import MAX_UI_COMMAND_OUTPUT_BYTES
+
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    huge = "z" * (MAX_UI_COMMAND_OUTPUT_BYTES + 10_000)
+
+    await manager._on_notification(
+        "item/completed",
+        {
+            "threadId": "th-1",
+            "item": {"id": "cmd-1", "type": "commandExecution", "output": huge},
+        },
+    )
+
+    forwarded = channel.sent[-1]["notification"]["params"]["item"]["output"]
+    assert len(forwarded.encode()) <= MAX_UI_COMMAND_OUTPUT_BYTES
+    assert "Portacode truncated" in forwarded
+    assert manager.live_items("th-1")[0]["output"] == forwarded
+
+
+@pytest.mark.asyncio
 async def test_notification_without_project_mapping_is_dropped():
     channel = DummyControlChannel()
     context = _context()

@@ -12,7 +12,36 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from portacode.codex_loopback_proxy import CodexLoopbackProxy
+from portacode.codex_loopback_proxy import (
+    MAX_TOOL_OUTPUT_BYTES,
+    CodexLoopbackProxy,
+    sanitize_responses_request,
+)
+
+
+def test_sanitize_responses_request_crops_only_tool_results():
+    huge = "x" * (MAX_TOOL_OUTPUT_BYTES + 50_000)
+    body = json.dumps({
+        "input": [
+            {"type": "function_call_output", "call_id": "call-1", "output": huge},
+            {"type": "message", "role": "user", "content": huge},
+        ]
+    }).encode()
+
+    sanitized, changed, omitted = sanitize_responses_request(body)
+    payload = json.loads(sanitized)
+
+    assert changed == 1
+    assert omitted > 0
+    assert len(payload["input"][0]["output"].encode()) <= MAX_TOOL_OUTPUT_BYTES
+    assert "Portacode truncated" in payload["input"][0]["output"]
+    assert payload["input"][0]["call_id"] == "call-1"
+    assert payload["input"][1]["content"] == huge
+
+
+def test_sanitize_responses_request_leaves_unknown_shapes_byte_identical():
+    body = b'{"input":[{"type":"future_output","output":"abc"}]}'
+    assert sanitize_responses_request(body) == (body, 0, 0)
 from portacode.keypair import KeyPair
 
 

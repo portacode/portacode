@@ -30,11 +30,87 @@ CODEX_LOOPBACK_HOST = "127.0.0.1"
 CODEX_LOOPBACK_PORT = 61789
 DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
+MAX_TOOL_OUTPUT_BYTES = 256 * 1024
 ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses"}
 MAX_CONCURRENT_UPSTREAM = 8
 
 # Streaming read can idle between SSE chunks; connect/write stay bounded.
 _UPSTREAM_TIMEOUT = httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=20.0)
+
+_TOOL_OUTPUT_TYPES = frozenset(
+    {
+        "function_call_output",
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "shell_call_output",
+        "command_execution_output",
+    }
+)
+
+
+def _truncate_utf8(value: str, limit: int = MAX_TOOL_OUTPUT_BYTES) -> tuple[str, int]:
+    """Keep useful head/tail context while enforcing a UTF-8 byte ceiling."""
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value, 0
+    marker_budget = 160
+    content_budget = max(limit - marker_budget, 0)
+    head_size = content_budget * 3 // 4
+    tail_size = content_budget - head_size
+    head = raw[:head_size].decode("utf-8", errors="ignore")
+    tail = raw[-tail_size:].decode("utf-8", errors="ignore") if tail_size else ""
+    omitted = len(raw) - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
+    marker = (
+        f"\n\n[Portacode truncated {omitted} bytes of oversized tool output. "
+        "Narrow the command or inspect a specific file.]\n\n"
+    )
+    result = f"{head}{marker}{tail}"
+    # The dynamic marker can exceed marker_budget by a few bytes.
+    while len(result.encode("utf-8")) > limit and head:
+        head = head[:-128]
+        result = f"{head}{marker}{tail}"
+    return result, omitted
+
+
+def sanitize_responses_request(body: bytes) -> tuple[bytes, int, int]:
+    """Crop only recognized Responses API tool-result fields.
+
+    Unknown JSON shapes pass through untouched so Codex/API upgrades cannot be
+    silently corrupted. Returns (body, fields_changed, bytes_omitted).
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body, 0, 0
+    if not isinstance(payload, dict) or not isinstance(payload.get("input"), list):
+        return body, 0, 0
+
+    changed = 0
+    omitted_total = 0
+    for item in payload["input"]:
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_OUTPUT_TYPES:
+            continue
+        for key in ("output", "content"):
+            value = item.get(key)
+            if isinstance(value, str):
+                cropped, omitted = _truncate_utf8(value)
+                if omitted:
+                    item[key] = cropped
+                    changed += 1
+                    omitted_total += omitted
+            elif isinstance(value, list):
+                for part in value:
+                    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                        continue
+                    cropped, omitted = _truncate_utf8(part["text"])
+                    if omitted:
+                        part["text"] = cropped
+                        changed += 1
+                        omitted_total += omitted
+    if not changed:
+        return body, 0, 0
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, omitted_total
 
 FORWARD_RESPONSE_HEADERS = frozenset(
     {
@@ -366,6 +442,15 @@ class CodexLoopbackProxy:
         *,
         req_id: str,
     ) -> None:
+        if method == "POST" and path == "/v1/responses" and body:
+            body, cropped_fields, omitted_bytes = sanitize_responses_request(body)
+            if cropped_fields:
+                LOGGER.warning(
+                    "codex-proxy[%s] cropped %s oversized tool result field(s), omitting %s bytes",
+                    req_id,
+                    cropped_fields,
+                    omitted_bytes,
+                )
         headers = self._signature_headers(method, path, body)
         content_type = request_headers.get("content-type")
         if content_type:

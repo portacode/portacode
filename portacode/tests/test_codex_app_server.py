@@ -7,7 +7,11 @@ import json
 
 import pytest
 
-from portacode.connection.codex_app_server import CodexAppServer, CodexAppServerError
+from portacode.connection.codex_app_server import (
+    CODEX_STDIO_MESSAGE_LIMIT,
+    CodexAppServer,
+    CodexAppServerError,
+)
 
 
 class FakeWriteStream:
@@ -110,6 +114,7 @@ async def test_initialize_handshake():
 
     assert await bridge.healthy() is True
     assert any(b'"method":"initialize"' in chunk for chunk in proc.stdin.written)
+    assert proc.spawn_kwargs["limit"] == CODEX_STDIO_MESSAGE_LIMIT
     await bridge.stop()
 
 

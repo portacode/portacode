@@ -14,6 +14,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CODEX_COMMAND = ["codex", "app-server", "--listen", "stdio://"]
+# JSON-RPC is newline framed. Leave bounded headroom for one notification so
+# Portacode can crop it instead of asyncio's 64 KiB default killing the reader.
+CODEX_STDIO_MESSAGE_LIMIT = 4 * 1024 * 1024
 
 
 class CodexAppServerError(RuntimeError):
@@ -149,6 +152,7 @@ class CodexAppServer:
                 "stdout": asyncio.subprocess.PIPE,
                 "stderr": asyncio.subprocess.PIPE,
                 "env": child_env,
+                "limit": CODEX_STDIO_MESSAGE_LIMIT,
             }
             if spawn_cwd:
                 spawn_kwargs["cwd"] = spawn_cwd
@@ -292,7 +296,18 @@ class CodexAppServer:
         assert self._proc is not None and self._proc.stdout is not None
         try:
             while True:
-                line = await self._proc.stdout.readline()
+                try:
+                    line = await self._proc.stdout.readline()
+                except ValueError as exc:
+                    # asyncio converts an over-limit newline frame to
+                    # ValueError. Drop that one frame but keep consuming future
+                    # notifications; the app-server process is still healthy.
+                    LOGGER.error(
+                        "Dropping Codex app-server JSON-RPC frame larger than %s bytes: %s",
+                        CODEX_STDIO_MESSAGE_LIMIT,
+                        exc,
+                    )
+                    continue
                 if not line:
                     break
                 line = line.decode("utf-8", errors="replace").strip()
@@ -309,8 +324,8 @@ class CodexAppServer:
         except Exception:
             LOGGER.exception("codex app-server read loop failed")
         finally:
-            # Process exited; schedule a restart if not closed.
-            if not self._closed:
+            # A reader/protocol failure is not necessarily a process exit.
+            if not self._closed and self._proc is not None and self._proc.returncode is not None:
                 asyncio.create_task(self._on_reader_exit())
 
     async def _stderr_loop(self) -> None:
