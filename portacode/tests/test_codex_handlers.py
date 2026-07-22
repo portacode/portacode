@@ -99,6 +99,8 @@ async def test_codex_status_ready():
     assert payload["project_id"] == "p-1"
     assert payload["client_sessions"] == ["sess-1"]
     assert "model_select" in payload.get("features", [])
+    assert "attach_files" in payload.get("features", [])
+    assert payload.get("attach_dir")
 
 
 @pytest.mark.asyncio
@@ -175,6 +177,77 @@ async def test_codex_turn_start():
     assert payload["event"] == "codex_turn_started"
     assert payload["threadId"] == "th-1"
     assert manager.bridge.calls[-1] == ("turn/start", {"threadId": "th-1", "input": [{"type": "text", "text": "hi"}]})
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_with_image_attachment():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_turn_start",
+            "project_id": "p-1",
+            "threadId": "th-1",
+            "text": "look",
+            "attachments": [
+                {
+                    "path": "/home/u/.codex/tmp/portacode-attach/a/photo.png",
+                    "name": "photo.png",
+                    "mime_type": "image/png",
+                    "kind": "image",
+                }
+            ],
+        },
+        reply_channel="rc-1",
+    )
+
+    assert manager.bridge.calls[-1] == (
+        "turn/start",
+        {
+            "threadId": "th-1",
+            "input": [
+                {"type": "text", "text": "look"},
+                {"type": "localImage", "path": "/home/u/.codex/tmp/portacode-attach/a/photo.png"},
+            ],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_with_non_image_attachment_mentions_path():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle(
+        {
+            "cmd": "codex_turn_start",
+            "project_id": "p-1",
+            "threadId": "th-1",
+            "text": "",
+            "attachments": [
+                {
+                    "path": "/tmp/notes.pdf",
+                    "name": "notes.pdf",
+                    "mime_type": "application/pdf",
+                }
+            ],
+        },
+        reply_channel="rc-1",
+    )
+
+    turn_input = manager.bridge.calls[-1][1]["input"]
+    assert turn_input[0]["type"] == "text"
+    assert "/tmp/notes.pdf" in turn_input[0]["text"]
+    assert all(item.get("type") != "localImage" for item in turn_input)
 
 
 @pytest.mark.asyncio

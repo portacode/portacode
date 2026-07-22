@@ -103,6 +103,8 @@ class FileUploadHandler(SyncHandler):
                         "transfer_id": message.get("transfer_id"),
                         "chunked": True,
                         "chunk_received": True,
+                        "chunk_index": message.get("chunk_index"),
+                        "chunk_count": message.get("chunk_count"),
                         "success": True,
                         "complete": False,
                     }
@@ -113,8 +115,11 @@ class FileUploadHandler(SyncHandler):
             overwrite = bool(message.get("overwrite", False))
             file_path = Path(path)
             parent_dir = file_path.parent
-            if not parent_dir.exists():
-                raise ValueError(f"Parent directory does not exist: {parent_dir}")
+            # Create parents when missing (Codex chat attach + nested uploads).
+            try:
+                parent_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValueError(f"Cannot create parent directory {parent_dir}: {exc}") from exc
             if not parent_dir.is_dir():
                 raise ValueError(f"Parent path is not a directory: {parent_dir}")
             if file_path.exists() and not overwrite:

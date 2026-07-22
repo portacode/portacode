@@ -4,13 +4,80 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+import mimetypes
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from portacode.codex_usage_limit import attach_resets_at_to_params
 from portacode.connection.codex_app_server import CodexAppServer, CodexAppServerError
 from portacode.connection.handlers.base import AsyncHandler
 
 LOGGER = logging.getLogger(__name__)
+
+_IMAGE_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".heic",
+    ".heif",
+}
+
+
+def _is_image_attachment(path: str, mime_type: Optional[str] = None, kind: Optional[str] = None) -> bool:
+    if kind in {"image", "localImage"}:
+        return True
+    if mime_type and str(mime_type).lower().startswith("image/"):
+        return True
+    suffix = Path(path).suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        return True
+    guessed, _ = mimetypes.guess_type(path)
+    return bool(guessed and guessed.startswith("image/"))
+
+
+def _build_turn_input(
+    text: str,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Build Codex turn/start input items from text + staged device paths."""
+    attachments = attachments or []
+    text = (text or "").strip()
+    input_items: List[Dict[str, Any]] = []
+    path_mentions: List[str] = []
+
+    for raw in attachments:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            continue
+        name = str(raw.get("name") or Path(path).name)
+        mime = raw.get("mime_type") or raw.get("mimeType")
+        kind = raw.get("kind")
+        if _is_image_attachment(path, mime_type=mime, kind=kind):
+            input_items.append({"type": "localImage", "path": path})
+        else:
+            path_mentions.append(f"{name}: {path}")
+
+    body = text
+    if path_mentions:
+        mention_block = "Attached files:\n" + "\n".join(path_mentions)
+        body = f"{body}\n\n{mention_block}".strip() if body else mention_block
+
+    if body:
+        input_items.insert(0, {"type": "text", "text": body})
+    elif not input_items:
+        raise ValueError("text or attachments are required")
+    elif not any(item.get("type") == "text" for item in input_items):
+        # Images-only turn still needs a short text cue for some Codex builds.
+        input_items.insert(0, {"type": "text", "text": "Please review the attached image(s)."})
+
+    return input_items
 
 
 class _SessionAwareSender:
@@ -233,6 +300,12 @@ class CodexStatusHandler(CodexAsyncHandler):
             manager._prepare_error = None
             manager._prepare_step = None
 
+        attach_dir = str(Path.home() / ".codex" / "tmp" / "portacode-attach")
+        try:
+            Path(attach_dir).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            LOGGER.debug("Could not ensure Codex attach dir %s", attach_dir, exc_info=True)
+
         payload = {
             "event": "codex_status",
             "installed": installed,
@@ -240,8 +313,9 @@ class CodexStatusHandler(CodexAsyncHandler):
             "ready": ready,
             "prepare_running": bool(manager._prepare_running),
             # Capability flags for the browser UI. Absent on older Portacode
-            # CLIs — chat must hide model selection rather than error.
-            "features": ["model_select"],
+            # CLIs — chat must hide new controls rather than error.
+            "features": ["model_select", "attach_files"],
+            "attach_dir": attach_dir,
         }
         if error_message:
             payload["error_message"] = error_message
@@ -386,17 +460,20 @@ class CodexTurnStartHandler(CodexAsyncHandler):
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         thread_id = message.get("threadId")
         text = message.get("text")
+        attachments = message.get("attachments")
         if not thread_id:
             raise ValueError("threadId is required")
-        if text is None or text == "":
-            raise ValueError("text is required")
+        if not isinstance(attachments, list):
+            attachments = []
+        if (text is None or text == "") and not attachments:
+            raise ValueError("text or attachments are required")
 
         manager = _get_manager(self)
         await manager.ensure_started()
 
         params = {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": text}],
+            "input": _build_turn_input(text or "", attachments),
         }
         # Optional model / reasoning controls (Codex Desktop-style overrides).
         if message.get("model"):
