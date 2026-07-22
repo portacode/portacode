@@ -5,6 +5,8 @@ including status checking, diff generation, file content retrieval, and Git comm
 like staging, unstaging, and reverting files.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
