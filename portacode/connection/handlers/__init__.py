@@ -25,6 +25,7 @@ from .file_handlers import (
     FileCreateHandler,
     FolderCreateHandler,
     FileRenameHandler,
+    FileMoveCopyHandler,
     FileSearchHandler,
     ContentRequestHandler,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "FileCreateHandler",
     "FolderCreateHandler",
     "FileRenameHandler",
+    "FileMoveCopyHandler",
     "FileSearchHandler",
     "ContentRequestHandler",
     "FileApplyDiffHandler",

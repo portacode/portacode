@@ -506,6 +506,60 @@ class FileRenameHandler(SyncHandler):
             raise RuntimeError(f"Failed to rename: {e}")
 
 
+class FileMoveCopyHandler(SyncHandler):
+    """Move or copy a file/folder into an existing directory."""
+
+    @property
+    def command_name(self) -> str:
+        return "file_move_copy"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        source_raw = message.get("source_path")
+        destination_raw = message.get("destination_path")
+        operation = message.get("operation", "move")
+        if not source_raw or not destination_raw:
+            raise ValueError("source_path and destination_path are required")
+        if operation not in ("move", "copy"):
+            raise ValueError("operation must be 'move' or 'copy'")
+
+        source = Path(source_raw).resolve()
+        destination_dir = Path(destination_raw).resolve()
+        if not source.exists():
+            raise ValueError(f"Source does not exist: {source_raw}")
+        if not destination_dir.is_dir():
+            raise ValueError(f"Destination is not a directory: {destination_raw}")
+
+        target = destination_dir / source.name
+        if target.exists():
+            raise ValueError(f"An item named '{source.name}' already exists in the destination")
+        if source.parent == destination_dir:
+            raise ValueError("The item is already in that folder")
+        if source.is_dir() and (destination_dir == source or source in destination_dir.parents):
+            raise ValueError("A folder cannot be moved or copied into itself")
+
+        try:
+            if operation == "move":
+                shutil.move(str(source), str(target))
+            elif source.is_dir():
+                shutil.copytree(source, target, copy_function=shutil.copy2)
+            else:
+                shutil.copy2(source, target)
+        except PermissionError as exc:
+            raise RuntimeError(f"Permission denied: {exc}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Failed to {operation}: {exc}") from exc
+
+        return {
+            "event": "file_move_copy_response",
+            "source_path": str(source),
+            "destination_path": str(destination_dir),
+            "target_path": str(target),
+            "operation": operation,
+            "is_directory": target.is_dir(),
+            "success": True,
+        }
+
+
 class FileSearchHandler(SyncHandler):
     """Handler for searching text within files under a root directory."""
 
