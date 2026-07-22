@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -74,12 +75,6 @@ class CodexAppServer:
 
     async def _spawn(self) -> None:
         """Spawn the subprocess and perform the JSON-RPC initialize handshake."""
-        exe = shutil.which(self.command[0]) or self.command[0]
-        if not shutil.which(self.command[0]):
-            raise CodexAppServerError(
-                f"{self.command[0]} not found on PATH. Run `portacode prepare codex` on this device."
-            )
-
         # systemd services do not load shell profile env; merge /etc/portacode/codex.env.
         from portacode.codex_prepare import build_codex_subprocess_env, ensure_codex_home
         from portacode.connection.handlers.runtime_user import (
@@ -93,9 +88,16 @@ class CodexAppServer:
         # (e.g. bishoy), not as the root agent process.
         runtime_user = get_default_runtime_user()
         runtime_home = get_runtime_user_home()
+        exe = self._resolve_command_path(self.command[0], runtime_home)
+        if not exe:
+            raise CodexAppServerError(
+                f"{self.command[0]} not found for runtime user {runtime_user}. "
+                "Run `portacode prepare codex` on this device."
+            )
         child_env["HOME"] = runtime_home
         child_env["USER"] = runtime_user
         child_env["LOGNAME"] = runtime_user
+        self._prepend_executable_directory(child_env, exe)
         try:
             child_env["CODEX_HOME"] = str(ensure_codex_home())
         except Exception:
@@ -123,7 +125,7 @@ class CodexAppServer:
             "no_proxy",
         ]
         spawn_cmd = wrap_argv_for_user(
-            self.command,
+            [exe, *self.command[1:]],
             runtime_user,
             preserve_env_names=preserve,
             login=False,
@@ -415,19 +417,69 @@ class CodexAppServer:
         return self._initialized.is_set()
 
     @staticmethod
-    def get_binary_path() -> Optional[str]:
-        return shutil.which("codex")
+    def get_binary_path(runtime_home: Optional[str] = None) -> Optional[str]:
+        """Find Codex for the service's configured runtime user.
+
+        A systemd agent normally has a deliberately small PATH.  That should
+        not hide a Codex CLI installed by the runtime user through nvm or a
+        local npm prefix, which is common on developer machines.
+        """
+        from portacode.connection.handlers.runtime_user import get_runtime_user_home
+
+        return CodexAppServer._resolve_command_path(
+            "codex", runtime_home or get_runtime_user_home()
+        )
+
+    @staticmethod
+    def _resolve_command_path(command: str, runtime_home: Optional[str] = None) -> Optional[str]:
+        if not command:
+            return None
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+
+        candidate = Path(command).expanduser()
+        if candidate.is_absolute() or candidate.parent != Path("."):
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+            return None
+        if command not in {"codex", "codex.cmd"}:
+            return None
+
+        home = Path(runtime_home or Path.home()).expanduser()
+        candidates = [
+            home / ".local" / "bin" / command,
+            home / ".npm" / "bin" / command,
+        ]
+        nvm_root = home / ".nvm" / "versions" / "node"
+        if nvm_root.is_dir():
+            candidates.extend(sorted(nvm_root.glob("*/bin/" + command), reverse=True))
+        for candidate in candidates:
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        return None
+
+    @staticmethod
+    def _prepend_executable_directory(env: Dict[str, str], executable: str) -> None:
+        """Make the Node interpreter beside an npm launcher available to env."""
+        executable_dir = str(Path(executable).parent)
+        current_path = env.get("PATH") or os.defpath
+        entries = current_path.split(os.pathsep)
+        if executable_dir not in entries:
+            env["PATH"] = os.pathsep.join([executable_dir, current_path])
 
     @staticmethod
     def version() -> Optional[str]:
         import subprocess
 
-        exe = shutil.which("codex")
+        exe = CodexAppServer.get_binary_path()
         if not exe:
             return None
         try:
+            env = dict(os.environ)
+            CodexAppServer._prepend_executable_directory(env, exe)
             result = subprocess.run(
-                [exe, "--version"], capture_output=True, text=True, timeout=10
+                [exe, "--version"], capture_output=True, text=True, timeout=10, env=env
             )
             return result.stdout.strip() or None
         except Exception:

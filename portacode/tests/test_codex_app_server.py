@@ -193,8 +193,37 @@ async def test_spawn_runs_as_runtime_user(tmp_path, monkeypatch):
     await bridge.start()
     assert seen
     assert seen[0][:5] == ("/usr/sbin/runuser", "-u", "bishoy", "--preserve-environment", "--")
-    assert "codex" in seen[0]
+    assert "/usr/bin/codex" in seen[0]
     assert seen_kwargs[0].get("cwd") == str(home)
+    await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_spawn_finds_nvm_codex_when_service_path_does_not(tmp_path, monkeypatch):
+    """A systemd PATH must not hide a runtime user's nvm-installed Codex."""
+    home = tmp_path / "home"
+    codex_bin = home / ".nvm" / "versions" / "node" / "v24.4.1" / "bin"
+    codex_bin.mkdir(parents=True)
+    codex = codex_bin / "codex"
+    codex.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    codex.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_default_runtime_user",
+        lambda message=None: "menas",
+    )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.runtime_user.get_runtime_user_home",
+        lambda message=None: str(home),
+    )
+    monkeypatch.setattr("portacode.codex_prepare.ensure_codex_home", lambda: home / ".codex")
+
+    proc = FakeProcess([{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "v2"}}])
+    bridge = CodexAppServer(_process_factory=_factory_for(proc))
+    await bridge.start()
+
+    assert CodexAppServer.get_binary_path(str(home)) == str(codex)
+    assert proc.spawn_kwargs["env"]["PATH"].split(":")[0] == str(codex_bin)
     await bridge.stop()
 
 
